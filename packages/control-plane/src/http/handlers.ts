@@ -90,11 +90,13 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
           const dbOk = yield* sql`SELECT 1`.pipe(Effect.as(true), Effect.catchAll(() => Effect.succeed(false)));
           const beats = yield* queries.heartbeats().pipe(Effect.catchAll(() => Effect.succeed([])));
           const now = Date.now();
+          const ledger = yield* queries.ledgerCounts().pipe(Effect.catchAll(() => Effect.succeed({ conversations_total: 0, outcomes: {}, guardrails: {} })));
           return {
             ok: dbOk,
             database: dbOk ? ("ok" as const) : ("down" as const),
             agents: beats.map((b) => ({ ...b, online: now - Date.parse(b.last_seen_at) < 30_000 })),
             counters: yield* metrics.snapshot(),
+            ledger,
             turn_decider: cfg.turnDecider,
             demo_mode: cfg.demoMode,
           };

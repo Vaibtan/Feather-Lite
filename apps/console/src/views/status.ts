@@ -9,6 +9,7 @@ export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) 
   clear(root);
   const health = h("div", { class: "grid3" });
   const counters = h("div", { class: "card" });
+  const ledger = h("div", { class: "grid3" });
   const agents = h("div", { class: "card" });
   const seedOut = h("div", { class: "small muted", style: "margin-top:8px" });
 
@@ -28,7 +29,9 @@ export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) 
     health,
     h("h2", {}, "Agent workers"),
     agents,
-    h("h2", {}, "Counters"),
+    h("h2", {}, "Ledger (durable)"),
+    ledger,
+    h("h2", {}, "Process counters (since start)"),
     counters,
     h("h2", {}, "Demo data"),
     h("div", { class: "card" }, h("div", { class: "row" }, seedBtn, resetBtn), h("div", { class: "muted small", style: "margin-top:6px" }, "Seed creates the five demo borrowers and a short call history. Reset wipes conversations, actions and outbox jobs for those borrowers and re-seeds."), seedOut),
@@ -53,6 +56,16 @@ export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) 
         agents.append(
           h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Agent"), h("th", {}, "Status"), h("th", {}, "Last seen"), h("th", {}, "Meta"))), h("tbody", {}, ...s.agents.map((a) => h("tr", {}, h("td", { class: "mono" }, a.agent_name), h("td", {}, h("span", { class: `dot ${a.online ? "on" : "off"}` }), a.online ? "online" : "offline"), h("td", {}, ago(a.last_seen_at)), h("td", { class: "small mono" }, JSON.stringify(a.meta)))))),
         );
+      clear(ledger);
+      const g = s.ledger.guardrails;
+      const caught = (g["TOOL_REJECTED"] ?? 0) + (g["TURN_DECISION_REJECTED"] ?? 0);
+      const kv = (o: Record<string, number>, empty: string) =>
+        Object.keys(o).length ? h("dl", { class: "kv" }, ...Object.entries(o).flatMap(([k, v]) => [h("dt", { class: "mono" }, k), h("dd", {}, String(v))])) : h("div", { class: "muted small" }, empty);
+      ledger.append(
+        h("div", { class: "card" }, h("h3", {}, `Outcomes · ${s.ledger.conversations_total} conversations`), kv(s.ledger.outcomes, "no conversations yet")),
+        h("div", { class: "card" }, h("h3", {}, "Guardrails"), h("div", { style: "font-size:22px;font-weight:600;margin-bottom:6px" }, String(caught), h("span", { class: "muted small", style: "font-weight:400" }, " model suggestions rejected by the state machine")), kv({ TOOL_REJECTED: g["TOOL_REJECTED"] ?? 0, TURN_DECISION_REJECTED: g["TURN_DECISION_REJECTED"] ?? 0, TURN_SUPERSEDED: g["TURN_SUPERSEDED"] ?? 0 }, "")),
+        h("div", { class: "card" }, h("h3", {}, "Volume"), kv({ USER_TURN_FINAL: g["USER_TURN_FINAL"] ?? 0, TOOL_CALLED: g["TOOL_CALLED"] ?? 0, STATE_TRANSITION: g["STATE_TRANSITION"] ?? 0 }, "")),
+      );
       clear(counters);
       counters.append(pre(s.counters));
     } catch (e) {

@@ -1212,6 +1212,25 @@ Each scenario must define:
 
 ## 19. Phased Implementation Plan
 
+> **Status note (2026-08-16).** The phase statuses below were written for the Python v1
+> implementation (`backend/`) and were audited in
+> `docs/reviews/2026-08-16-plan-vs-implementation-review.md` (several "Complete" claims were
+> found to be Partial: LLM not wired, no real voice call, protected context leaking into the
+> "prompt", override matcher not covering the spec's phrasings). The Python code is now the
+> **reference implementation**; the shipped system is **v2 in TypeScript + Effect**, tracked in
+> `docs/plans/PROGRESS.md` and summarised in the README. Mapping of v2 to this plan:
+>
+> | SPEC phase | v2 status | Where |
+> |---|---|---|
+> | 1 Skeleton & schema | Complete | `packages/control-plane/src/db` (11 tables + `conversation_turns`, `agent_heartbeats`), migrations on boot, seed via `POST /api/demo/seed` |
+> | 2 State machine & orchestrator | Complete | `packages/domain` (92 tests), `Orchestrator.processTurn` three-phase turn; prompt builder actually used by the OpenAI decider; leak test |
+> | 3 Durable eventing & outcome writes | Complete | `appendEvent` under row lock, tool idempotency by `tool_call_id`, turn idempotency by `turn_id`, replay endpoint/view |
+> | 4 Workflow execution & scheduled actions | Complete | `Workflow.startCall` (pre-call policy, workflow reuse, retry supersede), `Scheduling` worker with TCPA reschedule |
+> | 5 Voice runtime & call control | Complete for browser WebRTC; **Partial** for PSTN (SIP path wired, no trunk verified) | `apps/voice-worker`, `POST /api/voice/sessions`, AMD/voicemail/no-input/barge-in/hangup signals; a real automated voice call verified |
+> | 6 Admin APIs & scenario runner | Complete | 18-route HttpApi with OpenAPI, 20 scenarios (the 12 mandatory + 8 hardening) via API and vitest |
+> | 7 UI & observability | Complete for UI, tracing, counters; **Partial** for latency panel | `apps/console` (5 views), Langfuse tracing layer, `/api/system/status` durable ledger counts |
+> | 8 Hardening | **Partial** | timeouts/retries on OpenAI + LiveKit bootstrap, rate limits/daily cap, negative-path scenarios (decider unavailable, invalid transition, wrong-state tool); no automated crash/restart replay test |
+
 Status legend:
 
 - `Complete`: implemented and locally verified

@@ -202,6 +202,12 @@ export const SystemStatus = Schema.Struct({
   database: Schema.Literal("ok", "down"),
   agents: Schema.Array(Schema.Struct({ agent_name: Schema.String, last_seen_at: Schema.String, online: Schema.Boolean, meta: JsonRecord })),
   counters: JsonRecord,
+  /** Durable counts from the ledger (survive restarts): outcomes and guardrail events. */
+  ledger: Schema.Struct({
+    conversations_total: Schema.Number,
+    outcomes: Schema.Record({ key: Schema.String, value: Schema.Number }),
+    guardrails: Schema.Record({ key: Schema.String, value: Schema.Number }),
+  }),
   turn_decider: Schema.String,
   demo_mode: Schema.Boolean,
 });

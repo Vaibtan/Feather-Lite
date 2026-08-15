@@ -174,6 +174,21 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
       execute: () => sql`SELECT count(*)::text AS count FROM conversations`,
     });
 
+    /** Durable counts for the status page: outcomes and guardrail events across the whole ledger. */
+    const outcomeCounts = SqlSchema.findAll({
+      Request: Schema.Void,
+      Result: Schema.Struct({ outcome: Schema.String, count: Schema.NumberFromString }),
+      execute: () => sql`SELECT coalesce(final_outcome, 'IN_PROGRESS') AS outcome, count(*)::text AS count FROM conversations GROUP BY 1 ORDER BY 1`,
+    });
+    const guardrailCounts = SqlSchema.findAll({
+      Request: Schema.Void,
+      Result: Schema.Struct({ type: Schema.String, count: Schema.NumberFromString }),
+      execute: () => sql`
+        SELECT type, count(*)::text AS count FROM conversation_events
+        WHERE type IN ('TOOL_REJECTED', 'TURN_DECISION_REJECTED', 'TURN_SUPERSEDED', 'TOOL_CALLED', 'STATE_TRANSITION', 'USER_TURN_FINAL')
+        GROUP BY 1 ORDER BY 1`,
+    });
+
     /** Prior completed conversations for cross-call memory (newest first). */
     const priorConversations = SqlSchema.findAll({
       Request: Schema.Struct({ borrowerId: Schema.String, excludeId: Schema.String, limit: Schema.Number }),
@@ -328,6 +343,8 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
       hasActiveConversation,
       listConversations,
       countConversations,
+      outcomeCounts,
+      guardrailCounts,
       priorConversations,
       claimTurn,
       takeOverTurn,

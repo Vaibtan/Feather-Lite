@@ -13,7 +13,18 @@
     "test": "pnpm -r --if-present test",
     "test:db": "pnpm -r --if-present test:db",
     "lint": "pnpm -r --if-present lint",
-    "check": "pnpm typecheck && pnpm test"
+    "check": "pnpm typecheck && pnpm test",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "dev": "pnpm --parallel --filter @feather-lite/server --filter @feather-lite/voice-worker --filter @feather-lite/console dev",
+    "dev:server": "pnpm --filter @feather-lite/server dev",
+    "dev:worker": "pnpm --filter @feather-lite/voice-worker dev",
+    "dev:console": "pnpm --filter @feather-lite/console dev",
+    "start:server": "pnpm --filter @feather-lite/server start",
+    "start:worker": "pnpm --filter @feather-lite/voice-worker start",
+    "console:build": "pnpm --filter @feather-lite/console build",
+    "deploy:console": "pnpm console:build && npx wrangler pages deploy apps/console/dist --project-name feather-lite-console",
+    "tunnel": "cloudflared tunnel --url http://127.0.0.1:8080"
   },
   "devDependencies": {
     "typescript": "^5.9.2",

@@ -73,6 +73,7 @@ export class VoiceSessions extends Effect.Service<VoiceSessions>()("@feather-lit
           catch: (e) => new TelephonyError({ detail: `LiveKit bootstrap failed: ${String(e)}` }),
         });
         const dispatchId = yield* bootstrap.pipe(
+          Effect.timeoutFail({ duration: "10 seconds", onTimeout: () => new TelephonyError({ detail: "LiveKit bootstrap timed out after 10s" }) }),
           Effect.tapError(() =>
             // Close the phantom conversation so the ledger stays truthful.
             orch.processSignal(call.conversationId, { kind: "hangup", reason: "livekit_bootstrap_failed" }).pipe(Effect.ignore),

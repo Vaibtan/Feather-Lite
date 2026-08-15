@@ -116,6 +116,7 @@ export interface SystemStatus {
   database: "ok" | "down";
   agents: Array<{ agent_name: string; last_seen_at: string; online: boolean; meta: Record<string, unknown> }>;
   counters: Record<string, unknown>;
+  ledger: { conversations_total: number; outcomes: Record<string, number>; guardrails: Record<string, number> };
   turn_decider: string;
   demo_mode: boolean;
 }

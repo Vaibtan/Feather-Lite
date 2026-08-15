@@ -123,10 +123,23 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
 
     const heartbeats = () => sched.listHeartbeats().pipe(Effect.map((rows) => rows.map((r) => ({ agent_name: r.agentName, last_seen_at: r.lastSeenAt.toISOString(), meta: r.meta }))));
 
+    /** Durable counts for /api/system/status ("the state machine caught the model N times"). */
+    const ledgerCounts = () =>
+      Effect.gen(function* () {
+        const total = yield* conv.countConversations();
+        const outcomes = yield* conv.outcomeCounts();
+        const guardrails = yield* conv.guardrailCounts();
+        return {
+          conversations_total: total.count,
+          outcomes: Object.fromEntries(outcomes.map((o) => [o.outcome, o.count])),
+          guardrails: Object.fromEntries(guardrails.map((g) => [g.type, g.count])),
+        };
+      });
+
     const scheduledActionsFor = (workflowExecutionId: string) => sched.listForWorkflow(workflowExecutionId);
     const outboxJobsFor = (conversationId: string) => sched.listJobsForConversation(conversationId);
 
-    return { listConversations, conversationDetail, borrowerDirectory, heartbeats, scheduledActionsFor, outboxJobsFor } as const;
+    return { listConversations, conversationDetail, borrowerDirectory, heartbeats, ledgerCounts, scheduledActionsFor, outboxJobsFor } as const;
   }),
   dependencies: [ConversationRepo.Default, CrmRepo.Default, SchedulingRepo.Default],
 }) {}
