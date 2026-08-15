@@ -4,6 +4,7 @@
  * (so transcripts/timelines/memory blocks are genuine, not hand-written rows).
  */
 import { DateTime, Effect } from "effect";
+import { withShiftedClock, type ShiftedClock } from "./VirtualClock.js";
 import { PgClient } from "@effect/sql-pg";
 import { CrmRepo } from "../repos/crm.js";
 import { SchedulingRepo } from "../repos/scheduling.js";
@@ -88,20 +89,25 @@ export class SeedService extends Effect.Service<SeedService>()("@feather-lite/Se
 
         // History through the real orchestrator (states/events/outbox exactly as production writes them).
         for (const h of b.history ?? []) {
-          const started = yield* workflow.startCall({ borrowerId, contactPointId: cpId, channel: "simulated", now: DateTime.unsafeMake(h.at) }).pipe(Effect.either);
-          if (started._tag === "Left") continue;
-          if (h.turns === "no_answer") {
-            yield* orch.processSignal(started.right.conversationId, { kind: "no_answer" });
-          } else {
-            let n = 0;
-            for (const t of h.turns) {
-              n += 1;
-              const r = yield* orch.processTurn({ conversationId: started.right.conversationId, turnId: `seed-${n}`, userText: t }, () => Effect.void).pipe(Effect.either);
-              if (r._tag === "Left" || r.right.endCall) break;
+          // Shifted clock: the whole historical call (start, turns, end, scheduled actions) is stamped as of `h.at`.
+          const historical = (clock: ShiftedClock) => Effect.gen(function* () {
+            const started = yield* workflow.startCall({ borrowerId, contactPointId: cpId, channel: "simulated" }).pipe(Effect.either);
+            if (started._tag === "Left") return;
+            if (h.turns === "no_answer") {
+              yield* orch.processSignal(started.right.conversationId, { kind: "no_answer" });
+            } else {
+              let n = 0;
+              for (const t of h.turns) {
+                n += 1;
+                yield* clock.advance("20 seconds"); // realistic spacing between turns in the historical transcript
+                const r = yield* orch.processTurn({ conversationId: started.right.conversationId, turnId: `seed-${n}`, userText: t }, () => Effect.void).pipe(Effect.either);
+                if (r._tag === "Left" || r.right.endCall) break;
+              }
             }
-          }
-          // History must not block today's demo: clear pending retries/callbacks it created.
-          yield* sched.cancelPending({ workflowExecutionId: started.right.workflowExecutionId, reason: "seed_history", actionTypes: ["RETRY_CALL", "CALLBACK"] });
+            // History must not block today's demo: clear pending retries/callbacks it created.
+            yield* sched.cancelPending({ workflowExecutionId: started.right.workflowExecutionId, reason: "seed_history", actionTypes: ["RETRY_CALL", "CALLBACK"] });
+          });
+          yield* withShiftedClock(DateTime.unsafeMake(h.at))(historical);
         }
         // Final flags after history (so an opted-out borrower's history still shows the real opt-out call).
         if (b.status === "OPT_OUT") yield* crm.setBorrowerStatus(borrowerId, "OPT_OUT");

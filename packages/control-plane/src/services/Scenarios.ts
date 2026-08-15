@@ -13,6 +13,7 @@ import { decision, replay } from "@feather-lite/domain";
 import type { TurnFrame } from "@feather-lite/contracts";
 import { AppConfig } from "../config.js";
 import { PreCallRejected, TurnDeciderUnavailable, UnknownScenario } from "../errors.js";
+import { withFrozenClock } from "./VirtualClock.js";
 import { ConversationRepo } from "../repos/conversation.js";
 import { CrmRepo } from "../repos/crm.js";
 import { SchedulingRepo } from "../repos/scheduling.js";
@@ -570,7 +571,7 @@ export class ScenarioRunner extends Effect.Service<ScenarioRunner>()("@feather-l
         const emit = (frame: TurnFrame) => Ref.update(frames, (xs) => [...xs, frame]);
 
         const fixture = yield* createFixture(def.id);
-        const started = yield* workflow.startCall({ borrowerId: fixture.borrowerId, contactPointId: fixture.contactPointId, channel: def.channel ?? "simulated", now: FROZEN_NOW });
+        const started = yield* workflow.startCall({ borrowerId: fixture.borrowerId, contactPointId: fixture.contactPointId, channel: def.channel ?? "simulated", now: FROZEN_NOW }).pipe(withFrozenClock(FROZEN_NOW));
 
         const orchestratorLayer = Orchestrator.Default.pipe(Layer.provide(Layer.succeed(TurnDecider, deciderFor(def, captured))));
         const turnResults: TurnResult[] = [];
@@ -591,7 +592,7 @@ export class ScenarioRunner extends Effect.Service<ScenarioRunner>()("@feather-l
               turnResults.push(yield* orch.processSignal(started.conversationId, step.signal));
             }
           }
-        }).pipe(Effect.provide(orchestratorLayer));
+        }).pipe(Effect.provide(orchestratorLayer), withFrozenClock(FROZEN_NOW));
         yield* runSteps;
 
         const detail = yield* queries.conversationDetail(started.conversationId);

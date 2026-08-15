@@ -28,3 +28,4 @@ export * from "./services/Tracing.js";
 export * from "./llm/LlmClient.js";
 export * from "./llm/prompts.js";
 export * from "./llm/OpenAITurnDecider.js";
+export * from "./services/VirtualClock.js";
