@@ -8,7 +8,7 @@ import { AppConfigTest, DatabaseLive } from "../../src/index.js";
 import type { AppConfigShape } from "../../src/index.js";
 
 export const makeInfraLayer = (overrides: Partial<AppConfigShape> = {}) =>
-  DatabaseLive.pipe(Layer.provide(AppConfigTest(overrides)));
+  DatabaseLive.pipe(Layer.provideMerge(AppConfigTest(overrides)));
 
 export const truncateAll = Effect.gen(function* () {
   const sql = yield* PgClient.PgClient;

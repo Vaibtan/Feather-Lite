@@ -18,6 +18,8 @@ export const PgLive: Layer.Layer<SqlClient.SqlClient | PgClient.PgClient, unknow
       maxConnections: cfg.dbMaxConnections,
       transformQueryNames: Str.camelToSnake,
       transformResultNames: Str.snakeToCamel,
+      // JSONB payloads are the wire format (snake_case) — never rename keys inside them.
+      transformJson: false,
       applicationName: "feather-lite",
     });
   }),

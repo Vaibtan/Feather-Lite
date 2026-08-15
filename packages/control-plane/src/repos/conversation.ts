@@ -61,6 +61,12 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
         ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
     });
 
+    const findWorkflow = SqlSchema.findOne({
+      Request: Schema.String,
+      Result: WorkflowExecutionRow,
+      execute: (id) => sql`SELECT ${sql.unsafe(WF_COLS)} FROM workflow_executions WHERE id = ${id}`,
+    });
+
     const lockWorkflow = SqlSchema.findOne({
       Request: Schema.String,
       Result: WorkflowExecutionRow,
@@ -306,6 +312,7 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
 
     return {
       findOpenWorkflow,
+      findWorkflow,
       lockWorkflow,
       insertWorkflow,
       incrementAttemptNo,
