@@ -6,3 +6,14 @@ allowBuilds:
   esbuild: true
   "@parcel/watcher": true
   msgpackr-extract: true
+  "@livekit/rtc-node": true
+  "@livekit/av": true
+  "@livekit/local-inference": true
+  onnxruntime-node: true
+  sharp: true
+  protobufjs: true
+
+minimumReleaseAgeExclude:
+  - "@livekit/agents-plugin-livekit@1.6.4"
+  - "@livekit/agents-plugin-silero@1.6.4"
+  - "@livekit/agents@1.6.4"

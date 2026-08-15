@@ -1,0 +1,12 @@
+import { fileURLToPath } from "node:url";
+import { config as loadEnv } from "dotenv";
+import { AgentDispatchClient, RoomServiceClient } from "livekit-server-sdk";
+loadEnv({ path: fileURLToPath(new URL("../../../../.env", import.meta.url)) });
+const url = process.env["LIVEKIT_URL"] ?? "", key = process.env["LIVEKIT_API_KEY"] ?? "", secret = process.env["LIVEKIT_API_SECRET"] ?? "";
+const agentName = process.env["LIVEKIT_AGENT_NAME"] ?? "feather-lite-tracer";
+const rooms = new RoomServiceClient(url, key, secret);
+const dispatch = new AgentDispatchClient(url, key, secret);
+const roomName = `tracer-${Date.now().toString(36)}`;
+await rooms.createRoom({ name: roomName, emptyTimeout: 120, metadata: JSON.stringify({ tracer: true }) });
+const d = await dispatch.createDispatch(roomName, agentName, { metadata: JSON.stringify({ tracer: true }) });
+console.log(JSON.stringify({ roomName, dispatchId: d.id }));
