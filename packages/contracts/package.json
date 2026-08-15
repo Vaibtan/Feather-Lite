@@ -1,0 +1,21 @@
+{
+  "name": "@feather-lite/contracts",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "HttpApi contract (Effect platform) shared by server, voice worker and console.",
+  "exports": {
+    ".": { "types": "./src/index.ts", "default": "./src/index.ts" }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@feather-lite/domain": "workspace:*",
+    "@effect/platform": "^0.97.1",
+    "effect": "^3.22.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2"
+  }
+}

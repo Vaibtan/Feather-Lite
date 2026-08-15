@@ -1,0 +1,23 @@
+# Local Postgres for development and DB-backed tests.
+#   docker compose up -d
+#   DATABASE_URL=postgres://postgres:postgres@localhost:5434/feather_lite
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: feather-lite-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: feather_lite
+    ports:
+      - "5434:5432"
+    volumes:
+      - feather_lite_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d feather_lite"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  feather_lite_pg:

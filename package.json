@@ -1,0 +1,24 @@
+{
+  "name": "feather-lite",
+  "private": true,
+  "version": "2.0.0",
+  "description": "Feather-Lite v2: collections voice-agent platform (TypeScript + Effect + LiveKit Agents)",
+  "type": "module",
+  "packageManager": "pnpm@11.22.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test",
+    "test:db": "pnpm -r --if-present test:db",
+    "lint": "pnpm -r --if-present lint",
+    "check": "pnpm typecheck && pnpm test"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4",
+    "@effect/vitest": "^0.30.0",
+    "tsx": "^4.20.5"
+  }
+}

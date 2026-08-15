@@ -1,0 +1,30 @@
+{
+  "name": "@feather-lite/control-plane",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Effect services: persistence, orchestrator, turn deciders, tools, call control, workflows, scheduling, outbox, tracing; HttpApi implementation.",
+  "exports": {
+    ".": { "types": "./src/index.ts", "default": "./src/index.ts" }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --project unit",
+    "test:db": "vitest run --project db",
+    "test:all": "vitest run"
+  },
+  "dependencies": {
+    "@feather-lite/contracts": "workspace:*",
+    "@feather-lite/domain": "workspace:*",
+    "@effect/platform": "^0.97.1",
+    "@effect/sql": "^0.52.1",
+    "@effect/sql-pg": "^0.53.0",
+    "effect": "^3.22.1"
+  },
+  "devDependencies": {
+    "@effect/vitest": "^0.30.0",
+    "@types/node": "^22.17.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
