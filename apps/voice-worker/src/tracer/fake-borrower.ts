@@ -62,17 +62,37 @@ const [lineYes, linePay, lineConfirm] = await Promise.all([
 log(`synthesised: yes=${lineYes.length}f pay=${linePay.length}f confirm=${lineConfirm.length}f`);
 await tts.close();
 
-/* ---------- room + dispatch ---------- */
-const rooms = new RoomServiceClient(url, key, secret);
-const dispatch = new AgentDispatchClient(url, key, secret);
-const roomName = `tracer-${Date.now().toString(36)}`;
-await rooms.createRoom({ name: roomName, emptyTimeout: 120, metadata: JSON.stringify({ tracer: true }) });
-await dispatch.createDispatch(roomName, agentName, { metadata: JSON.stringify({ tracer: true }) });
+/* ---------- room: via the real control plane (default) or a raw tracer dispatch ---------- */
+const CONTROL_PLANE_URL = (process.env["CONTROL_PLANE_URL"] ?? "http://127.0.0.1:8080").replace(/\/$/, "");
+const BORROWER_NAME = process.env["TRACER_BORROWER"] ?? "Jordan Avery";
+const useTracer = process.env["TRACER_RAW"] === "1";
+let roomName: string;
+let token: string;
+if (useTracer) {
+  const rooms = new RoomServiceClient(url, key, secret);
+  const dispatch = new AgentDispatchClient(url, key, secret);
+  roomName = `tracer-${Date.now().toString(36)}`;
+  await rooms.createRoom({ name: roomName, emptyTimeout: 120, metadata: JSON.stringify({ tracer: true }) });
+  await dispatch.createDispatch(roomName, agentName, { metadata: JSON.stringify({ tracer: true }) });
+  const at = new AccessToken(key, secret, { identity: "borrower-headless", name: "Jordan (headless)" });
+  at.addGrant({ roomJoin: true, room: roomName, canPublish: true, canSubscribe: true });
+  token = await at.toJwt();
+} else {
+  const dir = (await (await fetch(`${CONTROL_PLANE_URL}/api/borrowers`)).json()) as Array<{ borrower_id: string; name: string; contact_points: Array<{ contact_point_id: string }> }>;
+  const b = dir.find((x) => x.name === BORROWER_NAME);
+  if (!b) throw new Error(`borrower ${BORROWER_NAME} not found in ${CONTROL_PLANE_URL}/api/borrowers`);
+  const res = await fetch(`${CONTROL_PLANE_URL}/api/voice/sessions`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...(process.env["API_BEARER_TOKEN"] ? { authorization: `Bearer ${process.env["API_BEARER_TOKEN"]}` } : {}) },
+    body: JSON.stringify({ borrower_id: b.borrower_id, contact_point_id: b.contact_points[0]!.contact_point_id, participant_identity: "borrower-headless", participant_name: "Jordan (headless)", mode: "browser" }),
+  });
+  if (!res.ok) throw new Error(`voice session ${res.status}: ${await res.text()}`);
+  const session = (await res.json()) as { room_name: string; participant_token: string; conversation_id: string };
+  roomName = session.room_name;
+  token = session.participant_token;
+  log(`conversation=${session.conversation_id}`);
+}
 log(`room=${roomName}`);
-
-const at = new AccessToken(key, secret, { identity: "borrower-headless", name: "Jordan (headless)" });
-at.addGrant({ roomJoin: true, room: roomName, canPublish: true, canSubscribe: true });
-const token = await at.toJwt();
 
 const room = new Room();
 let agentGone = false;

@@ -482,12 +482,19 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           const visible = visibleContext(ctx.bundle, state, row.protectedContextUnlocked);
           const transcript = buildTranscript(t1.events).slice(-12).map((e) => ({ speaker: e.speaker, text: e.text }));
           const snapshot = replay(t1.events);
+          // Barge-in truth may arrive with this request or as an earlier `playout` signal: consult both.
+          const heardFromLedger = ((): string | null => {
+            const lastAgent = [...t1.events].reverse().find((e) => e.type === "AGENT_TURN" && e.payload.turn_id && e.payload.turn_id !== "opening");
+            if (!lastAgent || lastAgent.type !== "AGENT_TURN") return null;
+            const playout = [...t1.events].reverse().find((e) => e.type === "AGENT_TURN_PLAYOUT" && e.payload.turn_id === lastAgent.payload.turn_id);
+            return playout && playout.type === "AGENT_TURN_PLAYOUT" && playout.payload.interrupted ? playout.payload.heard_text : null;
+          })();
           const input: DeciderInput = {
             conversationId: row.id,
             turnId: params.turnId,
             state,
             userText: params.userText,
-            heardAgentText: params.playout?.interrupted ? params.playout.heardText : null,
+            heardAgentText: params.playout?.interrupted ? params.playout.heardText : heardFromLedger,
             context: visible,
             allowedTools: toolsForState(state),
             pendingProposal: toDomainProposal(row.pendingProposal) ?? snapshot.pendingProposal,

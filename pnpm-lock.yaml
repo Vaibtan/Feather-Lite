@@ -60,6 +60,9 @@ importers:
 
   apps/voice-worker:
     dependencies:
+      '@feather-lite/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@feather-lite/domain':
         specifier: workspace:*
         version: link:../../packages/domain

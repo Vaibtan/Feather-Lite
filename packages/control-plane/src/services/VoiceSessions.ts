@@ -5,11 +5,12 @@
  * If LiveKit bootstrap fails after the rows are written, the attempt is marked FAILED and the
  * conversation closed, so the ledger never shows a phantom in-progress call.
  */
-import { DateTime, Effect, Redacted } from "effect";
+import { DateTime, Effect, Option, Redacted } from "effect";
 import { AccessToken, AgentDispatchClient, RoomServiceClient } from "livekit-server-sdk";
 import { AppConfig } from "../config.js";
 import { TelephonyError } from "../errors.js";
 import { ConversationRepo } from "../repos/conversation.js";
+import { CrmRepo } from "../repos/crm.js";
 import { Orchestrator } from "./Orchestrator.js";
 import { WorkflowService, type StartCallResult } from "./Workflow.js";
 
@@ -39,12 +40,14 @@ export class VoiceSessions extends Effect.Service<VoiceSessions>()("@feather-lit
     const workflow = yield* WorkflowService;
     const orch = yield* Orchestrator;
     const conv = yield* ConversationRepo;
+    const crm = yield* CrmRepo;
 
     const create = (input: VoiceSessionInput) =>
       Effect.gen(function* () {
         const lk = cfg.livekit;
         if (!lk) return yield* Effect.fail(new TelephonyError({ detail: "LiveKit is not configured (LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET)" }));
         const call = yield* workflow.startCall({ borrowerId: input.borrowerId, contactPointId: input.contactPointId, channel: "voice", now: input.now });
+        const contactPoint = yield* crm.findContactPoint(input.contactPointId);
         const roomName = roomNameFor(call.conversationId);
         const metadata = JSON.stringify({
           conversation_id: call.conversationId,
@@ -52,8 +55,10 @@ export class VoiceSessions extends Effect.Service<VoiceSessions>()("@feather-lit
           call_attempt_id: call.callAttemptId,
           borrower_id: input.borrowerId,
           contact_point_id: input.contactPointId,
+          contact_point_value: Option.isSome(contactPoint) ? contactPoint.value.value : null,
           mode: input.mode,
           channel: "voice",
+          opening_text: call.openingText,
         });
         const secret = Redacted.value(lk.apiSecret);
         const rooms = new RoomServiceClient(lk.url, lk.apiKey, secret);
@@ -85,5 +90,5 @@ export class VoiceSessions extends Effect.Service<VoiceSessions>()("@feather-lit
 
     return { create } as const;
   }),
-  dependencies: [WorkflowService.Default, Orchestrator.Default, ConversationRepo.Default],
+  dependencies: [WorkflowService.Default, Orchestrator.Default, ConversationRepo.Default, CrmRepo.Default],
 }) {}
