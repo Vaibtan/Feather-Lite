@@ -41,6 +41,9 @@ importers:
       '@feather-lite/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      dotenv:
+        specifier: ^17.2.1
+        version: 17.4.2
       effect:
         specifier: ^3.22.1
         version: 3.22.1
@@ -134,6 +137,9 @@ importers:
       effect:
         specifier: ^3.22.1
         version: 3.22.1
+      livekit-server-sdk:
+        specifier: ^2.17.0
+        version: 2.17.0
     devDependencies:
       '@effect/vitest':
         specifier: ^0.30.0
@@ -141,6 +147,12 @@ importers:
       '@types/node':
         specifier: ^22.17.0
         version: 22.20.1
+      '@types/pg':
+        specifier: ^8.15.5
+        version: 8.21.0
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
       typescript:
         specifier: ^5.9.2
         version: 5.9.3
@@ -1291,6 +1303,9 @@ packages:
 
   '@types/node@22.20.1':
     resolution: {integrity: sha512-EANqOCF9QFyra+4pfxUcX9STKJpCLjMbObVzljIJomAWSnuSIEAvyzEU53GaajbXJEgdh0iEcPL+DGvpUd4k1Q==}
+
+  '@types/pg@8.21.0':
+    resolution: {integrity: sha512-AYdtudzabjLZgVgRZmAnU8bAnVUXzuJX2IYHeSIiIHm68olD+LgQYCGWdtcNYnP0uq9c4S4NibVG3Ni7VbKW7Q==}
 
   '@types/pidusage@2.0.5':
     resolution: {integrity: sha512-MIiyZI4/MK9UGUXWt0jJcCZhVw7YdhBuTOuqP/BjuLDLZ2PmmViMIQgZiWxtaMicQfAz/kMrZ5T7PKxFSkTeUA==}
@@ -3079,6 +3094,12 @@ snapshots:
   '@types/node@22.20.1':
     dependencies:
       undici-types: 6.21.0
+
+  '@types/pg@8.21.0':
+    dependencies:
+      '@types/node': 22.20.1
+      pg-protocol: 1.16.0
+      pg-types: 2.2.0
 
   '@types/pidusage@2.0.5': {}
 

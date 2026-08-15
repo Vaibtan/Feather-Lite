@@ -95,9 +95,9 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
         }),
       );
 
-    const runOnce = (limit = 20) =>
+    const runOnce = (limit = 20, nowOverride?: DateTime.Utc) =>
       Effect.gen(function* () {
-        const now = DateTime.toDateUtc(yield* DateTime.now);
+        const now = DateTime.toDateUtc(nowOverride ?? (yield* DateTime.now));
         const jobs = yield* sql.withTransaction(sched.claimDueJobs({ now, limit }));
         const out: Array<{ jobId: string; jobType: OutboxJobType; status: "DONE" | "PENDING" | "FAILED" }> = [];
         for (const job of jobs) {

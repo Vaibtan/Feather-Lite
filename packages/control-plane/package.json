@@ -13,8 +13,8 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run --project unit",
-    "test:db": "vitest run --project db",
-    "test:all": "vitest run"
+    "test:db": "vitest run --project db --no-file-parallelism",
+    "test:all": "vitest run --no-file-parallelism"
   },
   "dependencies": {
     "@feather-lite/contracts": "workspace:*",
@@ -23,12 +23,15 @@
     "@effect/sql": "^0.52.1",
     "@effect/sql-pg": "^0.53.0",
     "effect": "^3.22.1",
-    "@effect/platform-node": "^0.108.1"
+    "@effect/platform-node": "^0.108.1",
+    "livekit-server-sdk": "^2.17.0"
   },
   "devDependencies": {
     "@effect/vitest": "^0.30.0",
     "@types/node": "^22.17.0",
     "typescript": "^5.9.2",
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.4",
+    "@types/pg": "^8.15.5",
+    "pg": "^8.16.3"
   }
 }

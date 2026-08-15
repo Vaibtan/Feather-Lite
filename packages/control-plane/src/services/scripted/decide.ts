@@ -92,16 +92,17 @@ export const scriptedDecide = (input: DeciderInput): TurnDecision => {
         }
         return decision("", { name: "propose_promise_to_pay", args: { amount: proposedAmount, date } }, true, "CONFIRMING_OUTCOME");
       }
-      const intro = balance
-        ? `Thanks for confirming, ${input.borrowerFirstName}. I'm calling about your account with a balance of ${balance} dollars, which was due on ${input.context.protectedContext?.due_date}. Are you able to make a payment, or would you like me to call you back another time?`
-        : `Thanks for confirming, ${input.borrowerFirstName}. Are you able to make a payment, or would you like me to call you back another time?`;
-      const alreadyIntroduced = input.recentTranscript.some((e) => e.speaker === "AGENT" && /balance of/.test(e.text));
-      return decision(
-        alreadyIntroduced ? "Can you tell me whether you can make a payment, and by what date, or would you prefer a callback?" : intro,
-        null,
-        false,
-        "DISCUSSING_PAYMENT",
-      );
+      if (has(t, "how much", "what do i owe", "balance", "what is this about", "why are you calling")) {
+        return decision(
+          balance
+            ? `Your current balance is ${balance} dollars, and it was due on ${input.context.protectedContext?.due_date}. Are you able to make a payment, or would you like a callback?`
+            : "Let me pull that up. Are you able to make a payment, or would you like a callback?",
+          null,
+          false,
+          "DISCUSSING_PAYMENT",
+        );
+      }
+      return decision("Can you tell me whether you can make a payment, and by what date, or would you prefer a callback?", null, false, "DISCUSSING_PAYMENT");
     }
 
     case "CONFIRMING_OUTCOME": {

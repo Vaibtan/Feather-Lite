@@ -16,7 +16,8 @@
     "@effect/platform": "^0.97.1",
     "@effect/platform-node": "^0.108.1",
     "@effect/sql-pg": "^0.53.0",
-    "effect": "^3.22.1"
+    "effect": "^3.22.1",
+    "dotenv": "^17.2.1"
   },
   "devDependencies": {
     "@types/node": "^22.17.0",

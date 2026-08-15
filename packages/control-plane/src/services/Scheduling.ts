@@ -149,10 +149,10 @@ export class SchedulingService extends Effect.Service<SchedulingService>()("@fea
         }),
       );
 
-    /** One worker tick: claim due actions and process each. */
-    const runOnce = (limit = 20) =>
+    /** One worker tick: claim due actions and process each. `nowOverride` is for tests/demo. */
+    const runOnce = (limit = 20, nowOverride?: DateTime.Utc) =>
       Effect.gen(function* () {
-        const now = yield* DateTime.now;
+        const now = nowOverride ?? (yield* DateTime.now);
         const claimed = yield* sql.withTransaction(sched.claimDue({ now: DateTime.toDateUtc(now), limit }));
         const results: ProcessedAction[] = [];
         for (const action of claimed) {

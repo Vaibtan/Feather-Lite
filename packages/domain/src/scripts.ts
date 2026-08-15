@@ -23,6 +23,9 @@ export const openingScript = (ctx: PublicContext): string =>
 export const voicemailScript = (ctx: Pick<PublicContext, "agent_name" | "company" | "callback_number">): string =>
   `Hello, this is ${ctx.agent_name} from ${ctx.company}. Please return our call at ${ctx.callback_number} at your earliest convenience. Thank you.`;
 
+export const spokenIsoDate = (iso: IsoDate | string): string => spokenDate(iso);
+export const spokenMoney = (amount: MoneyAmount | string): string => spokenAmount(amount);
+
 const spokenDate = (iso: IsoDate | string): string => {
   const [y, m, d] = String(iso).split("-").map(Number);
   const dt = new Date(Date.UTC(y ?? 1970, (m ?? 1) - 1, d ?? 1));
