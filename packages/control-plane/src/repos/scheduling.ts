@@ -41,15 +41,26 @@ export class SchedulingRepo extends Effect.Service<SchedulingRepo>()("@feather-l
         sql`SELECT ${sql.unsafe(SA_COLS)} FROM scheduled_actions WHERE workflow_execution_id = ${workflowExecutionId} ORDER BY due_at`,
     });
 
-    /** Pending CALLBACK / RETRY_CALL actions across all workflows for a borrower (pre-call conflict check). */
+    /**
+     * Pending CALLBACKs across all workflows for a borrower (pre-call conflict check): a borrower who
+     * asked to be called at a specific time must not be dialed earlier. System retries do not block
+     * (a manual start supersedes them, see `cancelPendingRetriesForBorrower`).
+     */
     const countPendingConflicts = SqlSchema.single({
       Request: Schema.String,
       Result: Schema.Struct({ count: Schema.NumberFromString }),
       execute: (borrowerId) => sql`
         SELECT count(*)::text AS count FROM scheduled_actions a
         JOIN workflow_executions w ON w.id = a.workflow_execution_id
-        WHERE w.borrower_id = ${borrowerId} AND a.status = 'PENDING' AND a.action_type <> 'HUMAN_FOLLOWUP'`,
+        WHERE w.borrower_id = ${borrowerId} AND a.status = 'PENDING' AND a.action_type = 'CALLBACK'`,
     });
+
+    const cancelPendingRetriesForBorrower = (borrowerId: string, reason: string) =>
+      sql`
+        UPDATE scheduled_actions a SET status = 'CANCELED', payload = a.payload || ${sql.json({ canceled_reason: reason })}
+        FROM workflow_executions w
+        WHERE w.id = a.workflow_execution_id AND w.borrower_id = ${borrowerId} AND a.status = 'PENDING' AND a.action_type = 'RETRY_CALL'
+        RETURNING a.id`.pipe(Effect.map((rows) => rows.length));
 
     const cancelPending = (params: {
       workflowExecutionId: string;
@@ -141,6 +152,7 @@ export class SchedulingRepo extends Effect.Service<SchedulingRepo>()("@feather-l
       findScheduledAction,
       listForWorkflow,
       countPendingConflicts,
+      cancelPendingRetriesForBorrower,
       cancelPending,
       claimDue,
       setActionStatus,

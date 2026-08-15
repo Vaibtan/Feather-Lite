@@ -146,7 +146,7 @@ describe("persistence layer against real Postgres", () => {
         return { conflicts: conflicts.count, claimA, claimB, jobs, jobsAgain, canceled };
       }),
     );
-    expect(out.conflicts).toBe(2);
+    expect(out.conflicts).toBe(1); // only the pending CALLBACK counts as a conflict
     expect(out.claimA.length + out.claimB.length).toBe(1); // the past-due RETRY claimed exactly once
     expect(out.jobs).toHaveLength(1);
     expect(out.jobs[0]?.status).toBe("CLAIMED");

@@ -18,6 +18,9 @@ import {
   AppConfigLive,
   DatabaseLive,
   HttpLive,
+  LangfuseTracingLive,
+  OpenAILlmClientLive,
+  OpenAITurnDeciderLive,
   OutboxService,
   SchedulingService,
   ScriptedTurnDeciderLive,
@@ -29,13 +32,16 @@ loadEnv({ path: fileURLToPath(new URL("../../../.env", import.meta.url)) });
 const port = Number(process.env["PORT"] ?? 8080);
 const host = process.env["HOST"] ?? "0.0.0.0";
 
-/** Which conversationalist to run: scripted (deterministic) or the OpenAI decider (Phase 4). */
+/** Which conversationalist to run: TURN_DECIDER=openai (real model + Langfuse) or scripted (deterministic). */
 const DeciderLive = Layer.unwrapEffect(
   Effect.gen(function* () {
     const cfg = yield* AppConfig;
     if (cfg.turnDecider === "openai") {
-      yield* Effect.logWarning("TURN_DECIDER=openai requested but the OpenAI decider ships in Phase 4; using scripted");
+      if (cfg.openaiApiKey === null) yield* Effect.logWarning("TURN_DECIDER=openai but OPENAI_API_KEY is missing; every turn will degrade to the safe fallback");
+      yield* Effect.logInfo(`turn decider: openai (${cfg.llmModelByState.GREETING} / ${cfg.llmModelByState.DISCUSSING_PAYMENT}); tracing: ${cfg.langfuse ? "langfuse" : "off"}`);
+      return OpenAITurnDeciderLive.pipe(Layer.provide(OpenAILlmClientLive), Layer.provide(LangfuseTracingLive));
     }
+    yield* Effect.logInfo("turn decider: scripted (deterministic)");
     return ScriptedTurnDeciderLive;
   }),
 );

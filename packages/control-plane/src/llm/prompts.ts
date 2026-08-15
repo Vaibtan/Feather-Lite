@@ -1,0 +1,130 @@
+/**
+ * Prompt construction for the LLM decider. Pure: (DeciderInput) -> messages + tools.
+ * The gate is applied upstream (`visibleContext`); this module renders ONLY what it is given,
+ * and the leak test asserts on the rendered request. Copy is tuned for TTS: short sentences,
+ * one question at a time, no markup.
+ */
+import { JSONSchema, type Schema } from "effect";
+import type { ConversationState, ToolName } from "@feather-lite/domain";
+import { TOOL_ARG_SCHEMAS, TOOL_DESCRIPTIONS } from "@feather-lite/domain";
+import type { DeciderInput } from "../services/types.js";
+import type { ChatMessage, ToolSpec } from "./LlmClient.js";
+
+/** Pseudo-tools that only suggest a state change; the orchestrator validates them like any suggestion. */
+export const PSEUDO_TOOLS = {
+  end_call: { description: "End the call politely when nothing else can be done (borrower must go, refuses to continue, or the conversation is complete). Do not use to record outcomes.", nextState: "ENDING" as ConversationState },
+  request_human: { description: "The borrower asks for a human agent or supervisor, or the situation needs a person. Transfers the call.", nextState: "WARM_TRANSFER_PENDING" as ConversationState },
+  renegotiate: { description: "The borrower declines or changes the read-back proposal; go back to discussing amount and date.", nextState: "DISCUSSING_PAYMENT" as ConversationState },
+} as const;
+export type PseudoToolName = keyof typeof PSEUDO_TOOLS;
+
+const PSEUDO_BY_STATE: Readonly<Record<ConversationState, ReadonlyArray<PseudoToolName>>> = {
+  GREETING: ["end_call"],
+  VERIFYING_IDENTITY: ["end_call"],
+  DISCUSSING_PAYMENT: ["end_call", "request_human"],
+  CONFIRMING_OUTCOME: ["renegotiate", "end_call", "request_human"],
+  VOICEMAIL: ["end_call"],
+  THIRD_PARTY_OR_WRONG_PARTY: ["end_call"],
+  WARM_TRANSFER_PENDING: ["end_call"],
+  OPT_OUT: ["end_call"],
+  WRONG_NUMBER: ["end_call"],
+  ESCALATED: ["end_call"],
+  ENDING: ["end_call"],
+  COMPLETED: [],
+};
+
+const toolSpec = (name: ToolName): ToolSpec => {
+  const schema = JSONSchema.make(TOOL_ARG_SCHEMAS[name] as unknown as Schema.Schema<unknown>) as unknown as Record<string, unknown>;
+  // Strip Effect's envelope; empty structs become an explicit empty object schema.
+  const { $schema: _s, $id: _i, ...rest } = schema;
+  const parameters = "properties" in rest ? rest : { type: "object", properties: {}, additionalProperties: false };
+  return { name, description: TOOL_DESCRIPTIONS[name], parameters };
+};
+
+export const toolSpecsFor = (state: ConversationState, allowed: ReadonlyArray<ToolName>): ReadonlyArray<ToolSpec> => [
+  ...allowed.map(toolSpec),
+  ...PSEUDO_BY_STATE[state].map((p) => ({
+    name: p,
+    description: PSEUDO_TOOLS[p].description,
+    parameters: { type: "object", properties: { reason: { type: "string", description: "one short sentence" } }, additionalProperties: false },
+  })),
+];
+
+const weekdayOf = (isoDate: string): string => {
+  const [y, m, d] = isoDate.split("-").map(Number) as [number, number, number];
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" });
+};
+
+const stateGuidance = (input: DeciderInput): string => {
+  const n = input.borrowerFirstName;
+  switch (input.state) {
+    case "GREETING":
+    case "VERIFYING_IDENTITY":
+      return [
+        `You have asked to speak with ${n}. Your only job now is to establish who is on the line.`,
+        `- If the person clearly confirms they are ${n} (e.g. "yes", "speaking", "this is ${n}"): call confirm_right_party with confirmed=true. Say nothing else.`,
+        `- If someone else answers, ${n} is unavailable, or they offer to take a message: call record_wrong_party_contact with outcome_type=THIRD_PARTY_CONTACT.`,
+        `- If they say it is the wrong number or ${n} does not live there: call record_wrong_party_contact with outcome_type=WRONG_NUMBER.`,
+        `- If they ask who is calling or what it is about: say you are calling from the company for ${n} and can only discuss it with ${n}; then ask again if you are speaking with ${n}.`,
+        `- Do NOT mention any account, balance, loan, payment or debt details before confirmation.`,
+      ].join("\n");
+    case "DISCUSSING_PAYMENT":
+      return [
+        `${n} is verified. The account statement (balance and due date) has ALREADY been read to them; only repeat it if asked.`,
+        `Goal: obtain a concrete promise to pay (amount AND date) or schedule a callback.`,
+        `- When they name an amount and a date (or a date with the full balance implied): call propose_promise_to_pay with amount and an ISO date. Convert relative dates yourself.`,
+        `- If they only give a date, ask what amount; if only an amount, ask by what date. Do not guess.`,
+        `- If they ask to be called back: call schedule_callback with an ISO-8601 datetime WITH timezone offset in the borrower's timezone.`,
+        `- If they ask for a human or supervisor: call request_human.`,
+        `- Answer brief questions about the balance/due date from the account context. Never invent fees, interest, or consequences.`,
+      ].join("\n");
+    case "CONFIRMING_OUTCOME": {
+      const p = input.pendingProposal;
+      const desc = p ? `${p.amount} on ${p.date}` : "the proposal";
+      return [
+        `The system has just read back the proposal: pay ${desc}. Wait for the borrower's answer.`,
+        `- If they confirm (yes / correct / that's right): call record_promise_to_pay with confirmed=true. Say nothing else.`,
+        `- If they decline or want to change the amount or date: call renegotiate.`,
+        `- If they ask for a callback instead: call schedule_callback.`,
+      ].join("\n");
+    }
+    default:
+      return "The call is wrapping up. Be brief and polite; call end_call.";
+  }
+};
+
+export const buildMessages = (input: DeciderInput): ReadonlyArray<ChatMessage> => {
+  const pc = input.context.publicContext;
+  const prot = input.context.protectedContext;
+  const mem = input.context.memory;
+  const system = [
+    `You are ${pc.agent_name}, a voice agent for ${pc.company}, on a live phone call. This is a debt-collection call in the United States; you must be respectful, calm and truthful (FDCPA/UDAAP).`,
+    `Speak for a phone: one or two short sentences, one question at a time, no lists, no markdown, no emojis, no phone-tree tone. Never invent numbers, dates, fees or policies.`,
+    ``,
+    `CURRENT STATE: ${input.state}`,
+    stateGuidance(input),
+    ``,
+    `CALL CONTEXT: workflow ${pc.workflow_type}, attempt ${pc.attempt_no}. Borrower first name: ${pc.borrower_first_name}. Borrower local time: ${pc.local_time_description}. Today for the borrower is ${input.borrowerLocalDate} (${weekdayOf(input.borrowerLocalDate)}), timezone ${input.borrowerTimeZone}. Callback number to give if asked: ${pc.callback_number}.`,
+    prot
+      ? `ACCOUNT (verified borrower only): name ${prot.borrower_full_name}; balance due ${prot.balance_due}; due date ${prot.due_date}; status ${prot.loan_status}; ${prot.delinquency_days} days delinquent${prot.last_promise_date ? `; last promise date ${prot.last_promise_date}` : ""}.`
+      : `ACCOUNT: not available in this state. Do not discuss balances, due dates, loans or payments.`,
+    mem
+      ? `HISTORY: ${mem.prior_conversation_count} prior call(s); recent outcomes ${mem.recent_outcomes.join(", ") || "none"}${mem.last_promise_to_pay ? `; last promise ${mem.last_promise_to_pay.amount} by ${mem.last_promise_to_pay.date}` : ""}${mem.last_callback_requested_at ? `; last callback requested for ${mem.last_callback_requested_at}` : ""}.`
+      : ``,
+    input.heardAgentText !== null ? `NOTE: the borrower interrupted your previous sentence; they heard only: "${input.heardAgentText}".` : ``,
+    ``,
+    `RULES:`,
+    `- Tools are the only way to change what the system does. Call at most one tool per turn; when you call a tool, do not also write a message.`,
+    `- Never say that anything has been recorded, scheduled, confirmed or updated. The system says that itself after it is saved.`,
+    `- If the borrower expresses hardship, disputes the debt, or asks you to stop calling, do not argue or push; the system handles those.`,
+    `- If unsure what they meant, ask a short clarifying question.`,
+  ]
+    .filter((line, i, arr) => !(line === "" && arr[i - 1] === ""))
+    .join("\n");
+
+  const history: ChatMessage[] = input.recentTranscript.map((t) => ({ role: t.speaker === "AGENT" ? "assistant" : "user", content: t.text }));
+  // The last user utterance is the current turn (already the last transcript line); make sure it is present.
+  const last = history.at(-1);
+  if (!last || last.role !== "user" || last.content !== input.userText) history.push({ role: "user", content: input.userText });
+  return [{ role: "system", content: system }, ...history];
+};

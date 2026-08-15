@@ -53,7 +53,7 @@ export interface PreCallInput {
   /** Call attempts to this borrower+contact point in the last `frequencyCapWindowDays`. */
   readonly recentAttemptCount: number;
   readonly hasActiveConversation: boolean;
-  /** Pending CALLBACK / RETRY_CALL actions for this borrower that would conflict. */
+  /** Pending borrower-requested CALLBACKs for this borrower (system retries are superseded, not conflicts). */
   readonly conflictingPendingActions: number;
 }
 

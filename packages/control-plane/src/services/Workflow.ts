@@ -85,6 +85,10 @@ export class WorkflowService extends Effect.Service<WorkflowService>()("@feather
           });
           if (failures.length > 0) return yield* Effect.fail(new PreCallRejected({ failures }));
 
+          // A manual/API start supersedes any pending system retry for this borrower (SPEC §14.2 intent:
+          // never double-dial; a scheduled action re-entering here is already CLAIMED, so it is unaffected).
+          if (!input.workflowExecutionId) yield* sched.cancelPendingRetriesForBorrower(borrower.id, "superseded_by_new_call");
+
           const agentVersion = yield* crm.ensureActiveAgentVersion(yield* ids.next(), "collections-v2", "v2-bootstrap");
           const workflowType = input.workflowType ?? "PAYMENT_REMINDER";
           let workflowId: string;

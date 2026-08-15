@@ -24,3 +24,7 @@ export * from "./http/Metrics.js";
 export * from "./http/TurnRunner.js";
 export * from "./http/handlers.js";
 export * from "./http/app.js";
+export * from "./services/Tracing.js";
+export * from "./llm/LlmClient.js";
+export * from "./llm/prompts.js";
+export * from "./llm/OpenAITurnDecider.js";
