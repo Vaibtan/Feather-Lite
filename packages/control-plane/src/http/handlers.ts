@@ -287,8 +287,22 @@ export const VoiceLive = HttpApiBuilder.group(FeatherApi, "voice", (handlers) =>
 export const DemoLive = HttpApiBuilder.group(FeatherApi, "demo", (handlers) =>
   Effect.gen(function* () {
     const seed = yield* SeedService;
+    const cfg = yield* AppConfig;
     return handlers
       .handle("seed", () => seed.run().pipe(Effect.orDie))
-      .handle("reset", () => seed.reset().pipe(Effect.orDie));
+      .handle("reset", () => seed.reset().pipe(Effect.orDie))
+      .handle("loadFixtures", ({ payload }) =>
+        // Writes throwaway borrowers straight into the CRM tables: demo/dev only, never on a
+        // deployment that is serving anything real.
+        cfg.demoMode
+          ? seed.loadFixtures({ count: payload.count, prefix: payload.prefix }).pipe(
+              Effect.catchIf(
+                (e): e is Error => e instanceof Error,
+                (e) => Effect.fail(new ApiBadRequest({ message: e.message })),
+              ),
+              Effect.orDie,
+            )
+          : Effect.fail(new ApiBadRequest({ message: "load fixtures are only available with DEMO_MODE=true" })),
+      );
   }),
 );

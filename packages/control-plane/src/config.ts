@@ -22,6 +22,9 @@ export interface AppConfigShape {
   /** Demo conveniences: clock override on /calls/start, "reset demo" endpoint. */
   readonly demoMode: boolean;
   readonly apiBearerToken: Redacted.Redacted<string> | null;
+  /** Public-demo hardening budgets. Raised deliberately for load runs (docs/loadtest/). */
+  readonly rateLimitPerMinute: number;
+  readonly dailyTurnCap: number;
 }
 
 export class AppConfig extends Context.Tag("@feather-lite/AppConfig")<AppConfig, AppConfigShape>() {}
@@ -66,6 +69,8 @@ export const appConfig: Config.Config<AppConfigShape> = Config.all({
   livekitAgentName: Config.string("LIVEKIT_AGENT_NAME").pipe(Config.withDefault("feather-lite-agent")),
   demoMode: Config.boolean("DEMO_MODE").pipe(Config.withDefault(true)),
   apiBearerToken: optionalRedacted("API_BEARER_TOKEN"),
+  rateLimitPerMinute: Config.integer("RATE_LIMIT_PER_MINUTE").pipe(Config.withDefault(120)),
+  dailyTurnCap: Config.integer("DAILY_TURN_CAP").pipe(Config.withDefault(5000)),
 }).pipe(
   Config.map((c): AppConfigShape => {
     const models = { ...DEFAULT_MODELS };
@@ -92,6 +97,8 @@ export const appConfig: Config.Config<AppConfigShape> = Config.all({
           : null,
       demoMode: c.demoMode,
       apiBearerToken: c.apiBearerToken._tag === "Some" ? c.apiBearerToken.value : null,
+      rateLimitPerMinute: c.rateLimitPerMinute,
+      dailyTurnCap: c.dailyTurnCap,
     };
   }),
 );

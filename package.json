@@ -18,6 +18,8 @@
     "db:down": "docker compose down",
     "lk:up": "docker compose --profile livekit up -d livekit",
     "lk:down": "docker compose --profile livekit stop livekit",
+    "loadtest:tier1": "pnpm --filter @feather-lite/load-test tier1",
+    "loadtest:tier2": "pnpm --filter @feather-lite/voice-worker fake-borrower-fleet",
     "dev": "pnpm --parallel --filter @feather-lite/server --filter @feather-lite/voice-worker --filter @feather-lite/console dev",
     "dev:server": "pnpm --filter @feather-lite/server dev",
     "dev:worker": "pnpm --filter @feather-lite/voice-worker dev",

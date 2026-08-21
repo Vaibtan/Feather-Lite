@@ -3,7 +3,8 @@
  * with an invalid contact point, and REAL history produced by running the orchestrator
  * (so transcripts/timelines/memory blocks are genuine, not hand-written rows).
  */
-import { DateTime, Effect } from "effect";
+import { DateTime, Effect, Option } from "effect";
+import { isWithinContactWindow } from "@feather-lite/domain";
 import { withShiftedClock, type ShiftedClock } from "./VirtualClock.js";
 import { PgClient } from "@effect/sql-pg";
 import { CrmRepo } from "../repos/crm.js";
@@ -67,6 +68,30 @@ export const DEMO_BORROWERS: ReadonlyArray<SeedBorrower> = [
   },
 ];
 
+/**
+ * A unique, syntactically plausible NANP number for a load fixture. `contact_points.value` is
+ * unique, so this must not collide across a 1000-row run: it takes 48 bits of the fixture's UUID
+ * rather than the digits-only surgery that a hex id makes unreliable (a UUID with few decimal
+ * digits would pad out to the same number as its neighbours).
+ */
+const fixturePhone = (borrowerId: string): string => {
+  const bits = BigInt(`0x${borrowerId.replace(/-/g, "").slice(0, 12)}`);
+  // 555-01xx is the reserved fictional exchange; keep the last 7 digits inside it.
+  return `+1555${(bits % 10_000_000n).toString().padStart(7, "0")}`;
+};
+
+/** Spread across the globe so at least one is inside 08:00-21:00 local at any UTC hour. */
+const CONTACT_WINDOW_CANDIDATES = [
+  "America/New_York",
+  "America/Los_Angeles",
+  "Europe/London",
+  "Asia/Kolkata",
+  "Asia/Tokyo",
+  "Pacific/Auckland",
+  "America/Sao_Paulo",
+  "Europe/Moscow",
+] as const;
+
 export class SeedService extends Effect.Service<SeedService>()("@feather-lite/SeedService", {
   effect: Effect.gen(function* () {
     const sql = yield* PgClient.PgClient;
@@ -124,6 +149,40 @@ export class SeedService extends Effect.Service<SeedService>()("@feather-lite/Se
         return results;
       });
 
+    /**
+     * Throwaway borrowers for a load run. Two pre-call rules force one borrower per concurrent
+     * conversation: ACTIVE_CONVERSATION (one live call per borrower) and the 7-in-7 frequency cap.
+     * The timezone is picked so the run is inside the TCPA window whatever the wall clock says —
+     * otherwise every start would 422 at the wrong hour of the day.
+     *
+     * One transaction for the whole batch: a fixture set is all-or-nothing, so a failure partway
+     * (a phone collision, a lost connection) leaves no half-built borrowers behind for the next run
+     * to trip over.
+     */
+    const loadFixtures = (input: { readonly count: number; readonly prefix?: string | undefined }) =>
+      sql.withTransaction(
+        Effect.gen(function* () {
+          const now = yield* DateTime.now;
+          const zone = CONTACT_WINDOW_CANDIDATES.find((tz) => Option.getOrElse(isWithinContactWindow(now, tz), () => false));
+          if (!zone) return yield* Effect.fail(new Error("no candidate timezone is inside the TCPA contact window"));
+          const prefix = input.prefix ?? `load-${Date.now().toString(36)}`;
+          yield* crm.ensureActiveAgentVersion(yield* ids.next(), "collections-v2", "v2-bootstrap");
+
+          const out: Array<{ borrower_id: string; contact_point_id: string; name: string; timezone: string }> = [];
+          for (let i = 0; i < input.count; i += 1) {
+            const borrowerId = yield* ids.next();
+            const cpId = yield* ids.next();
+            const name = `Jordan ${prefix}-${String(i).padStart(4, "0")}`;
+            yield* sql`INSERT INTO borrowers ${sql.insert({ id: borrowerId, name, timezone: zone, status: "ACTIVE" })}`;
+            yield* sql`INSERT INTO contact_points ${sql.insert({ id: cpId, value: fixturePhone(borrowerId), isValid: true, consentStatus: "ALLOWED", timezoneOverride: zone })}`;
+            yield* sql`INSERT INTO borrower_contact_points ${sql.insert({ borrowerId, contactPointId: cpId, priority: 1, relationship: "PRIMARY" })}`;
+            yield* sql`INSERT INTO loans ${sql.insert({ id: yield* ids.next(), borrowerId, principal: "10000.00", balanceDue: "550.00", dueDate: "2026-08-01", status: "DELINQUENT", delinquencyDays: 15 })}`;
+            out.push({ borrower_id: borrowerId, contact_point_id: cpId, name, timezone: zone });
+          }
+          return out;
+        }),
+      );
+
     /** Demo reset: wipe conversations/attempts/actions/jobs, keep borrowers; then re-run history. */
     const reset = () =>
       Effect.gen(function* () {
@@ -131,7 +190,7 @@ export class SeedService extends Effect.Service<SeedService>()("@feather-lite/Se
         return yield* run();
       });
 
-    return { run, reset } as const;
+    return { run, reset, loadFixtures } as const;
   }),
   dependencies: [CrmRepo.Default, SchedulingRepo.Default, IdGen.Default, WorkflowService.Default, Orchestrator.Default],
 }) {}

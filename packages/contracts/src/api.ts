@@ -282,9 +282,24 @@ export const VoiceGroup = HttpApiGroup.make("voice").add(
   HttpApiEndpoint.post("createSession", "/api/voice/sessions").setPayload(VoiceSessionRequest).addSuccess(VoiceSessionResponse).addError(ApiPreCallRejected).addError(ApiNotFound).addError(ApiUnavailable),
 );
 
+/** Throwaway borrowers for load tests: one live conversation per borrower is a pre-call rule, so a
+ * run at concurrency C needs C of them. Demo-mode only. */
+export const LoadFixtureRequest = Schema.Struct({
+  count: Schema.Number.pipe(Schema.int(), Schema.between(1, 1000)),
+  /** Distinguishes one run's fixtures from another's in the borrowers table. */
+  prefix: Schema.optional(Schema.String),
+});
+export const LoadFixture = Schema.Struct({
+  borrower_id: Schema.String,
+  contact_point_id: Schema.String,
+  name: Schema.String,
+  timezone: Schema.String,
+});
+
 export const DemoGroup = HttpApiGroup.make("demo")
   .add(HttpApiEndpoint.post("seed", "/api/demo/seed").addSuccess(Schema.Array(Schema.Struct({ name: Schema.String, created: Schema.Boolean }))))
-  .add(HttpApiEndpoint.post("reset", "/api/demo/reset").addSuccess(Schema.Array(Schema.Struct({ name: Schema.String, created: Schema.Boolean }))));
+  .add(HttpApiEndpoint.post("reset", "/api/demo/reset").addSuccess(Schema.Array(Schema.Struct({ name: Schema.String, created: Schema.Boolean }))))
+  .add(HttpApiEndpoint.post("loadFixtures", "/api/demo/load-fixtures").setPayload(LoadFixtureRequest).addSuccess(Schema.Array(LoadFixture)).addError(ApiBadRequest));
 
 export class FeatherApi extends HttpApi.make("feather-lite")
   .add(SystemGroup)

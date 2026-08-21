@@ -41,12 +41,13 @@ export const ServicesLive = Layer.mergeAll(
 );
 
 const RATE_LIMITED_PREFIXES = ["/api/calls/start", "/api/voice/sessions", "/api/conversations"];
-const RATE_LIMIT_PER_MINUTE = 120;
-const DAILY_TURN_CAP = 5000;
 
 /**
  * Bearer auth for mutating requests when API_BEARER_TOKEN is set; simple per-IP token bucket;
  * daily cap on turn requests (each may spend LLM tokens). Health/docs/OPTIONS are always open.
+ *
+ * Both budgets are config (`RATE_LIMIT_PER_MINUTE`, `DAILY_TURN_CAP`) because a load run drives
+ * hundreds of turns a minute from one IP; the public-demo defaults are unchanged.
  */
 export const securityMiddleware = HttpMiddleware.make((app) =>
   Effect.gen(function* () {
@@ -63,10 +64,10 @@ export const securityMiddleware = HttpMiddleware.make((app) =>
     }
     if (!open && RATE_LIMITED_PREFIXES.some((p) => url.startsWith(p))) {
       const ip = (req.headers["cf-connecting-ip"] ?? req.headers["x-forwarded-for"] ?? req.remoteAddress.pipe((o) => (o._tag === "Some" ? o.value : "local"))).split(",")[0]!.trim();
-      const ok = yield* rateLimit(ip);
+      const ok = yield* rateLimit(ip, cfg.rateLimitPerMinute);
       if (!ok) return HttpServerResponse.unsafeJson({ _tag: "ApiRateLimited", message: "too many requests" }, { status: 429 });
       if (url.includes("/turn") || url.includes("/simulate_turn")) {
-        const under = yield* dailyTurnBudget();
+        const under = yield* dailyTurnBudget(cfg.dailyTurnCap);
         if (!under) return HttpServerResponse.unsafeJson({ _tag: "ApiRateLimited", message: "daily turn budget exhausted" }, { status: 429 });
       }
     }
@@ -76,7 +77,7 @@ export const securityMiddleware = HttpMiddleware.make((app) =>
 
 // Process-local buckets (fine for a single Node process; the edge port would use KV/DO).
 const buckets = new Map<string, { count: number; windowStart: number }>();
-const rateLimit = (ip: string) =>
+const rateLimit = (ip: string, perMinute: number) =>
   Effect.sync(() => {
     const now = Date.now();
     const b = buckets.get(ip);
@@ -85,10 +86,10 @@ const rateLimit = (ip: string) =>
       return true;
     }
     b.count += 1;
-    return b.count <= RATE_LIMIT_PER_MINUTE;
+    return b.count <= perMinute;
   });
 const dailyRef = { day: "", count: 0 };
-const dailyTurnBudget = () =>
+const dailyTurnBudget = (cap: number) =>
   Effect.sync(() => {
     const day = new Date().toISOString().slice(0, 10);
     if (dailyRef.day !== day) {
@@ -96,7 +97,7 @@ const dailyTurnBudget = () =>
       dailyRef.count = 0;
     }
     dailyRef.count += 1;
-    return dailyRef.count <= DAILY_TURN_CAP;
+    return dailyRef.count <= cap;
   });
 
 /** Serve the API with CORS, OpenAPI JSON at /docs/openapi.json and Swagger UI at /docs. */

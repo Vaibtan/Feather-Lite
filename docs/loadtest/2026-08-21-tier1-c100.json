@@ -1,0 +1,78 @@
+{
+  "tier": "1-control-plane",
+  "api": "http://127.0.0.1:8080",
+  "label": null,
+  "concurrency": 100,
+  "ramp_seconds": 2,
+  "turn_decider": "scripted",
+  "script": [
+    "yes this is Jordan",
+    "I can pay 550 on Friday",
+    "yes"
+  ],
+  "wall_ms": 3846,
+  "conversations": {
+    "total": 100,
+    "correct": 100,
+    "incorrect": 0
+  },
+  "turns": {
+    "attempted": 300,
+    "ok": 300,
+    "throughput_per_second": 78
+  },
+  "latency_ms": {
+    "start": {
+      "n": 100,
+      "p50": 239,
+      "p95": 411,
+      "p99": 421,
+      "max": 424,
+      "mean": 236
+    },
+    "ttft": {
+      "n": 300,
+      "p50": 252,
+      "p95": 381,
+      "p99": 393,
+      "max": 400,
+      "mean": 244
+    },
+    "turn_wall": {
+      "n": 300,
+      "p50": 534,
+      "p95": 747,
+      "p99": 776,
+      "max": 789,
+      "mean": 507
+    }
+  },
+  "errors": {
+    "by_status": {},
+    "start_errors": []
+  },
+  "pg_at_peak": {
+    "backends": 11,
+    "active": 4,
+    "idleInTransaction": 7,
+    "waiting": 0,
+    "samples": 19
+  },
+  "reference": {
+    "state_path": [
+      "GREETING",
+      "VERIFYING_IDENTITY",
+      "DISCUSSING_PAYMENT",
+      "CONFIRMING_OUTCOME",
+      "ENDING",
+      "COMPLETED"
+    ],
+    "tools": [
+      "confirm_right_party",
+      "propose_promise_to_pay",
+      "record_promise_to_pay"
+    ],
+    "final_outcome": "PROMISE_TO_PAY"
+  },
+  "incorrect": []
+}
