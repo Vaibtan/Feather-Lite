@@ -5,9 +5,13 @@
 
 ## Context
 
-v1 was Python (kept as the reference implementation under `backend/`). The author prefers
-TypeScript with the Effect ecosystem and Go. The target company runs LiveKit Agents; the demo
-must include a real voice call.
+v1 was Python, kept at decision time as the reference implementation under `backend/`. The author
+prefers TypeScript with the Effect ecosystem and Go. The target company runs LiveKit Agents; the
+demo must include a real voice call.
+
+> Update (2026-08-21): parity was confirmed in Phase 8 (20/20 scenarios, sim/voice equivalence on
+> both a self-hosted and a Cloud media plane), so `backend/` was removed as the rebuild plan
+> anticipated. It remains readable in git history at tag-less commit `838a743` and earlier.
 
 ## Decision
 

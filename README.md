@@ -15,8 +15,9 @@ outbound calls at scale, not a chatbot with a phone number:
 
 Built as an interview artifact for a Backend + AI Engineer role at a lending voice-agent company;
 the PRD (`PRD.md`) and implementation spec (`SPEC.md`) are the requirements, this repository is v2:
-**TypeScript + Effect** end to end (control plane, LiveKit Agents worker, browser console), with the
-Python v1 kept as a reference implementation under `backend/`.
+**TypeScript + Effect** end to end (control plane, LiveKit Agents worker, browser console). A Python
+v1 came first and was rewritten after the review in `docs/reviews/`; it is gone from the tree (ADR
+0005 records why TypeScript won) and lives on only in git history.
 
 ## What is here (v2, verified 2026-08-21)
 
@@ -86,7 +87,6 @@ packages/control-plane/  config, db (migrations, repos), services (Orchestrator,
 apps/server/             Node entry: API + in-process schedulers
 apps/voice-worker/       LiveKit Agents worker (+ tracer/ harnesses: fake borrower, fleet, equivalence, lk-smoke, text-run)
 apps/console/            Vite + TS operator console (no framework), deploys to Pages
-backend/                 Python v1 reference implementation (superseded)
 apps/load-test/          tier-1 control-plane load harness (plain tsx)
 deploy/livekit/          livekit-server config for the self-hosted compose profile
 docs/adr/                0001–0006 · docs/deploy/ runbook · docs/loadtest/ results · docs/plans/ plan, revisions, findings, progress · docs/demo-script.md

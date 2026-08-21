@@ -3,8 +3,8 @@
  *
  * Every enum is a `Schema.Literal` union so it can be decoded at boundaries
  * (HTTP, DB, LLM output) and narrowed exhaustively inside the domain.
- * The string values are byte-compatible with the Python reference
- * implementation (`backend/app/core/enums.py`) and the SPEC §7 tables.
+ * The string values are byte-compatible with the SPEC §7 tables (and with the
+ * Python v1 implementation they were carried over from, removed in Phase 8).
  */
 import { Schema } from "effect";
 

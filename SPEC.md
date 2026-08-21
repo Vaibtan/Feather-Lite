@@ -70,6 +70,10 @@ Out-of-scope items may be added later only after the core runtime is stable.
 
 This structure is recommended even if the first implementation is small.
 
+> **Status note (2026-08-21).** The Python layout below is what this spec recommended for v1. The
+> shipped system is v2 (TypeScript + Effect) and does not follow it — see the repository map in the
+> README for the actual tree. Kept here as the original requirement.
+
 ```text
 backend/
   app/
@@ -1216,9 +1220,10 @@ Each scenario must define:
 > implementation (`backend/`) and were audited in
 > `docs/reviews/2026-08-16-plan-vs-implementation-review.md` (several "Complete" claims were
 > found to be Partial: LLM not wired, no real voice call, protected context leaking into the
-> "prompt", override matcher not covering the spec's phrasings). The Python code is now the
-> **reference implementation**; the shipped system is **v2 in TypeScript + Effect**, tracked in
-> `docs/plans/PROGRESS.md` and summarised in the README. Mapping of v2 to this plan:
+> "prompt", override matcher not covering the spec's phrasings). The shipped system is **v2 in
+> TypeScript + Effect**, tracked in `docs/plans/PROGRESS.md` and summarised in the README; the
+> Python tree served as the reference implementation until parity was confirmed and was removed in
+> Phase 8 (it remains in git history). Mapping of v2 to this plan:
 >
 > | SPEC phase | v2 status | Where |
 > |---|---|---|
