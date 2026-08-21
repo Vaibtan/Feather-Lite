@@ -1,0 +1,26 @@
+# Self-hosted LiveKit for local development (docker compose --profile livekit up -d livekit).
+#
+# Local-only configuration: the key/secret below are a development credential committed on purpose so
+# the stack starts with no setup. Never reuse them for anything reachable from the internet.
+#
+# Docker Desktop on Windows has no host networking, so media cannot use the production 50000-60000
+# UDP port range (publishing 10k ports through the NAT is a nonstarter). Instead:
+#   - rtc.udp_port    single-port UDP mux, published as 7882/udp
+#   - rtc.tcp_port    ICE/TCP fallback, published as 7881
+#   - --node-ip       forced to 127.0.0.1 in docker-compose.yml so the advertised ICE candidate is
+#                     host-reachable instead of the container's internal bridge address
+port: 7880
+bind_addresses:
+  - 0.0.0.0
+rtc:
+  udp_port: 7882
+  tcp_port: 7881
+  use_external_ip: false
+room:
+  # The control plane creates rooms explicitly (POST /api/voice/sessions); keep parity with Cloud.
+  auto_create: false
+  empty_timeout: 300
+keys:
+  devkey: "Dt9Jzf0Ix8nNl80YbUKHjJkJIlBSlVET"
+logging:
+  level: info

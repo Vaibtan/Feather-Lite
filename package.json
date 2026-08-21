@@ -16,6 +16,8 @@
     "check": "pnpm typecheck && pnpm test",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
+    "lk:up": "docker compose --profile livekit up -d livekit",
+    "lk:down": "docker compose --profile livekit stop livekit",
     "dev": "pnpm --parallel --filter @feather-lite/server --filter @feather-lite/voice-worker --filter @feather-lite/console dev",
     "dev:server": "pnpm --filter @feather-lite/server dev",
     "dev:worker": "pnpm --filter @feather-lite/voice-worker dev",

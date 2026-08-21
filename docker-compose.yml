@@ -1,5 +1,6 @@
-# Local Postgres for development and DB-backed tests.
-#   docker compose up -d
+# Local Postgres for development and DB-backed tests, plus an optional self-hosted LiveKit SFU.
+#   docker compose up -d                                  # Postgres only (pnpm db:up)
+#   docker compose --profile livekit up -d livekit        # + LiveKit media server (pnpm lk:up)
 #   DATABASE_URL=postgres://postgres:postgres@localhost:5434/feather_lite
 services:
   postgres:
@@ -15,6 +16,25 @@ services:
       - feather_lite_pg:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d feather_lite"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Self-hosted media server: the Cloud/local swap is an .env change (LIVEKIT_URL/KEY/SECRET), not a
+  # code change. See deploy/livekit/livekit.yaml and docs/adr/0006.
+  livekit:
+    image: livekit/livekit-server:v1.13.5
+    container_name: feather-lite-livekit
+    profiles: ["livekit"]
+    command: --config /etc/livekit.yaml --node-ip 127.0.0.1
+    ports:
+      - "7880:7880" # signalling / server API (ws://127.0.0.1:7880)
+      - "7881:7881" # ICE over TCP fallback
+      - "7882:7882/udp" # single-port UDP mux for all media
+    volumes:
+      - ./deploy/livekit/livekit.yaml:/etc/livekit.yaml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:7880"]
       interval: 5s
       timeout: 3s
       retries: 20
