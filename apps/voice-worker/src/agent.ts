@@ -13,12 +13,13 @@
  */
 import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
-import { type JobContext, type JobProcess, ServerOptions, cli, defineAgent, inference, voice } from "@livekit/agents";
+import { type JobContext, type JobProcess, ServerOptions, cli, defineAgent, voice } from "@livekit/agents";
 import * as livekitPlugin from "@livekit/agents-plugin-livekit";
 import * as silero from "@livekit/agents-plugin-silero";
 import { RoomServiceClient, SipClient } from "livekit-server-sdk";
 import { ControlPlaneClient } from "./control-plane-client.js";
 import { FeatherAgent } from "./feather-agent.js";
+import { buildSpeechStack } from "./speech.js";
 import { RemoteOrchestratorLLM } from "./tracer/remote-orchestrator-llm.js";
 
 loadEnv({ path: fileURLToPath(new URL("../../../.env", import.meta.url)) });
@@ -26,9 +27,6 @@ loadEnv({ path: fileURLToPath(new URL("../../../.env", import.meta.url)) });
 const AGENT_NAME = process.env["LIVEKIT_AGENT_NAME"] ?? "feather-lite-agent";
 const CONTROL_PLANE_URL = (process.env["CONTROL_PLANE_URL"] ?? "http://127.0.0.1:8080").replace(/\/$/, "");
 const API_BEARER_TOKEN = process.env["API_BEARER_TOKEN"] ?? null;
-const STT_MODEL = process.env["LIVEKIT_STT_MODEL"] ?? "deepgram/nova-3";
-const TTS_MODEL = process.env["LIVEKIT_TTS_MODEL"] ?? "cartesia/sonic-3";
-const TTS_VOICE = process.env["LIVEKIT_TTS_VOICE"] ?? "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc";
 const SIP_OUTBOUND_TRUNK_ID = process.env["LIVEKIT_SIP_OUTBOUND_TRUNK_ID"] ?? null;
 
 const client = new ControlPlaneClient({ baseUrl: CONTROL_PLANE_URL, bearerToken: API_BEARER_TOKEN });
@@ -79,6 +77,21 @@ export default defineAgent({
       }
     };
 
+    // SIP/PSTN needs a provisioned outbound trunk, which only LiveKit Cloud has here (livekit-sip is
+    // not part of the self-hosted profile — ADR 0006). Fail the attempt now, loudly, instead of
+    // building a session and timing out on a dial that can never happen.
+    if (mode === "sip" && (!SIP_OUTBOUND_TRUNK_ID || !meta.contact_point_value)) {
+      log("sip mode requested but no SIP trunk is configured; failing the attempt", {
+        trunkConfigured: Boolean(SIP_OUTBOUND_TRUNK_ID),
+        contactNumber: Boolean(meta.contact_point_value),
+        livekitUrl: process.env["LIVEKIT_URL"] ?? "",
+        hint: "set LIVEKIT_SIP_OUTBOUND_TRUNK_ID (LiveKit Cloud + a SIP trunk); the self-hosted profile has no SIP",
+      });
+      await client.signal(conversationId, { kind: "hangup", reason: "sip_not_configured" }).catch(() => undefined);
+      await hangup("sip_not_configured");
+      return;
+    }
+
     const agent = new FeatherAgent({
       client,
       conversationId,
@@ -89,10 +102,14 @@ export default defineAgent({
       log,
     });
 
+    // Cloud (LiveKit Inference) or direct provider plugins — an env switch, not a code fork.
+    const speech = buildSpeechStack();
+    log("speech stack", { provider: speech.provider, describe: speech.describe });
+
     const session = new voice.AgentSession({
-      stt: new inference.STT({ model: STT_MODEL, language: "en" }),
+      stt: speech.stt,
       llm: new RemoteOrchestratorLLM(),
-      tts: new inference.TTS({ model: TTS_MODEL, voice: TTS_VOICE }),
+      tts: speech.tts,
       vad: ctx.proc.userData.vad as silero.VAD,
       turnHandling: {
         turnDetection: new livekitPlugin.turnDetector.MultilingualModel(),
@@ -130,17 +147,12 @@ export default defineAgent({
     await session.start({ agent, room: ctx.room });
 
     if (mode === "sip") {
-      const to = meta.contact_point_value;
-      if (!SIP_OUTBOUND_TRUNK_ID || !to) {
-        log("sip mode requested but LIVEKIT_SIP_OUTBOUND_TRUNK_ID or contact number missing; closing");
-        await client.signal(conversationId, { kind: "hangup", reason: "sip_not_configured" }).catch(() => undefined);
-        await hangup("sip_not_configured");
-        return;
-      }
+      // Guarded above: both are present by the time we get here.
+      const to = meta.contact_point_value!;
       const sip = new SipClient(lk.url, lk.key, lk.secret);
       const identity = "borrower-phone";
       try {
-        await sip.createSipParticipant(SIP_OUTBOUND_TRUNK_ID, to, roomName, { participantIdentity: identity, waitUntilAnswered: true, ringingTimeout: 30 });
+        await sip.createSipParticipant(SIP_OUTBOUND_TRUNK_ID!, to, roomName, { participantIdentity: identity, waitUntilAnswered: true, ringingTimeout: 30 });
       } catch (e) {
         log("dial failed / unanswered", { error: String(e) });
         await client.signal(conversationId, { kind: "no_answer" }).catch(() => undefined);
