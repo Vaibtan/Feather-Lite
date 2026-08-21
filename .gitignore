@@ -18,3 +18,5 @@ coverage/
 !.env.example
 apps/**/.wrangler/
 .dev.vars
+# Synthesised fake-borrower lines (regenerated on demand; keeps TTS cost off repeat load runs)
+apps/voice-worker/.cache/
