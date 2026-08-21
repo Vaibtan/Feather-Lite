@@ -20,7 +20,8 @@ Everything below was chosen against limits verified on 2026-08-16 (see ADR 0004)
 
 | Service | What for | Sign-up notes |
 |---|---|---|
-| LiveKit Cloud (Build) | media, agent dispatch, STT/TTS via LiveKit Inference | you already have a project; `LIVEKIT_URL/API_KEY/API_SECRET` in `.env` |
+| LiveKit Cloud (Build) | media, agent dispatch, and STT/TTS if you use Inference | you already have a project; `LIVEKIT_URL/API_KEY/API_SECRET` in `.env`. For a local-only run you can skip this entirely: `pnpm lk:up` (ADR 0006) |
+| Deepgram + Cartesia | STT/TTS direct, recommended over Inference for a live demo (see §3) | free credit on both; `DEEPGRAM_API_KEY` / `CARTESIA_API_KEY` |
 | Neon | Postgres for the public demo | pick a region near the worker (Singapore for India). Copy the pooled connection string, use `?sslmode=verify-full` |
 | Cloudflare | Pages (console) + Tunnel (API URL) | free plan; a quick tunnel needs no account at all |
 | OpenAI | the conversationalist (`TURN_DECIDER=openai`) | any paid key; GPT-4.1-mini/4.1 cost is cents per demo |
@@ -75,6 +76,24 @@ pnpm start:worker      # registers as agent "feather-lite-agent" with LiveKit Cl
 worker runs elsewhere. With `API_BEARER_TOKEN` set, the worker reads the same `.env` and sends it.
 The console's **Status** page shows the worker online within ~10 s.
 
+**Recommended for a live demo: use direct STT/TTS, not LiveKit Inference** (ADR 0006). Inference is
+the zero-extra-keys default and it works, but it is a managed gateway you cannot debug from the
+outside, and on 2026-08-21 it returned final transcripts after 5–18 s from this machine — long
+enough that the agent's 12 s away-timeout fires first and every call ends `NO_ANSWER`. Direct
+Deepgram was 200–500 ms on the same SFU in the same session. Both providers have free credit, so
+for the cost of two extra keys the riskiest dependency on demo day stops being a black box:
+
+```
+STT_TTS_PROVIDER=plugins
+DEEPGRAM_API_KEY=...
+CARTESIA_API_KEY=...
+```
+
+Rehearse the path you will demo, whichever you pick: `pnpm --filter @feather-lite/voice-worker
+fake-borrower` runs a real call end to end and exits non-zero unless the ledger matches the
+simulation scenario. It is the fastest way to find out that the media path is degraded *before* an
+interviewer is watching.
+
 Optional PSTN: create a SIP outbound trunk in LiveKit Cloud (their free US number or a Twilio
 trial number), set `LIVEKIT_SIP_OUTBOUND_TRUNK_ID`, and the console's **Dial my phone (SIP)**
 button will dial the borrower's contact point (AMD-gated). Not verified end-to-end in v2 — treat as
@@ -110,7 +129,8 @@ laptop-specific. (Not exercised in v2 — the interview run used the laptop + tu
 | Item | Free allowance | Demo usage | Cost |
 |---|---|---|---|
 | LiveKit agent minutes | 1,000 / month | ~15 min | $0 |
-| LiveKit Inference (Deepgram STT + Cartesia TTS) | $2.50 credit | ~$0.20 | $0 |
+| STT/TTS via LiveKit Inference | $2.50 credit | ~$0.20 | $0 |
+| STT/TTS direct (Deepgram + Cartesia), if `STT_TTS_PROVIDER=plugins` | free credit on both | ~$0.20 | $0 |
 | Neon | 100 CU-h, 0.5 GB | < 1 CU-h, < 10 MB | $0 |
 | Cloudflare Pages / Tunnel | unlimited static / free | — | $0 |
 | OpenAI GPT-4.1-mini + GPT-4.1 | — | ~40 turns × ~2k tokens | ≈ $0.10–0.30 |
@@ -132,5 +152,10 @@ Then open the console URL: **Scenarios → Run all** (20/20), **Simulate**, **Li
 - `no agent worker` → the worker process is not running or cannot reach the API (`CONTROL_PLANE_URL`, token).
 - Browser call connects but no audio → the tab needs a user gesture for autoplay; click once on
   the page, or check the LiveKit project region/URL.
+- **The agent keeps asking "Are you still there?" and calls end `NO_ANSWER` even though you spoke**
+  → speech is reaching the SFU but transcripts are arriving after the 12 s away-timeout. Check the
+  worker log for `eou_metrics` and read `transcriptionDelayMs`: healthy is 200–500 ms. If it is
+  seconds, the STT provider is the problem, not the call logic — switch `STT_TTS_PROVIDER=plugins`
+  (or back to `inference`) and re-run `fake-borrower`. Diagnosed in ADR 0006.
 - 401 on POSTs from the console → token missing; open `…/?api=<url>#token=<token>` again.
 - 429 → per-IP rate limit or daily turn budget (both only in `DEMO_MODE`).

@@ -89,7 +89,7 @@ apps/voice-worker/       LiveKit Agents worker (+ tracer/ harnesses: fake borrow
 apps/console/            Vite + TS operator console (no framework), deploys to Pages
 apps/load-test/          tier-1 control-plane load harness (plain tsx)
 deploy/livekit/          livekit-server config for the self-hosted compose profile
-docs/adr/                0001–0006 · docs/deploy/ runbook · docs/loadtest/ results · docs/plans/ plan, revisions, findings, progress · docs/demo-script.md
+docs/adr/                0001–0006 · docs/deploy/ runbook · docs/loadtest/ results · docs/plans/ plan, revisions, findings, progress
 ```
 
 ## Run it locally
@@ -157,9 +157,9 @@ saturation analysis are in **`docs/loadtest/README.md`**.
 ## Live, free, clickable demo
 
 `docs/deploy/free-tier-live-demo.md` is the runbook: Neon (Postgres), Cloudflare Tunnel (API URL),
-Cloudflare Pages (console), LiveKit Cloud Build (media + inference), optional Langfuse — total $0
-plus cents of OpenAI. `pnpm tunnel` and `pnpm deploy:console` are wired; the console takes the API
-URL and bearer token from `?api=…#token=…`. The 10-minute walkthrough is `docs/demo-script.md`.
+Cloudflare Pages (console), LiveKit Cloud Build (media), Deepgram + Cartesia (STT/TTS), optional
+Langfuse — total $0 plus cents of OpenAI. `pnpm tunnel` and `pnpm deploy:console` are wired; the
+console takes the API URL and bearer token from `?api=…#token=…`.
 
 ## Not built (deliberately listed)
 

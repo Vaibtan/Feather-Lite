@@ -1,7 +1,13 @@
 # ADR 0004 — Hosting: one Node process behind a Cloudflare Tunnel, console on Cloudflare Pages, Postgres on Neon
 
-- Status: accepted (2026-08-16); see `docs/deploy/free-tier-live-demo.md` for the runbook
-- Related: [ADR 0001](0001-conversation-loop-in-the-control-plane.md)
+- Status: accepted (2026-08-16); amended in part by [ADR 0006](0006-self-hosted-livekit-for-local-dev.md) (2026-08-21)
+- Related: [ADR 0001](0001-conversation-loop-in-the-control-plane.md); runbook `docs/deploy/free-tier-live-demo.md`
+
+> **Amendment (2026-08-21).** The "LiveKit Cloud Build" row below still describes the hosted demo,
+> but it is no longer the only option and STT/TTS is no longer necessarily Inference: the media
+> server now runs locally under a compose profile, and `STT_TTS_PROVIDER` selects Inference or
+> direct Deepgram/Cartesia. ADR 0006 has the reasoning and the measurements — including why the
+> runbook now prefers direct providers for a live demo.
 
 ## Context
 

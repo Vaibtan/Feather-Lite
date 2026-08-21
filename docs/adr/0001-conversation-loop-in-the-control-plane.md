@@ -31,7 +31,10 @@ service. The worker never decides anything about the conversation; it turns audi
 
 - **Equivalence is testable.** The 20-scenario suite runs against real Postgres with no LiveKit
   in the loop, and a scripted voice call through LiveKit Cloud produced the same state path, tool
-  sequence and outcome as the corresponding scenario (verified in Phase 5).
+  sequence and outcome as the corresponding scenario (verified in Phase 5). Phase 8 made that
+  assertion automatic rather than eyeballed — the tracer now compares a finished call's ledger to
+  the scenario run through the same API — and held it on a self-hosted media server and across
+  concurrent calls (`docs/loadtest/`, [ADR 0006](0006-self-hosted-livekit-for-local-dev.md)).
 - **The authority lives on the durable URL.** Killing the worker mid-call loses audio, not the
   ledger; a re-dispatched worker resumes from `active_turn_id`/`current_state`.
 - **One extra network hop per turn** (worker → control plane). Measured decision TTFT with GPT-4.1
