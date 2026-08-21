@@ -18,7 +18,7 @@ the PRD (`PRD.md`) and implementation spec (`SPEC.md`) are the requirements, thi
 **TypeScript + Effect** end to end (control plane, LiveKit Agents worker, browser console), with the
 Python v1 kept as a reference implementation under `backend/`.
 
-## What is here (v2, verified 2026-08-16)
+## What is here (v2, verified 2026-08-21)
 
 | Area | Status | Evidence |
 |---|---|---|
@@ -28,6 +28,8 @@ Python v1 kept as a reference implementation under `backend/`.
 | Voice worker (`apps/voice-worker`): LiveKit Agents 1.6 `llmNode` → `/turn`, barge-in heard-text, interruptible read-back guard, AMD-gated SIP path, heartbeats | done (browser path) | automated real voice call on LiveKit Cloud with GPT-4.1; scripted voice call == simulation scenario (state path, tools, outcome) |
 | Operator console (`apps/console`): conversations, transcript + timeline + replay, simulate (streaming), **call me in the browser**, scenario matrix, status/seed | done | headless run: 20/20 matrix, PTP simulation, browser call joined LiveKit Cloud with live transcript |
 | Deployment on free tiers (Neon + Cloudflare Tunnel + Pages + LiveKit Build) | documented, needs your accounts | `docs/deploy/free-tier-live-demo.md` |
+| **Self-hosted media plane**: LiveKit SFU in Docker (`pnpm lk:up`), Deepgram/Cartesia direct plugins behind `STT_TTS_PROVIDER` | done | headless voice call + browser call on the local SFU, both equivalence-green vs the simulation; ADR 0006 |
+| **Load tested**: control plane to 200 concurrent conversations, voice fleet to 5 concurrent real calls (10 = CPU ceiling) | done | 200/200 correct outcomes at C=200, 5/5 equivalence-green at N=5; `docs/loadtest/` |
 | PSTN via SIP trunk, Oracle always-on VM, latency waterfall panel, chaos (kill worker mid-call) test, Effect 4 | **not done** | listed honestly in "Not built" below |
 
 Progress by phase: `docs/plans/PROGRESS.md`. Decisions: `docs/adr/`. Review that led to v2:
@@ -51,7 +53,7 @@ flowchart LR
     AG[FeatherAgent.llmNode → POST /turn]
   end
   UI -- REST/SSE --> API
-  UI -- WebRTC --> LK[LiveKit Cloud<br/>STT deepgram/nova-3 · TTS cartesia/sonic-3]
+  UI -- WebRTC --> LK[LiveKit SFU<br/>Cloud or self-hosted<br/>STT deepgram/nova-3 · TTS cartesia/sonic-3]
   LK <--> AG
   AG -- SSE frames --> API
   ORCH -- tools --> LLM[OpenAI gpt-4.1 / 4.1-mini]
@@ -82,10 +84,12 @@ packages/domain/         pure: enums, ids, values, stateMachine, overrides, tool
 packages/contracts/      HttpApi definition (18 routes) + SSE turn frames
 packages/control-plane/  config, db (migrations, repos), services (Orchestrator, Workflow, Scheduling, Outbox, Scenarios, Seed, VoiceSessions, Tracing, VirtualClock), llm (LlmClient, prompts, OpenAITurnDecider), http (handlers, TurnRunner, app)
 apps/server/             Node entry: API + in-process schedulers
-apps/voice-worker/       LiveKit Agents worker (+ tracer/ harnesses: fake borrower, text-run)
+apps/voice-worker/       LiveKit Agents worker (+ tracer/ harnesses: fake borrower, fleet, equivalence, lk-smoke, text-run)
 apps/console/            Vite + TS operator console (no framework), deploys to Pages
 backend/                 Python v1 reference implementation (superseded)
-docs/adr/                0001–0005 · docs/deploy/ runbook · docs/plans/ plan, revisions, findings, progress · docs/demo-script.md
+apps/load-test/          tier-1 control-plane load harness (plain tsx)
+deploy/livekit/          livekit-server config for the self-hosted compose profile
+docs/adr/                0001–0006 · docs/deploy/ runbook · docs/loadtest/ results · docs/plans/ plan, revisions, findings, progress · docs/demo-script.md
 ```
 
 ## Run it locally
@@ -111,17 +115,44 @@ pnpm dev:worker                  # LiveKit Agents worker "feather-lite-agent" (h
 
 `pnpm dev` runs server + worker + console together.
 
+### Voice with no cloud account (self-hosted LiveKit)
+
+The media server is a config value, not an architecture decision (ADR 0006). To run the whole stack
+locally, start the SFU and point `.env` at it:
+
+```bash
+pnpm lk:up                       # livekit-server in Docker: ws://127.0.0.1:7880 (+ UDP 7882 mux, TCP 7881)
+```
+
+```
+LIVEKIT_URL=ws://127.0.0.1:7880
+LIVEKIT_API_KEY=devkey
+LIVEKIT_API_SECRET=<deploy/livekit/livekit.yaml keys.devkey>
+STT_TTS_PROVIDER=plugins         # LiveKit Inference is Cloud-only; use Deepgram + Cartesia directly
+DEEPGRAM_API_KEY=... 
+CARTESIA_API_KEY=...
+```
+
+Nothing else changes — the server, console and tracers work against either target. Going back to
+Cloud is the same four lines in reverse. SIP/PSTN stays Cloud-only (no `livekit-sip` locally); the
+worker fails such a call fast with a clear log line. Smoke the server with
+`pnpm --filter @feather-lite/voice-worker lk-smoke`.
+
 ### Tests
 
 ```bash
 pnpm check                       # typecheck + unit tests (domain 92, control-plane 27)
 pnpm test:db                     # 28 DB tests on Postgres: 20 scenarios, repos, concurrency, workers, LLM leak
 pnpm --filter @feather-lite/voice-worker text-run      # LiveKit text-mode harness against the fake control plane
-pnpm --filter @feather-lite/voice-worker fake-borrower # automated real voice call (needs LiveKit + running server/worker)
+pnpm --filter @feather-lite/voice-worker fake-borrower # automated real voice call + SPEC §10.5 equivalence assertion
+pnpm loadtest:tier1 -- --concurrency 100 --ramp 2      # control-plane load: 100 concurrent conversations
+pnpm loadtest:tier2 -- --calls 5                       # voice load: 5 concurrent real calls, each equivalence-checked
 ```
 
 CI (`.github/workflows/ci.yml`) runs typecheck, unit tests and the DB suite against a Postgres
-service container.
+service container. Both load harnesses gate on **correctness** — every conversation's final ledger
+must replay to the expected scripted outcome — and merely report latency. Measured numbers and the
+saturation analysis are in **`docs/loadtest/README.md`**.
 
 ## Live, free, clickable demo
 
@@ -136,6 +167,9 @@ URL and bearer token from `?api=…#token=…`. The 10-minute walkthrough is `do
   was configured, so it is not verified end to end.
 - **Always-on hosting** (Oracle Always Free VM) is documented, not exercised; the API is up while
   the Node processes run.
+- **Horizontal scale** is untested. Load testing found the knee at ~70–85 turns/s on one Node
+  process and showed Postgres was nowhere near saturated (raising the pool made it slower); a second
+  server process is the obvious next lever, and it has not been run.
 - **Latency waterfall** in the console (EOT → decision TTFT → first audio): `ttft_ms` is on every
   `turn_end` frame and stored per turn (`conversation_turns.result`); the panel is not built.
 - **Chaos test** (kill the worker mid-call and prove the ledger resumes): the design supports it

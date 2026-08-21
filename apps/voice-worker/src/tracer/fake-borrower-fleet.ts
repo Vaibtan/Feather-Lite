@@ -1,0 +1,133 @@
+/**
+ * Tier-2 voice load test: N concurrent scripted calls through the media plane, each asserted for
+ * SPEC §10.5 equivalence against the simulation scenario.
+ *
+ * This tier is deliberately modest (single-digit N). Real audio costs provider credits and laptop
+ * CPU (silero VAD + Opus encode per call); the claim under test is "the media plane and the worker
+ * handle N simultaneous calls *correctly*", not raw scale. Tier 1 (`apps/load-test`) is where the
+ * hundreds-of-conversations number lives.
+ *
+ * Each call needs its own borrower — one live conversation per borrower is a pre-call rule — so the
+ * fleet mints throwaway fixtures via POST /api/demo/load-fixtures. Borrower lines are synthesised
+ * once and replayed from the WAV cache, so a 10-call run does not pay TTS for 30 utterances.
+ *
+ * Run: pnpm --filter @feather-lite/voice-worker fake-borrower-fleet -- --calls 5
+ */
+import { writeFileSync, mkdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { config as loadEnv } from "dotenv";
+import { initializeLogger } from "@livekit/agents";
+import { checkEquivalence, loadScenarioReference, type EquivalenceResult } from "./equivalence.js";
+import { loadScriptedLines, runScriptedCall, type ScriptedCallResult } from "./scripted-call.js";
+
+loadEnv({ path: fileURLToPath(new URL("../../../../.env", import.meta.url)) });
+initializeLogger({ pretty: true, level: "warn" });
+
+const flag = (name: string, fallback: string): string => {
+  const i = process.argv.indexOf(`--${name}`);
+  return i >= 0 && process.argv[i + 1] !== undefined ? process.argv[i + 1]! : fallback;
+};
+
+const CALLS = Number(flag("calls", "5"));
+const CONTROL_PLANE_URL = (process.env["CONTROL_PLANE_URL"] ?? "http://127.0.0.1:8080").replace(/\/$/, "");
+const REPORT_DIR = fileURLToPath(new URL("../../../../docs/loadtest/", import.meta.url));
+
+const t0 = Date.now();
+const log = (m: string) => console.log(`[fleet] +${String(Date.now() - t0).padStart(6)}ms ${m}`);
+const authHeaders = (): Record<string, string> => {
+  const bearer = process.env["API_BEARER_TOKEN"];
+  return { "content-type": "application/json", ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) };
+};
+
+log(`calls=${CALLS} livekit=${process.env["LIVEKIT_URL"] ?? "(unset)"} stt/tts=${process.env["STT_TTS_PROVIDER"] ?? "inference"}`);
+
+const lines = await loadScriptedLines();
+log(`borrower lines ready (${lines.cached ? "WAV cache" : "synthesised"}): ${lines.describe}`);
+
+const fixturesRes = await fetch(`${CONTROL_PLANE_URL}/api/demo/load-fixtures`, {
+  method: "POST",
+  headers: authHeaders(),
+  body: JSON.stringify({ count: CALLS, prefix: `voice-${Date.now().toString(36)}` }),
+});
+if (!fixturesRes.ok) throw new Error(`load-fixtures ${fixturesRes.status}: ${await fixturesRes.text()}`);
+const fixtures = (await fixturesRes.json()) as Array<{ borrower_id: string; name: string; timezone: string }>;
+log(`minted ${fixtures.length} fixture borrowers (tz=${fixtures[0]?.timezone ?? "?"})`);
+
+log("running the reference simulation scenario...");
+const reference = await loadScenarioReference(CONTROL_PLANE_URL);
+log(`reference: states=${JSON.stringify(reference.statePath)} tools=${JSON.stringify(reference.tools)} outcome=${String(reference.finalOutcome)}`);
+
+log(`starting ${CALLS} concurrent calls...`);
+const results = await Promise.all(
+  fixtures.map((f, i) =>
+    runScriptedCall({
+      lines,
+      controlPlaneUrl: CONTROL_PLANE_URL,
+      borrowerName: f.name,
+      participantIdentity: `borrower-fleet-${i}`,
+      label: `call${String(i).padStart(2, "0")}`,
+    }),
+  ),
+);
+
+const equivalences: Array<{ call: ScriptedCallResult; eq: EquivalenceResult | null; eqError: string | null }> = [];
+for (const call of results) {
+  if (!call.conversationId) {
+    equivalences.push({ call, eq: null, eqError: "no conversation id" });
+    continue;
+  }
+  try {
+    equivalences.push({ call, eq: await checkEquivalence(CONTROL_PLANE_URL, call.conversationId, reference), eqError: null });
+  } catch (e) {
+    equivalences.push({ call, eq: null, eqError: String(e) });
+  }
+}
+
+const green = equivalences.filter((r) => r.eq?.equivalent === true).length;
+const hungUp = results.filter((r) => r.hungUp).length;
+const durations = results.map((r) => r.durationMs).sort((a, b) => a - b);
+const pct = (p: number) => durations[Math.min(durations.length - 1, Math.floor((p / 100) * durations.length))] ?? 0;
+
+console.log("");
+console.log(`  calls                 ${CALLS}`);
+console.log(`  agent hung up         ${hungUp}/${CALLS}`);
+console.log(`  equivalence green     ${green}/${CALLS}`);
+console.log(`  call duration p50/p95 ${pct(50)}ms / ${pct(95)}ms`);
+console.log("");
+for (const { call, eq, eqError } of equivalences) {
+  const verdict = eq?.equivalent ? "EQUIVALENT" : "MISMATCH";
+  console.log(`  ${call.label} ${verdict} hungUp=${call.hungUp} frames=${call.agentAudioFrames} ${call.durationMs}ms ${call.error ?? ""}`);
+  for (const f of eq?.failures ?? []) console.log(`      - ${f}`);
+  if (eqError) console.log(`      - equivalence check failed: ${eqError}`);
+}
+
+const report = {
+  tier: "2-voice",
+  livekit_url: process.env["LIVEKIT_URL"] ?? null,
+  stt_tts_provider: process.env["STT_TTS_PROVIDER"] ?? "inference",
+  speech: lines.describe,
+  calls: CALLS,
+  agent_hung_up: hungUp,
+  equivalence_green: green,
+  duration_ms: { p50: pct(50), p95: pct(95), max: durations.at(-1) ?? 0 },
+  reference: { scenario_id: reference.scenarioId, state_path: reference.statePath, tools: reference.tools, final_outcome: reference.finalOutcome },
+  results: equivalences.map(({ call, eq, eqError }) => ({
+    label: call.label,
+    conversation_id: call.conversationId,
+    hung_up: call.hungUp,
+    agent_audio_frames: call.agentAudioFrames,
+    duration_ms: call.durationMs,
+    call_error: call.error,
+    equivalent: eq?.equivalent ?? false,
+    failures: eq?.failures ?? (eqError ? [eqError] : ["no equivalence result"]),
+    state_path: eq?.statePath ?? [],
+    tools: eq?.tools ?? [],
+    final_outcome: eq?.finalOutcome ?? null,
+  })),
+};
+mkdirSync(REPORT_DIR, { recursive: true });
+const path = `${REPORT_DIR}${new Date().toISOString().slice(0, 10)}-tier2-n${CALLS}.json`;
+writeFileSync(path, `${JSON.stringify(report, null, 2)}\n`);
+log(`report written: ${path}`);
+
+process.exit(green === CALLS ? 0 : 1);
