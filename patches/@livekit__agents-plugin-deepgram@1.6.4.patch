@@ -1,0 +1,58 @@
+diff --git a/dist/tts.cjs b/dist/tts.cjs
+index 3a71b442935b4a28890bae3215d9baeab0d81d71..772a2857444e6f7924648f334e98106b0486a399 100644
+--- a/dist/tts.cjs
++++ b/dist/tts.cjs
+@@ -257,9 +257,21 @@ class SynthesizeStream extends import_agents.tts.SynthesizeStream {
+       }
+     });
+     await new Promise((resolve, reject) => {
+-      ws.on("open", resolve);
+-      ws.on("error", (error) => reject(error));
+-      ws.on("close", (code) => reject(`WebSocket returned ${code}`));
++      const connectTimer = setTimeout(() => {
++        reject(new import_agents.APITimeoutError({ message: "Deepgram TTS WebSocket connect timeout" }));
++      }, Math.min(this.connOptions.timeoutMs, 4e3));
++      ws.on("open", () => {
++        clearTimeout(connectTimer);
++        resolve();
++      });
++      ws.on("error", (error) => {
++        clearTimeout(connectTimer);
++        reject(error);
++      });
++      ws.on("close", (code) => {
++        clearTimeout(connectTimer);
++        reject(`WebSocket returned ${code}`);
++      });
+     });
+     const inputTask = async () => {
+       for await (const data of this.input) {
+diff --git a/dist/tts.js b/dist/tts.js
+index 599b000ee6c8de201be701e9b356d5e4ccea9121..37e8828f372fd416666429ebdffee83d9c090c61 100644
+--- a/dist/tts.js
++++ b/dist/tts.js
+@@ -242,9 +242,21 @@ class SynthesizeStream extends tts.SynthesizeStream {
+       }
+     });
+     await new Promise((resolve, reject) => {
+-      ws.on("open", resolve);
+-      ws.on("error", (error) => reject(error));
+-      ws.on("close", (code) => reject(`WebSocket returned ${code}`));
++      const connectTimer = setTimeout(() => {
++        reject(new APITimeoutError({ message: "Deepgram TTS WebSocket connect timeout" }));
++      }, Math.min(this.connOptions.timeoutMs, 4e3));
++      ws.on("open", () => {
++        clearTimeout(connectTimer);
++        resolve();
++      });
++      ws.on("error", (error) => {
++        clearTimeout(connectTimer);
++        reject(error);
++      });
++      ws.on("close", (code) => {
++        clearTimeout(connectTimer);
++        reject(`WebSocket returned ${code}`);
++      });
+     });
+     const inputTask = async () => {
+       for await (const data of this.input) {

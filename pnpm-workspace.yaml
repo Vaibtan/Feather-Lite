@@ -17,3 +17,6 @@ minimumReleaseAgeExclude:
   - "@livekit/agents-plugin-livekit@1.6.4"
   - "@livekit/agents-plugin-silero@1.6.4"
   - "@livekit/agents@1.6.4"
+
+patchedDependencies:
+  '@livekit/agents-plugin-deepgram@1.6.4': patches/@livekit__agents-plugin-deepgram@1.6.4.patch
