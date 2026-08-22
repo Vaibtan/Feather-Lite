@@ -95,6 +95,26 @@ export interface ScriptedCallOptions {
   readonly log?: (message: string) => void;
 }
 
+/**
+ * One measurement of the composite metric that matters: borrower stops speaking -> agent starts
+ * responding. `ms` is measured from the return of `speak()` (i.e. after `waitForPlayout()`, so the
+ * borrower's last audio frame has actually left the source) to the first delta of the *next* agent
+ * transcription segment. LiveKit forwards agent transcription in step with playout, so the first
+ * delta of a fresh segment is the closest proxy for "first agent audio frame" available to a
+ * headless client — the subscribed audio track carries frames continuously, silence included, so
+ * frame arrival cannot mark speech onset.
+ *
+ * Segments already in flight when the borrower barges in are excluded: a latency is only attributed
+ * to a segment whose text stream *opened* after the borrower fell silent. (The stream-open stamp is
+ * only that guard; the latency itself is measured to the first agent delta, i.e. the same instant
+ * the call's `agentSpeakingAt` transitions.)
+ */
+export interface TurnLatency {
+  /** Which scripted borrower line this reply answers. */
+  readonly turn: string;
+  readonly ms: number;
+}
+
 export interface ScriptedCallResult {
   readonly label: string;
   readonly borrowerName: string;
@@ -105,6 +125,13 @@ export interface ScriptedCallResult {
   readonly agentSegments: ReadonlyArray<string>;
   readonly agentAudioFrames: number;
   readonly durationMs: number;
+  /** Per-turn response latency, in scripted order. See {@link TurnLatency}. */
+  readonly turnLatencies: ReadonlyArray<TurnLatency>;
+  /**
+   * Scripted turns that the borrower spoke but that no agent segment ever answered (the script moved
+   * on first). Reported so a short `turnLatencies` list can never be mistaken for a clean run.
+   */
+  readonly unansweredTurns: ReadonlyArray<string>;
   readonly error: string | null;
 }
 
@@ -157,6 +184,21 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
   let audioFrames = 0;
   let agentSpeakingAt = 0;
   const room = new Room();
+  const turnLatencies: Array<TurnLatency> = [];
+  const unansweredTurns: Array<string> = [];
+  /** Set when the borrower falls silent; cleared by the first delta of the next agent segment. */
+  const awaiting: { reply: { turn: string; at: number } | null } = { reply: null };
+  /**
+   * Give up on the pending turn. Recorded rather than dropped: a silently shorter `turnLatencies`
+   * would flatter the mean, which is exactly the optimistic summary this harness must not produce.
+   */
+  const abandonPendingReply = (why: string) => {
+    const p = awaiting.reply;
+    if (!p) return;
+    unansweredTurns.push(p.turn);
+    log(`no agent reply to "${p.turn}" ${why}; not measured`);
+    awaiting.reply = null;
+  };
 
   try {
     const boot = await bootstrapRoom(opts);
@@ -173,6 +215,7 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       })();
     });
     room.registerTextStreamHandler("lk.transcription", (reader, participantInfo) => {
+      const openedAt = Date.now();
       void (async () => {
         const attrs = reader.info.attributes ?? {};
         const fromAgent = participantInfo.identity.startsWith("agent");
@@ -180,7 +223,18 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
         // Agent segments are delta streams: chunks arrive as the agent speaks; the stream closes at segment end.
         for await (const chunk of reader) {
           text += chunk;
-          if (fromAgent) agentSpeakingAt = Date.now();
+          if (fromAgent) {
+            agentSpeakingAt = Date.now();
+            // Only a segment that *opened* after the borrower fell silent is a reply to it; a segment
+            // already in flight during a barge-in is the line being interrupted, not an answer.
+            const pending = awaiting.reply;
+            if (pending && openedAt >= pending.at) {
+              const ms = Date.now() - pending.at;
+              turnLatencies.push({ turn: pending.turn, ms });
+              log(`response latency (${pending.turn}): ${ms}ms`);
+              awaiting.reply = null;
+            }
+          }
         }
         if (fromAgent) {
           agentSaid.push({ at: Date.now(), text });
@@ -214,6 +268,8 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       for (const f of frames) await source.captureFrame(f);
       await source.waitForPlayout();
       log(`finished: ${label}`);
+      abandonPendingReply("before the next line"); // the script waited, timed out, and moved on
+      awaiting.reply = { turn: label, at: Date.now() };
     };
     /** Wait until the agent has produced a final segment matching `pattern` (after index `from`). */
     const waitAgentSaid = async (pattern: RegExp, from: number, timeoutMs: number): Promise<number> => {
@@ -264,6 +320,7 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
     const waitStart = Date.now();
     while (!agentGone && Date.now() - waitStart < 40_000) await sleep(200);
     log(agentGone ? "agent hung up" : "agent did not hang up within 40s");
+    abandonPendingReply("before the call ended");
 
     return {
       label: opts.label,
@@ -274,6 +331,8 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       agentSegments: agentSaid.map((s) => s.text),
       agentAudioFrames: audioFrames,
       durationMs: Date.now() - t0,
+      turnLatencies: [...turnLatencies],
+      unansweredTurns: [...unansweredTurns],
       error: null,
     };
   } catch (e) {
@@ -286,6 +345,8 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       agentSegments: agentSaid.map((s) => s.text),
       agentAudioFrames: audioFrames,
       durationMs: Date.now() - t0,
+      turnLatencies: [...turnLatencies],
+      unansweredTurns: [...unansweredTurns],
       error: String(e),
     };
   } finally {

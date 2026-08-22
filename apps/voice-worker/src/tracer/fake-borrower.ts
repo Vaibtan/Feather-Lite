@@ -40,6 +40,18 @@ const result = await runScriptedCall({
 log(`call finished in ${result.durationMs}ms; agent audio frames=${result.agentAudioFrames}; agent final segments=${result.agentSegments.length}`);
 if (result.error) log(`call error: ${result.error}`);
 
+// Composite response latency (borrower falls silent -> agent starts replying), per scripted turn.
+// This is the baseline the turn-detector and STT swaps are measured against.
+for (const t of result.turnLatencies) log(`response latency  ${t.turn}: ${t.ms}ms`);
+for (const t of result.unansweredTurns) log(`response latency  ${t}: UNANSWERED (not measured)`);
+if (result.turnLatencies.length === 0) {
+  log("response latency: no turns measured");
+} else {
+  const ms = result.turnLatencies.map((t) => t.ms);
+  const mean = Math.round(ms.reduce((a, b) => a + b, 0) / ms.length);
+  log(`response latency  turns=${ms.length} unanswered=${result.unansweredTurns.length} mean=${mean}ms min=${Math.min(...ms)}ms max=${Math.max(...ms)}ms`);
+}
+
 if (!result.hungUp) {
   log("agent did not hang up: FAIL");
   process.exit(1);

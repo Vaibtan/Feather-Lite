@@ -86,13 +86,23 @@ for (const call of results) {
 const green = equivalences.filter((r) => r.eq?.equivalent === true).length;
 const hungUp = results.filter((r) => r.hungUp).length;
 const durations = results.map((r) => r.durationMs).sort((a, b) => a - b);
-const pct = (p: number) => durations[Math.min(durations.length - 1, Math.floor((p / 100) * durations.length))] ?? 0;
+const percentile = (sorted: ReadonlyArray<number>, p: number) =>
+  sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))] ?? 0;
+const pct = (p: number) => percentile(durations, p);
+
+// Per-turn response latency across every call in the fleet. This — not call durationMs, which is
+// dominated by the scripted sleeps — is the number a latency A/B compares.
+const turnMs = results.flatMap((r) => r.turnLatencies.map((t) => t.ms)).sort((a, b) => a - b);
+const turnPct = (p: number) => percentile(turnMs, p);
+const unanswered = results.reduce((n, r) => n + r.unansweredTurns.length, 0);
 
 console.log("");
 console.log(`  calls                 ${CALLS}`);
 console.log(`  agent hung up         ${hungUp}/${CALLS}`);
 console.log(`  equivalence green     ${green}/${CALLS}`);
 console.log(`  call duration p50/p95 ${pct(50)}ms / ${pct(95)}ms`);
+console.log(`  turn latency  n       ${turnMs.length} (${unanswered} unanswered)`);
+console.log(`  turn latency p50/p95  ${turnPct(50)}ms / ${turnPct(95)}ms`);
 console.log("");
 for (const { call, eq, eqError } of equivalences) {
   const verdict = eq?.equivalent ? "EQUIVALENT" : "MISMATCH";
@@ -110,6 +120,7 @@ const report = {
   agent_hung_up: hungUp,
   equivalence_green: green,
   duration_ms: { p50: pct(50), p95: pct(95), max: durations.at(-1) ?? 0 },
+  turn_latency_ms: { n: turnMs.length, unanswered, p50: turnPct(50), p95: turnPct(95), max: turnMs.at(-1) ?? 0 },
   reference: { scenario_id: reference.scenarioId, state_path: reference.statePath, tools: reference.tools, final_outcome: reference.finalOutcome },
   results: equivalences.map(({ call, eq, eqError }) => ({
     label: call.label,
@@ -117,6 +128,8 @@ const report = {
     hung_up: call.hungUp,
     agent_audio_frames: call.agentAudioFrames,
     duration_ms: call.durationMs,
+    turn_latencies: call.turnLatencies.map((t) => ({ turn: t.turn, ms: t.ms })),
+    unanswered_turns: call.unansweredTurns,
     call_error: call.error,
     equivalent: eq?.equivalent ?? false,
     failures: eq?.failures ?? (eqError ? [eqError] : ["no equivalence result"]),
