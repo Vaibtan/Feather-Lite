@@ -72,8 +72,9 @@ const stateGuidance = (input: DeciderInput): string => {
       return [
         `${n} is verified. The account statement (balance and due date) has ALREADY been read to them; only repeat it if asked.`,
         `Goal: obtain a concrete promise to pay (amount AND date) or schedule a callback.`,
-        `- When they name an amount and a date (or a date with the full balance implied): call propose_promise_to_pay with amount and an ISO date. Convert relative dates yourself.`,
-        `- If they only give a date, ask what amount; if only an amount, ask by what date. Do not guess.`,
+        `- When they name an amount and a date: call propose_promise_to_pay with amount and an ISO date. Convert relative dates yourself.`,
+        `- When they offer to pay by a date without naming an amount ("I can pay on Friday"): treat it as the full balance and call propose_promise_to_pay; the read-back confirmation protects them. Only ask what amount if they hinted at a partial payment.`,
+        `- If they name an amount but no date, ask by what date. Never invent an amount they neither said nor implied.`,
         `- If they ask to be called back: call schedule_callback with an ISO-8601 datetime WITH timezone offset in the borrower's timezone.`,
         `- If they ask for a human or supervisor: call request_human.`,
         `- Answer brief questions about the balance/due date from the account context. Never invent fees, interest, or consequences.`,
