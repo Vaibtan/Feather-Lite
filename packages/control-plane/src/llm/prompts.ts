@@ -93,14 +93,46 @@ const stateGuidance = (input: DeciderInput): string => {
   }
 };
 
+const joinLines = (lines: ReadonlyArray<string>): string => lines.filter((line, i, arr) => !(line === "" && arr[i - 1] === "")).join("\n");
+
+/**
+ * Message layout, and why it is in this order:
+ *
+ *   [0] system   persona + phone manner + RULES  -- identical on every turn
+ *   [1..n]       the transcript so far           -- append-only as the call proceeds
+ *   [n+1] system state, guidance, time, account  -- rewritten every turn
+ *   [n+2] user   what the borrower just said
+ *
+ * OpenAI caches on exact prefix matches and instructs callers to "place static content like
+ * instructions and examples at the beginning of your prompt, and put variable content, such as
+ * user-specific information, at the end"
+ * (<https://developers.openai.com/api/docs/guides/prompt-caching>). The volatile block used to be
+ * message #0: it carries CURRENT STATE and a local time rendered down to the minute, so the
+ * cacheable prefix collapsed to nothing every time the minute rolled over. Moving it behind the
+ * history makes everything before it append-only, which is exactly the shape a prefix cache wants.
+ *
+ * Two things not to fight: caching needs >=1,024 tokens of prefix (same page), so short calls will
+ * not cache at all; and `tools` are part of the prefix and change per state via `toolSpecsFor`, so
+ * the cache re-warms at each state transition. Both are expected -- measure `cached_tokens` rather
+ * than assuming a hit.
+ */
 export const buildMessages = (input: DeciderInput): ReadonlyArray<ChatMessage> => {
   const pc = input.context.publicContext;
   const prot = input.context.protectedContext;
   const mem = input.context.memory;
-  const system = [
+
+  const persona = joinLines([
     `You are ${pc.agent_name}, a voice agent for ${pc.company}, on a live phone call. This is a debt-collection call in the United States; you must be respectful, calm and truthful (FDCPA/UDAAP).`,
     `Speak for a phone: one or two short sentences, one question at a time, no lists, no markdown, no emojis, no phone-tree tone. Never invent numbers, dates, fees or policies.`,
     ``,
+    `RULES:`,
+    `- Tools are the only way to change what the system does. Call at most one tool per turn; when you call a tool, do not also write a message.`,
+    `- Never say that anything has been recorded, scheduled, confirmed or updated. The system says that itself after it is saved.`,
+    `- If the borrower expresses hardship, disputes the debt, or asks you to stop calling, do not argue or push; the system handles those.`,
+    `- If unsure what they meant, ask a short clarifying question.`,
+  ]);
+
+  const current = joinLines([
     `CURRENT STATE: ${input.state}`,
     stateGuidance(input),
     ``,
@@ -112,19 +144,18 @@ export const buildMessages = (input: DeciderInput): ReadonlyArray<ChatMessage> =
       ? `HISTORY: ${mem.prior_conversation_count} prior call(s); recent outcomes ${mem.recent_outcomes.join(", ") || "none"}${mem.last_promise_to_pay ? `; last promise ${mem.last_promise_to_pay.amount} by ${mem.last_promise_to_pay.date}` : ""}${mem.last_callback_requested_at ? `; last callback requested for ${mem.last_callback_requested_at}` : ""}.`
       : ``,
     input.heardAgentText !== null ? `NOTE: the borrower interrupted your previous sentence; they heard only: "${input.heardAgentText}".` : ``,
-    ``,
-    `RULES:`,
-    `- Tools are the only way to change what the system does. Call at most one tool per turn; when you call a tool, do not also write a message.`,
-    `- Never say that anything has been recorded, scheduled, confirmed or updated. The system says that itself after it is saved.`,
-    `- If the borrower expresses hardship, disputes the debt, or asks you to stop calling, do not argue or push; the system handles those.`,
-    `- If unsure what they meant, ask a short clarifying question.`,
-  ]
-    .filter((line, i, arr) => !(line === "" && arr[i - 1] === ""))
-    .join("\n");
+  ]);
 
   const history: ChatMessage[] = input.recentTranscript.map((t) => ({ role: t.speaker === "AGENT" ? "assistant" : "user", content: t.text }));
-  // The last user utterance is the current turn (already the last transcript line); make sure it is present.
+  // The current turn's borrower line is already the last transcript entry; it is spoken once, at the
+  // very end, after the volatile block -- so it must not also sit inside the append-only history.
   const last = history.at(-1);
-  if (!last || last.role !== "user" || last.content !== input.userText) history.push({ role: "user", content: input.userText });
-  return [{ role: "system", content: system }, ...history];
+  if (last && last.role === "user" && last.content === input.userText) history.pop();
+
+  return [
+    { role: "system", content: persona },
+    ...history,
+    { role: "system", content: current },
+    { role: "user", content: input.userText },
+  ];
 };

@@ -19,7 +19,7 @@ import { TurnDeciderInvalidOutput, TurnDeciderUnavailable } from "../errors.js";
 import type { DeciderInput } from "../services/types.js";
 import { Tracing } from "../services/Tracing.js";
 import { TurnDecider, type TurnDeciderShape } from "../services/TurnDecider.js";
-import { LlmClient, type LlmDelta } from "./LlmClient.js";
+import { LlmClient, type LlmDelta, type TokenUsage } from "./LlmClient.js";
 import { PSEUDO_TOOLS, buildMessages, toolSpecsFor, type PseudoToolName } from "./prompts.js";
 
 const isDomainTool = (name: string): name is ToolName => (TOOL_NAMES as ReadonlyArray<string>).includes(name);
@@ -32,7 +32,7 @@ interface Acc {
   toolId: string | null;
   toolArgs: string;
   finished: boolean;
-  usage: { promptTokens: number; completionTokens: number } | null;
+  usage: TokenUsage | null;
 }
 
 export const OpenAITurnDeciderLive: Layer.Layer<TurnDecider, never, AppConfig | LlmClient | Tracing> = Layer.effect(
@@ -51,6 +51,7 @@ export const OpenAITurnDeciderLive: Layer.Layer<TurnDecider, never, AppConfig | 
           tools: toolSpecsFor(input.state, input.allowedTools),
           temperature: 0.3,
           maxTokens: 220,
+          cacheKey: input.conversationId,
           metadata: { conversation_id: input.conversationId, turn_id: input.turnId, state: input.state },
         };
         const acc: Acc = { content: "", mode: "unknown", toolName: null, toolId: null, toolArgs: "", finished: false, usage: null };

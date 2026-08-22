@@ -48,7 +48,7 @@ const run = (script: ReadonlyArray<LlmDelta>, i: DeciderInput) => {
 describe("OpenAITurnDecider — two-mode streaming", () => {
   it("chat mode: content deltas stream through, then a Decision without a tool", async () => {
     const r = await run(
-      [{ _tag: "Content", text: "Before I continue, " }, { _tag: "Content", text: "is this Jordan?" }, { _tag: "Finish", reason: "stop", usage: { promptTokens: 100, completionTokens: 8 } }],
+      [{ _tag: "Content", text: "Before I continue, " }, { _tag: "Content", text: "is this Jordan?" }, { _tag: "Finish", reason: "stop", usage: { promptTokens: 100, completionTokens: 8, cachedTokens: 0 } }],
       input({ userText: "who is this" }),
     );
     expect(r._tag).toBe("Right");
@@ -125,7 +125,8 @@ describe("prompt construction — the request the model actually sees", () => {
         allowedTools: ["get_account_context", "propose_promise_to_pay", "schedule_callback"],
       }),
     );
-    const text = msgs[0]!.content;
+    // Account and memory are volatile, so they live in the trailing block, not the cached prefix.
+    const text = msgs.at(-2)!.content;
     expect(text).toContain("balance due 550.00");
     expect(text).toContain("HISTORY: 1 prior call(s); recent outcomes NO_ANSWER");
     expect(toolSpecsFor("DISCUSSING_PAYMENT", ["propose_promise_to_pay"]).map((t) => t.name)).toEqual(["propose_promise_to_pay", "end_call", "request_human"]);
@@ -137,6 +138,48 @@ describe("prompt construction — the request the model actually sees", () => {
 
   it("interrupted previous line is surfaced to the model", () => {
     const msgs = buildMessages(input({ heardAgentText: "Thank you, Jordan. I'm calling about" }));
-    expect(msgs[0]!.content).toContain('they heard only: "Thank you, Jordan. I\'m calling about"');
+    expect(msgs.at(-2)!.content).toContain('they heard only: "Thank you, Jordan. I\'m calling about"');
+  });
+});
+
+describe("prompt layout is cache-aligned (research §3.1c)", () => {
+  const transcript = [
+    { speaker: "AGENT" as const, text: "May I please speak with Jordan?" },
+    { speaker: "BORROWER" as const, text: "yes this is Jordan" },
+    { speaker: "AGENT" as const, text: "Thank you. Your balance is 550 dollars." },
+    { speaker: "BORROWER" as const, text: "I can pay on Friday" },
+  ];
+
+  it("puts only static instructions first and every volatile field last", () => {
+    const msgs = buildMessages(input({ recentTranscript: transcript, userText: "I can pay on Friday" }));
+    const first = msgs[0]!;
+    expect(first.role).toBe("system");
+    // The cached prefix must not carry anything that changes turn to turn.
+    expect(first.content).toContain("RULES:");
+    expect(first.content).not.toContain("CURRENT STATE");
+    expect(first.content).not.toContain("Borrower local time");
+    expect(first.content).not.toContain("ACCOUNT");
+    // ...and all of it must still reach the model, in the trailing block.
+    const volatileBlock = msgs.at(-2)!;
+    expect(volatileBlock.role).toBe("system");
+    expect(volatileBlock.content).toContain("CURRENT STATE: GREETING");
+    expect(volatileBlock.content).toContain("Borrower local time: Sunday 2:00 PM EDT");
+    expect(volatileBlock.content).toContain("ACCOUNT: not available in this state");
+    // The borrower's current line is spoken once, at the very end.
+    expect(msgs.at(-1)).toEqual({ role: "user", content: "I can pay on Friday" });
+  });
+
+  it("the prefix before the volatile block only grows as the call proceeds", () => {
+    const prefixOf = (msgs: ReadonlyArray<{ role: string; content: string }>) => msgs.slice(0, -2);
+    const turn1 = prefixOf(buildMessages(input({ recentTranscript: transcript.slice(0, 2), userText: "yes this is Jordan" })));
+    const turn2 = prefixOf(buildMessages(input({ recentTranscript: transcript, userText: "I can pay on Friday" })));
+    // Turn 2's prefix starts with turn 1's, byte for byte -- which is what a prefix cache needs.
+    expect(turn2.slice(0, turn1.length)).toEqual(turn1);
+    expect(turn2.length).toBeGreaterThan(turn1.length);
+  });
+
+  it("does not repeat the current borrower line in the history", () => {
+    const msgs = buildMessages(input({ recentTranscript: transcript, userText: "I can pay on Friday" }));
+    expect(msgs.filter((m) => m.role === "user" && m.content === "I can pay on Friday")).toHaveLength(1);
   });
 });
