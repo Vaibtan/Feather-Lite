@@ -6,8 +6,12 @@
  *
  *   1. wait for the agent to finish its opening (the right-party question)
  *   2. say "Yes, this is <name>."
- *   3. wait for the agent's reply to *start*, then barge in with "I can pay on Friday." after ~2s
- *   4. wait for the read-back to finish, say "Yes, that's correct."
+ *   3. wait for the agent's reply to *start*, then barge in with "I can pay 550 dollars on Friday."
+ *      after ~2s (the same amount+date the simulation reference line carries, so the decider's
+ *      choice is not riding on whether the model infers an unstated amount)
+ *   4. wait for the read-back to finish, say "Yes, that's correct." — answering an amount
+ *      clarification first if the agent asks one (an extra DISCUSSING_PAYMENT turn changes neither
+ *      the state path nor the tool sequence, so equivalence is preserved)
  *   5. stay until the agent hangs up
  *
  * This is the real audio path — STT -> llmNode -> control-plane turn -> TTS -> playout -> barge-in —
@@ -51,6 +55,8 @@ const READBACK_TIMEOUT_MS = 60_000;
 export interface ScriptedLines {
   readonly yes: ReadonlyArray<AudioFrame>;
   readonly pay: ReadonlyArray<AudioFrame>;
+  /** Answer to an amount-clarifying question, if the agent asks one instead of proposing. */
+  readonly amount: ReadonlyArray<AudioFrame>;
   readonly confirm: ReadonlyArray<AudioFrame>;
   readonly sampleRate: number;
   readonly channels: number;
@@ -69,15 +75,17 @@ export const loadScriptedLines = async (): Promise<ScriptedLines> => {
     // Sequential on purpose: some TTS plugins (Cartesia was one) multiplex synthesis over a single
     // pooled WebSocket and silently drop a generation under concurrency; sequential costs nothing here.
     const yes = await synthesizeCached(speech.tts, "Yes, this is Jordan.", key);
-    const pay = await synthesizeCached(speech.tts, "Actually, wait. I can pay on Friday.", key);
+    const pay = await synthesizeCached(speech.tts, "Actually, wait. I can pay 550 dollars on Friday.", key);
+    const amount = await synthesizeCached(speech.tts, "The full balance. 550 dollars.", key);
     const confirm = await synthesizeCached(speech.tts, "Yes, that's correct.", key);
     return {
       yes: yes.frames,
       pay: pay.frames,
+      amount: amount.frames,
       confirm: confirm.frames,
       sampleRate: yes.sampleRate,
       channels: yes.channels,
-      cached: yes.cached && pay.cached && confirm.cached,
+      cached: yes.cached && pay.cached && amount.cached && confirm.cached,
       describe: speech.describe,
     };
   } finally {
@@ -304,15 +312,44 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
     log("waiting for agent reply to start...");
     if (await waitAgentSpeaking(SPEECH_START_TIMEOUT_MS)) {
       await sleep(2000);
-      await speak("BARGE-IN: I can pay on Friday", opts.lines.pay);
+      await speak("BARGE-IN: I can pay 550 on Friday", opts.lines.pay);
     } else {
       log("agent did not start speaking; speaking anyway");
-      await speak("I can pay on Friday", opts.lines.pay);
+      await speak("I can pay 550 on Friday", opts.lines.pay);
     }
-    // 4. wait for the read-back ("Please say yes to confirm"), then confirm
+    // 4. wait for the read-back ("Please say yes to confirm"), then confirm. If the agent asks a
+    //    clarifying question about the amount instead of proposing, answer it once and keep
+    //    waiting — a real borrower would, and the deaf alternative is two NO_INPUT timeouts and a
+    //    NO_ANSWER close.
     log("waiting for read-back...");
-    cursor = await waitAgentSaid(/say yes to confirm/i, cursor, READBACK_TIMEOUT_MS);
-    if (cursor < 0) log("no read-back seen before the timeout; confirming anyway (the ledger check will catch it)");
+    {
+      const readback = /say yes to confirm/i;
+      const askedAmount = /amount|how much/i;
+      const start = Date.now();
+      // Anchor past everything already said: the broad amount-pattern must only ever see segments
+      // that came after the barge-in, not the earlier account statement.
+      let from = Math.max(cursor, agentSaid.length);
+      let clarified = false;
+      let rb = -1;
+      while (Date.now() - start < READBACK_TIMEOUT_MS && !agentGone) {
+        const idx = agentSaid.findIndex(
+          (seg, i) => i >= from && (readback.test(seg.text) || (!clarified && askedAmount.test(seg.text))),
+        );
+        if (idx >= 0) {
+          if (readback.test(agentSaid[idx]!.text)) {
+            rb = idx + 1;
+            break;
+          }
+          clarified = true;
+          from = idx + 1;
+          await sleep(2500); // the transcript stream closes before audio playout finishes
+          await speak("the full balance", opts.lines.amount);
+        }
+        await sleep(100);
+      }
+      if (rb < 0) log("no read-back seen before the timeout; confirming anyway (the ledger check will catch it)");
+      else cursor = rb;
+    }
     await sleep(2500); // the transcript stream closes before audio playout finishes
     await speak("yes, that's correct", opts.lines.confirm);
     // 5. wait for hangup
