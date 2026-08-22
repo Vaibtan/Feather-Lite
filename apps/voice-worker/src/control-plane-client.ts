@@ -24,7 +24,8 @@ export type SignalBody =
   | { kind: "barge_in"; partial_agent_text?: string; action_id?: string }
   | { kind: "playout"; turn_id: string; heard_text: string; interrupted: boolean }
   | { kind: "opening_played"; text: string }
-  | { kind: "voicemail_drop"; confidence?: number; action_id?: string };
+  | { kind: "voicemail_drop"; confidence?: number; action_id?: string }
+  | { kind: "turn_metrics"; turn_id: string; eou_delay_ms?: number; transcription_delay_ms?: number; tts_ttfb_ms?: number };
 
 export interface RuntimeResult {
   readonly agent_text: string;

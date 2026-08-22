@@ -39,7 +39,10 @@ const DeciderLive = Layer.unwrapEffect(
     if (cfg.turnDecider === "openai") {
       if (cfg.openaiApiKey === null) yield* Effect.logWarning("TURN_DECIDER=openai but OPENAI_API_KEY is missing; every turn will degrade to the safe fallback");
       yield* Effect.logInfo(`turn decider: openai (${cfg.llmModelByState.GREETING} / ${cfg.llmModelByState.DISCUSSING_PAYMENT}); tracing: ${cfg.langfuse ? "langfuse" : "off"}`);
-      return OpenAITurnDeciderLive.pipe(Layer.provide(OpenAILlmClientLive), Layer.provide(LangfuseTracingLive));
+      // Tracing is provided once, at the root: the decider records the generation and the
+      // orchestrator records the turn it belongs to, and they have to be the same instance for the
+      // two halves to meet.
+      return OpenAITurnDeciderLive.pipe(Layer.provide(OpenAILlmClientLive));
     }
     yield* Effect.logInfo("turn decider: scripted (deterministic)");
     return ScriptedTurnDeciderLive;
@@ -81,6 +84,7 @@ const NodeServerLive = NodeHttpServer.layer(() => createServer(), { port, host }
 const MainLive = Layer.mergeAll(HttpLive, RootRoute, SchedulersLive).pipe(
   Layer.provide(ServicesLive),
   Layer.provide(DeciderLive),
+  Layer.provideMerge(LangfuseTracingLive),
   Layer.provideMerge(DatabaseLive),
   Layer.provideMerge(AppConfigLive),
   Layer.provide(NodeServerLive),

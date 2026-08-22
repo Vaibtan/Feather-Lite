@@ -31,7 +31,10 @@ v1 came first and was rewritten after the review in `docs/reviews/`; it is gone 
 | Deployment on free tiers (Neon + Cloudflare Tunnel + Pages + LiveKit Build) | documented, needs your accounts | `docs/deploy/free-tier-live-demo.md` |
 | **Self-hosted media plane**: LiveKit SFU in Docker (`pnpm lk:up`), Deepgram direct plugins (nova-3 STT + Aura TTS) behind `STT_TTS_PROVIDER` | done | headless voice call + browser call on the local SFU, both equivalence-green vs the simulation; ADR 0006 |
 | **Load tested**: control plane to 200 concurrent conversations, voice fleet to 5 concurrent real calls (10 = CPU ceiling) | done | 200/200 correct outcomes at C=200, 5/5 equivalence-green at N=5; `docs/loadtest/` |
-| PSTN via SIP trunk, Oracle always-on VM, latency waterfall panel, chaos (kill worker mid-call) test, Effect 4 | **not done** | listed honestly in "Not built" below |
+| **Audio-native end-of-turn**: the deprecated text EOU model and its 500 ms endpointing replaced by the auto-provisioned `inference.TurnDetector` (local, no LiveKit Cloud) at 300/2500 | done | tier-2 N=5: per-turn latency p50 2397 → 2145 ms; worker EOU delay ~780 → ~578 ms |
+| **Prompt cache alignment**: static persona/RULES first, transcript next, volatile state/time/account last, `prompt_cache_key` per conversation | done | measured `cached_tokens` 1792/1920 on follow-up turns of a long call; 0 on short calls, which never reach OpenAI's 1,024-token floor |
+| **Per-turn latency waterfall**: EOU delay → transcription → decide TTFT → TTS TTFB, persisted per turn, on the Langfuse span, and drawn in the console (per call and as fleet p50/p95) | done | measured on a local voice call: 578 / 470 / 23 / 420 ms, total p50 1495 ms |
+| PSTN via SIP trunk, Oracle always-on VM, chaos (kill worker mid-call) test, Effect 4 | **not done** | listed honestly in "Not built" below |
 
 Progress by phase: `docs/plans/PROGRESS.md`. Decisions: `docs/adr/`. Review that led to v2:
 `docs/reviews/2026-08-16-plan-vs-implementation-review.md`.
@@ -89,7 +92,7 @@ apps/voice-worker/       LiveKit Agents worker (+ tracer/ harnesses: fake borrow
 apps/console/            Vite + TS operator console (no framework), deploys to Pages
 apps/load-test/          tier-1 control-plane load harness (plain tsx)
 deploy/livekit/          livekit-server config for the self-hosted compose profile
-docs/adr/                0001–0006 · docs/deploy/ runbook · docs/loadtest/ results · docs/plans/ plan, revisions, findings, progress
+docs/adr/                0001–0007 · docs/deploy/ runbook · docs/loadtest/ results · docs/plans/ plan, revisions, findings, progress
 ```
 
 ## Run it locally
@@ -137,11 +140,28 @@ Cloud is the same four lines in reverse. SIP/PSTN stays Cloud-only (no `livekit-
 worker fails such a call fast with a clear log line. Smoke the server with
 `pnpm --filter @feather-lite/voice-worker lk-smoke`.
 
+### Traces with no cloud account (self-hosted Langfuse)
+
+```bash
+pnpm lf:up                       # Langfuse 4 + its Postgres/ClickHouse/Redis/MinIO on http://127.0.0.1:3000
+```
+
+```
+LANGFUSE_PUBLIC_KEY=pk-lf-feather-lite-local
+LANGFUSE_SECRET_KEY=sk-lf-feather-lite-local
+LANGFUSE_BASE_URL=http://127.0.0.1:3000
+```
+
+Those keys are created on first boot by the compose file's headless initialisation, so there is no
+account to make and no UI to click through (sign in as `dev@feather-lite.local` / `feather-lite-local`
+if you want to browse). `LANGFUSE_ENABLED=false` silences the exporter without removing the keys —
+set it before a tier-1 load run, which would otherwise export a span per scripted turn.
+
 ### Tests
 
 ```bash
-pnpm check                       # typecheck + unit tests (domain 92, control-plane 27)
-pnpm test:db                     # 28 DB tests on Postgres: 20 scenarios, repos, concurrency, workers, LLM leak
+pnpm check                       # typecheck + unit tests (domain 94, control-plane 30)
+pnpm test:db                     # 29 DB tests on Postgres: 20 scenarios, repos, concurrency, superseded transcript, workers, LLM leak
 pnpm --filter @feather-lite/voice-worker text-run      # LiveKit text-mode harness against the fake control plane
 pnpm --filter @feather-lite/voice-worker fake-borrower # automated real voice call + SPEC §10.5 equivalence assertion
 pnpm loadtest:tier1 -- --concurrency 100 --ramp 2      # control-plane load: 100 concurrent conversations
@@ -169,8 +189,6 @@ console takes the API URL and bearer token from `?api=…#token=…`.
 - **Horizontal scale** is untested. Load testing found the knee at ~70–85 turns/s on one Node
   process and showed Postgres was nowhere near saturated (raising the pool made it slower); a second
   server process is the obvious next lever, and it has not been run.
-- **Latency waterfall** in the console (EOT → decision TTFT → first audio): `ttft_ms` is on every
-  `turn_end` frame and stored per turn (`conversation_turns.result`); the panel is not built.
 - **Chaos test** (kill the worker mid-call and prove the ledger resumes): the design supports it
   (`active_turn_id`, idempotent turns); no automated test.
 - Semantic (embedding) override safety net, LLM-as-judge evaluation, Durable Objects/Queues,

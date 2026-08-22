@@ -1,0 +1,164 @@
+# Self-hosted Langfuse for local development (`pnpm lf:up` / `pnpm lf:down`).
+#
+# Kept in its own compose file rather than the root one: Langfuse needs five containers of its own
+# (its own Postgres, ClickHouse, Redis, MinIO, plus web + worker), and none of them have anything to
+# do with running Feather-Lite. `pnpm db:up` should stay a one-container command.
+#
+# Derived from the official compose at https://github.com/langfuse/langfuse (image tag 4), trimmed
+# to the settings this project actually uses. Ports are deliberately chosen not to collide with the
+# app: Langfuse's Postgres is on 5432, Feather-Lite's on 5434.
+#
+# The LANGFUSE_INIT_* block is headless initialisation
+# (https://langfuse.com/self-hosting/administration/headless-initialization): it creates the org,
+# project, user and API keys on first boot, so the keys in .env are fixed and known in advance
+# instead of being clicked out of a fresh UI. These are local-development credentials for a
+# container bound to 127.0.0.1 and are not secrets.
+services:
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:4
+    container_name: feather-lite-langfuse-worker
+    restart: always
+    depends_on: &langfuse-depends-on
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3030:3030"
+    environment: &langfuse-worker-env
+      NEXTAUTH_URL: http://localhost:3000
+      DATABASE_URL: postgresql://postgres:postgres@langfuse-postgres:5432/postgres
+      SALT: feather-lite-local-salt
+      # Quoted: unquoted, YAML reads a run of zeros as the number 0 and Langfuse rejects it for
+      # not being 64 hex characters. Local-only key; a real deployment generates one per environment.
+      ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: 6379
+      REDIS_AUTH: myredissecret
+      REDIS_TLS_ENABLED: "false"
+
+  langfuse-web:
+    image: docker.langfuse.com/langfuse/langfuse:4
+    container_name: feather-lite-langfuse-web
+    restart: always
+    depends_on: *langfuse-depends-on
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      <<: *langfuse-worker-env
+      NEXTAUTH_SECRET: feather-lite-local-nextauth-secret
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9090
+      # Headless init: fixed org/project/user/keys on first boot. Matches .env.example.
+      LANGFUSE_INIT_ORG_ID: feather-lite
+      LANGFUSE_INIT_ORG_NAME: Feather-Lite
+      LANGFUSE_INIT_PROJECT_ID: feather-lite-local
+      LANGFUSE_INIT_PROJECT_NAME: Feather-Lite (local)
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-feather-lite-local
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-feather-lite-local
+      LANGFUSE_INIT_USER_EMAIL: dev@feather-lite.local
+      LANGFUSE_INIT_USER_NAME: Feather-Lite Dev
+      LANGFUSE_INIT_USER_PASSWORD: feather-lite-local
+
+  langfuse-clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:25.12
+    container_name: feather-lite-langfuse-clickhouse
+    restart: always
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 1s
+
+  langfuse-minio:
+    image: docker.io/minio/minio
+    container_name: feather-lite-langfuse-minio
+    restart: always
+    entrypoint: sh
+    # create the 'langfuse' bucket before starting the service
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret
+    ports:
+      - "127.0.0.1:9090:9000"
+    volumes:
+      - langfuse_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+      start_period: 1s
+
+  langfuse-redis:
+    image: docker.io/redis:7
+    container_name: feather-lite-langfuse-redis
+    restart: always
+    command: >
+      --requirepass myredissecret
+      --maxmemory-policy noeviction
+    volumes:
+      - langfuse_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 20
+
+  langfuse-postgres:
+    image: docker.io/postgres:17
+    container_name: feather-lite-langfuse-postgres
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - langfuse_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  langfuse_postgres_data:
+  langfuse_clickhouse_data:
+  langfuse_clickhouse_logs:
+  langfuse_minio_data:
+  langfuse_redis_data:

@@ -56,6 +56,8 @@ export const OpenAITurnDeciderLive: Layer.Layer<TurnDecider, never, AppConfig | 
         };
         const acc: Acc = { content: "", mode: "unknown", toolName: null, toolId: null, toolArgs: "", finished: false, usage: null };
         const startedAt = Date.now();
+        /** First byte of model output, whatever kind — the generation's completion-start. */
+        let firstChunkAt: number | null = null;
 
         const deltas = llm.stream(request).pipe(
           // One retry on transport failure BEFORE any output was produced (never mid-stream).
@@ -64,6 +66,7 @@ export const OpenAITurnDeciderLive: Layer.Layer<TurnDecider, never, AppConfig | 
 
         const chunks: Stream.Stream<TurnChunk, TurnDeciderUnavailable | TurnDeciderInvalidOutput> = deltas.pipe(
           Stream.mapConcat((d: LlmDelta): ReadonlyArray<TurnChunk> => {
+            if (firstChunkAt === null && d._tag !== "Finish") firstChunkAt = Date.now();
             switch (d._tag) {
               case "Content": {
                 if (d.text.length === 0) return [];
@@ -128,6 +131,7 @@ export const OpenAITurnDeciderLive: Layer.Layer<TurnDecider, never, AppConfig | 
                   input: request.messages,
                   output: dec,
                   latencyMs,
+                  ttftMs: firstChunkAt === null ? null : firstChunkAt - startedAt,
                   usage: acc.usage,
                 });
                 return Stream.make(decision(dec));

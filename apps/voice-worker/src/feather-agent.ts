@@ -71,6 +71,11 @@ export class FeatherAgent extends voice.Agent {
   private endRequested = false;
   private pendingSays: Promise<void>[] = [];
   private noInputStrikes = 0;
+  /**
+   * EOU metrics arrive before `llmNode` runs, so before the turn they belong to has an id. Held
+   * here until the turn is created, then reported together with that turn's TTS time-to-first-byte.
+   */
+  private pendingEou: { eouDelayMs?: number | undefined; transcriptionDelayMs?: number | undefined } | null = null;
 
   constructor(private readonly deps: FeatherAgentDeps) {
     super({ instructions: "Feather-Lite voice runtime. Spoken text is supplied by the control plane; the model is never called here." });
@@ -97,6 +102,31 @@ export class FeatherAgent extends voice.Agent {
     } catch (e) {
       this.deps.log("no_input failed", { error: String(e) });
     }
+  }
+
+  /** `eou_metrics` from the session: measured before this turn exists, so it waits for one. */
+  onEouMetrics(m: { eouDelayMs?: number | undefined; transcriptionDelayMs?: number | undefined }): void {
+    this.pendingEou = m;
+  }
+
+  /**
+   * `tts_metrics` from the session: the last piece of the turn's waterfall. Reporting here means one
+   * signal per turn carrying all three worker-side numbers, rather than a channel per metric.
+   */
+  async onTtsMetrics(m: { ttfbMs?: number | undefined }): Promise<void> {
+    const turnId = this.currentTurnId;
+    if (!turnId) return; // the opening and other say()s are not control-plane turns
+    const eou = this.pendingEou;
+    this.pendingEou = null;
+    await this.deps.client
+      .signal(this.deps.conversationId, {
+        kind: "turn_metrics",
+        turn_id: turnId,
+        ...(eou?.eouDelayMs !== undefined ? { eou_delay_ms: eou.eouDelayMs } : {}),
+        ...(eou?.transcriptionDelayMs !== undefined ? { transcription_delay_ms: eou.transcriptionDelayMs } : {}),
+        ...(m.ttfbMs !== undefined ? { tts_ttfb_ms: m.ttfbMs } : {}),
+      })
+      .catch((e) => this.deps.log("turn_metrics signal failed", { error: String(e) }));
   }
 
   /** Report what the borrower actually heard of the last generated reply (barge-in truth). */

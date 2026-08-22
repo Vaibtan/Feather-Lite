@@ -17,7 +17,13 @@ export interface AppConfigShape {
   readonly openaiApiKey: Redacted.Redacted<string> | null;
   readonly openaiBaseUrl: string;
   readonly turnDecider: "scripted" | "openai";
-  readonly langfuse: { readonly publicKey: string; readonly secretKey: Redacted.Redacted<string>; readonly baseUrl: string } | null;
+  readonly langfuse: { readonly publicKey: string; readonly secretKey: Redacted.Redacted<string>; readonly baseUrl: string; readonly environment: string } | null;
+  /**
+   * Kill switch, separate from the keys. A tier-1 load run drives tens of thousands of turns
+   * through the scripted decider; `LANGFUSE_ENABLED=false` silences the exporter for that run
+   * without anyone having to strip credentials out of .env and put them back afterwards.
+   */
+  readonly langfuseEnabled: boolean;
   readonly livekit: { readonly url: string; readonly apiKey: string; readonly apiSecret: Redacted.Redacted<string>; readonly agentName: string } | null;
   /** Demo conveniences: clock override on /calls/start, "reset demo" endpoint. */
   readonly demoMode: boolean;
@@ -63,6 +69,8 @@ export const appConfig: Config.Config<AppConfigShape> = Config.all({
   langfusePublicKey: optionalString("LANGFUSE_PUBLIC_KEY"),
   langfuseSecretKey: optionalRedacted("LANGFUSE_SECRET_KEY"),
   langfuseBaseUrl: Config.string("LANGFUSE_BASE_URL").pipe(Config.withDefault("https://cloud.langfuse.com")),
+  langfuseEnvironment: Config.string("LANGFUSE_TRACING_ENVIRONMENT").pipe(Config.withDefault("local")),
+  langfuseEnabled: Config.boolean("LANGFUSE_ENABLED").pipe(Config.withDefault(true)),
   livekitUrl: optionalString("LIVEKIT_URL"),
   livekitApiKey: optionalString("LIVEKIT_API_KEY"),
   livekitApiSecret: optionalRedacted("LIVEKIT_API_SECRET"),
@@ -89,8 +97,9 @@ export const appConfig: Config.Config<AppConfigShape> = Config.all({
       turnDecider: c.turnDecider,
       langfuse:
         c.langfusePublicKey._tag === "Some" && c.langfuseSecretKey._tag === "Some"
-          ? { publicKey: c.langfusePublicKey.value, secretKey: c.langfuseSecretKey.value, baseUrl: c.langfuseBaseUrl }
+          ? { publicKey: c.langfusePublicKey.value, secretKey: c.langfuseSecretKey.value, baseUrl: c.langfuseBaseUrl, environment: c.langfuseEnvironment }
           : null,
+      langfuseEnabled: c.langfuseEnabled,
       livekit:
         c.livekitUrl._tag === "Some" && c.livekitApiKey._tag === "Some" && c.livekitApiSecret._tag === "Some"
           ? { url: c.livekitUrl.value, apiKey: c.livekitApiKey.value, apiSecret: c.livekitApiSecret.value, agentName: c.livekitAgentName }

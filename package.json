@@ -18,6 +18,8 @@
     "db:down": "docker compose down",
     "lk:up": "docker compose --profile livekit up -d livekit",
     "lk:down": "docker compose --profile livekit stop livekit",
+    "lf:up": "docker compose -f deploy/langfuse/docker-compose.yml -p feather-lite-langfuse up -d",
+    "lf:down": "docker compose -f deploy/langfuse/docker-compose.yml -p feather-lite-langfuse stop",
     "loadtest:tier1": "pnpm --filter @feather-lite/load-test tier1",
     "loadtest:tier2": "pnpm --filter @feather-lite/voice-worker fake-borrower-fleet",
     "dev": "pnpm --parallel --filter @feather-lite/server --filter @feather-lite/voice-worker --filter @feather-lite/console dev",

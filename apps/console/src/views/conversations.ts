@@ -1,5 +1,6 @@
 import { api, type ConversationDetail, type ConversationSummary } from "../api.js";
 import { badge, clear, fmtDur, fmtTime, h, pre, stateBadge } from "../dom.js";
+import { renderWaterfall } from "./latency.js";
 
 export const conversationsView = (root: HTMLElement, onStop: (fn: () => void) => void) => {
   clear(root);
@@ -111,10 +112,16 @@ export const detailView = (root: HTMLElement, id: string, onStop: (fn: () => voi
   const transcript = h("div", { class: "card" });
   const timeline = h("div", { class: "card" });
   const side = h("div", { class: "card" });
+  const latency = h("div", { class: "card" });
   root.append(
     h("div", { class: "row", style: "justify-content:space-between" }, h("h1", {}, "Conversation"), h("a", { href: "#/conversations" }, "← all conversations")),
     head,
-    h("div", { class: "grid2", style: "margin-top:12px" }, h("div", {}, h("h2", {}, "Transcript"), transcript, h("h2", {}, "Replay, actions & jobs"), side), h("div", {}, h("h2", {}, "Event timeline"), timeline)),
+    h(
+      "div",
+      { class: "grid2", style: "margin-top:12px" },
+      h("div", {}, h("h2", {}, "Transcript"), transcript, h("h2", {}, "Latency per turn"), latency, h("h2", {}, "Replay, actions & jobs"), side),
+      h("div", {}, h("h2", {}, "Event timeline"), timeline),
+    ),
   );
   let stopped = false;
   const load = async () => {
@@ -135,6 +142,10 @@ export const detailView = (root: HTMLElement, id: string, onStop: (fn: () => voi
       transcript.append(renderTranscript(d));
       clear(timeline);
       timeline.append(renderTimeline(d));
+      clear(latency);
+      // Separate request: the waterfall reads conversation_turns, not the event ledger, and a
+      // failure here must not blank the transcript next to it.
+      latency.append(await api.turnLatencies(id).then(renderWaterfall, (e: unknown) => h("div", { class: "err small" }, `latency unavailable: ${String(e)}`)));
       clear(side);
       side.append(
         h("h3", {}, "Replay from events"),

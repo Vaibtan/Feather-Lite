@@ -5,7 +5,7 @@
 import { Effect, Layer, ManagedRuntime, Redacted } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import pg from "pg";
-import { AppConfigTest, DatabaseLive } from "../../src/index.js";
+import { AppConfigTest, DatabaseLive, NoopTracingLive } from "../../src/index.js";
 import type { AppConfigShape } from "../../src/index.js";
 
 /**
@@ -32,10 +32,17 @@ const ensureTestDatabase = Effect.promise(async () => {
   }
 });
 
+/**
+ * Infra every DB test needs: the test database plus a no-op Tracing (the orchestrator traces every
+ * turn now, and no test should be exporting spans anywhere). A test that wants to assert on what
+ * was traced provides `RecordingTracing().layer` over the top.
+ */
 export const makeInfraLayer = (overrides: Partial<AppConfigShape> = {}) =>
   Layer.unwrapEffect(
     ensureTestDatabase.pipe(
-      Effect.map(() => DatabaseLive.pipe(Layer.provideMerge(AppConfigTest({ databaseUrl: Redacted.make(testUrl), ...overrides })))),
+      Effect.map(() =>
+        Layer.mergeAll(DatabaseLive, NoopTracingLive).pipe(Layer.provideMerge(AppConfigTest({ databaseUrl: Redacted.make(testUrl), ...overrides }))),
+      ),
     ),
   );
 

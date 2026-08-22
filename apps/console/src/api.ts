@@ -81,6 +81,37 @@ export interface TimelineEntry {
   payload: Record<string, unknown>;
   created_at: string;
 }
+/** One turn's latency waterfall; see the API's TurnLatencyRow. Any component may be null. */
+export interface TurnLatencyRow {
+  turn_id: string;
+  started_at: string;
+  status: string;
+  state: string | null;
+  eou_delay_ms: number | null;
+  transcription_delay_ms: number | null;
+  ttft_ms: number | null;
+  tts_ttfb_ms: number | null;
+  total_ms: number | null;
+}
+
+export interface Percentiles {
+  n: number;
+  p50: number | null;
+  p95: number | null;
+}
+
+export interface LatencyAggregate {
+  conversations: number;
+  turns: number;
+  /** Readings discarded as impossible; non-zero means something is writing bad durations. */
+  implausible_dropped: number;
+  eou_delay_ms: Percentiles;
+  transcription_delay_ms: Percentiles;
+  ttft_ms: Percentiles;
+  tts_ttfb_ms: Percentiles;
+  total_ms: Percentiles;
+}
+
 export interface ConversationDetail {
   conversation: {
     id: string;
@@ -155,6 +186,8 @@ export const api = {
   borrowers: () => req<Borrower[]>("/api/borrowers"),
   conversations: (limit = 50, offset = 0) => req<{ items: ConversationSummary[]; total: number }>(`/api/conversations?limit=${limit}&offset=${offset}`),
   conversation: (id: string) => req<ConversationDetail>(`/api/conversations/${id}`),
+  turnLatencies: (id: string) => req<TurnLatencyRow[]>(`/api/conversations/${id}/latency`),
+  latencyAggregate: (calls = 20) => req<LatencyAggregate>(`/api/system/latency?calls=${calls}`),
   startCall: (borrower_id: string, contact_point_id: string) =>
     req<{ conversation_id: string; opening_text: string }>("/api/calls/start", { method: "POST", body: JSON.stringify({ borrower_id, contact_point_id, channel: "simulated" }) }),
   noInput: (id: string) => req<{ agent_text: string; new_state: string; end_call: boolean; outcome: string | null }>(`/api/conversations/${id}/no_input`, { method: "POST" }),

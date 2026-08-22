@@ -155,6 +155,19 @@ export const SignalRequest = Schema.Union(
   Schema.Struct({ kind: Schema.Literal("playout"), turn_id: Schema.String, heard_text: Schema.String, interrupted: Schema.Boolean }),
   Schema.Struct({ kind: Schema.Literal("opening_played"), text: Schema.String }),
   Schema.Struct({ kind: Schema.Literal("voicemail_drop"), confidence: Schema.optional(Schema.Number), action_id: Schema.optional(Schema.String) }),
+  /**
+   * Runtime latency the voice worker measured for a turn and the control plane cannot see: the
+   * end-of-utterance delay and transcription delay (before `/turn` was ever called) and the TTS
+   * time-to-first-byte (after it returned). Together with the decide TTFT the control plane already
+   * records, one turn row then holds the whole borrower-stops-speaking -> agent-audio waterfall.
+   */
+  Schema.Struct({
+    kind: Schema.Literal("turn_metrics"),
+    turn_id: Schema.String,
+    eou_delay_ms: Schema.optional(Schema.Number),
+    transcription_delay_ms: Schema.optional(Schema.Number),
+    tts_ttfb_ms: Schema.optional(Schema.Number),
+  }),
 );
 export type SignalRequest = typeof SignalRequest.Type;
 
@@ -236,10 +249,56 @@ export const VoiceSessionResponse = Schema.Struct({
 
 const IdPath = Schema.Struct({ id: Schema.String });
 
+/**
+ * One turn's latency waterfall. The four components are the serial cost of a reply: the borrower
+ * stops speaking, the session decides the turn is over (`eou_delay_ms`), the transcript lands
+ * (`transcription_delay_ms`), the decider produces its first token (`ttft_ms`), and TTS produces its
+ * first byte (`tts_ttfb_ms`). Any of them is null when the turn had no voice worker behind it —
+ * simulated calls and load tests fill in only `ttft_ms`.
+ */
+export const TurnLatencyRow = Schema.Struct({
+  turn_id: Schema.String,
+  started_at: Schema.String,
+  status: Schema.String,
+  state: Schema.NullOr(Schema.String),
+  eou_delay_ms: Schema.NullOr(Schema.Number),
+  transcription_delay_ms: Schema.NullOr(Schema.Number),
+  ttft_ms: Schema.NullOr(Schema.Number),
+  tts_ttfb_ms: Schema.NullOr(Schema.Number),
+  /** Sum of whichever components are present — the height of the stacked bar. */
+  total_ms: Schema.NullOr(Schema.Number),
+});
+
+const Percentiles = Schema.Struct({ n: Schema.Number, p50: Schema.NullOr(Schema.Number), p95: Schema.NullOr(Schema.Number) });
+
+export type TurnLatencyRow = typeof TurnLatencyRow.Type;
+
+export const LatencyAggregate = Schema.Struct({
+  conversations: Schema.Number,
+  turns: Schema.Number,
+  /**
+   * Component readings discarded as impossible (negative, or over five minutes). Surfaced rather
+   * than silently dropped, so "no data" and "we hid data" are distinguishable: a non-zero count here
+   * means something is writing bad durations, not that the calls were quiet.
+   */
+  implausible_dropped: Schema.Number,
+  eou_delay_ms: Percentiles,
+  transcription_delay_ms: Percentiles,
+  ttft_ms: Percentiles,
+  tts_ttfb_ms: Percentiles,
+  total_ms: Percentiles,
+});
+export type LatencyAggregate = typeof LatencyAggregate.Type;
+
 export const SystemGroup = HttpApiGroup.make("system")
   .add(HttpApiEndpoint.get("healthz", "/healthz").addSuccess(Schema.Struct({ status: Schema.Literal("ok"), version: Schema.String })))
   .add(HttpApiEndpoint.get("readyz", "/readyz").addSuccess(Schema.Struct({ status: Schema.Literal("ready"), database: Schema.Literal("ok") })).addError(ApiUnavailable))
   .add(HttpApiEndpoint.get("status", "/api/system/status").addSuccess(SystemStatus))
+  .add(
+    HttpApiEndpoint.get("latency", "/api/system/latency")
+      .setUrlParams(Schema.Struct({ calls: Schema.optional(Schema.NumberFromString) }))
+      .addSuccess(LatencyAggregate),
+  )
   .add(HttpApiEndpoint.post("heartbeat", "/api/agents/heartbeat").setPayload(HeartbeatRequest).addSuccess(Schema.Struct({ ok: Schema.Literal(true) })));
 
 export const CallsGroup = HttpApiGroup.make("calls")
@@ -271,7 +330,8 @@ export const ConversationsGroup = HttpApiGroup.make("conversations")
       .addError(ApiConflict),
   )
   .add(HttpApiEndpoint.post("signal", "/api/conversations/:id/signal").setPath(IdPath).setPayload(SignalRequest).addSuccess(RuntimeResult).addError(ApiNotFound).addError(ApiConflict))
-  .add(HttpApiEndpoint.post("noInput", "/api/conversations/:id/no_input").setPath(IdPath).addSuccess(RuntimeResult).addError(ApiNotFound).addError(ApiConflict));
+  .add(HttpApiEndpoint.post("noInput", "/api/conversations/:id/no_input").setPath(IdPath).addSuccess(RuntimeResult).addError(ApiNotFound).addError(ApiConflict))
+  .add(HttpApiEndpoint.get("latency", "/api/conversations/:id/latency").setPath(IdPath).addSuccess(Schema.Array(TurnLatencyRow)).addError(ApiNotFound));
 
 export const TestingGroup = HttpApiGroup.make("testing")
   .add(HttpApiEndpoint.get("scenarios", "/api/testing/scenarios").addSuccess(Schema.Array(ScenarioSummary)))

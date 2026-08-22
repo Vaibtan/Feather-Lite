@@ -67,6 +67,7 @@ import { ContextBuilder, type ConversationContext } from "./ContextBuilder.js";
 import { IdGen } from "./Ids.js";
 import { OutboxService } from "./Outbox.js";
 import { SchedulingService } from "./Scheduling.js";
+import { Tracing } from "./Tracing.js";
 import { TurnDecider } from "./TurnDecider.js";
 import type { DeciderInput, TurnResult } from "./types.js";
 
@@ -91,7 +92,14 @@ export type Signal =
   | { readonly kind: "barge_in"; readonly partialAgentText?: string | undefined; readonly actionId?: string | undefined }
   | { readonly kind: "playout"; readonly turnId: string; readonly heardText: string; readonly interrupted: boolean }
   | { readonly kind: "opening_played"; readonly text: string }
-  | { readonly kind: "voicemail_drop"; readonly confidence?: number | undefined; readonly actionId?: string | undefined };
+  | { readonly kind: "voicemail_drop"; readonly confidence?: number | undefined; readonly actionId?: string | undefined }
+  | {
+      readonly kind: "turn_metrics";
+      readonly turnId: string;
+      readonly eouDelayMs?: number | undefined;
+      readonly transcriptionDelayMs?: number | undefined;
+      readonly ttsTtfbMs?: number | undefined;
+    };
 
 export type Emit = (frame: TurnFrame) => Effect.Effect<void>;
 
@@ -127,6 +135,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
     const scheduling = yield* SchedulingService;
     const outbox = yield* OutboxService;
     const decider = yield* TurnDecider;
+    const tracing = yield* Tracing;
 
     /* ------------------------------ helpers ------------------------------ */
 
@@ -411,6 +420,14 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
       Effect.gen(function* () {
         const startedAt = yield* DateTime.now;
         const startedMs = DateTime.toEpochMillis(startedAt);
+        /**
+         * Wall clock, deliberately separate from `startedMs`. `startedAt` comes from the Effect
+         * clock, which the VirtualClock shifts for seeded history and scenarios — so measuring a
+         * duration as `Date.now() - startedMs` mixed a real timestamp with a virtual one and
+         * produced nonsense (seeded rows carried a "TTFT" of several days). Ledger timestamps stay
+         * on the virtual clock; elapsed time is measured here.
+         */
+        const wallStartedMs = Date.now();
         const nowDate = DateTime.toDateUtc(startedAt);
 
         /* ---------- T1 ---------- */
@@ -518,12 +535,12 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
             Stream.runForEach((chunk) =>
               Effect.gen(function* () {
                 if (chunk._tag === "TextDelta") {
-                  if (ttft === null) ttft = Date.now() - startedMs;
+                  if (ttft === null) ttft = Date.now() - wallStartedMs;
                   streamed += chunk.text;
                   yield* emit({ type: "delta", text: chunk.text });
                 } else {
                   decision = chunk.decision;
-                  if (ttft === null) ttft = Date.now() - startedMs;
+                  if (ttft === null) ttft = Date.now() - wallStartedMs;
                 }
               }),
             ),
@@ -706,12 +723,48 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
         );
 
         if (t2 === null) {
+          yield* tracing.turn({
+            conversationId: row.id,
+            turnId: params.turnId,
+            state,
+            newState: null,
+            userText: params.userText,
+            agentText: decisionResult.streamedText,
+            tool: null,
+            outcome: null,
+            superseded: true,
+            degraded: decisionResult.degraded,
+            startedAtMs: wallStartedMs,
+            endedAtMs: Date.now(),
+            ttftMs: decisionResult.ttftMs,
+          });
           yield* emit({ type: "error", turn_id: params.turnId, code: "SUPERSEDED", message: "turn superseded by a newer user turn" });
           return { turnId: params.turnId, agentText: decisionResult.streamedText, newState: state, toolCalled: null, callControlAction: null, outcome: null, endCall: false, degraded: false, ttftMs: decisionResult.ttftMs } satisfies TurnResult;
         }
         /* ---------- emit after commit ---------- */
         for (const s of t2.says) yield* emit({ type: "say", text: s.text, allow_interruptions: s.allowInterruptions });
         const r = t2.result;
+        yield* tracing.turn({
+          conversationId: row.id,
+          turnId: params.turnId,
+          state,
+          newState: r.newState,
+          userText: params.userText,
+          agentText: r.agentText,
+          tool: r.toolCalled?.name ?? null,
+          outcome: r.outcome,
+          superseded: false,
+          degraded: r.degraded ? (decisionResult.degraded ?? "degraded") : null,
+          startedAtMs: wallStartedMs,
+          endedAtMs: Date.now(),
+          ttftMs: r.ttftMs,
+        });
+        // The call is over. On a simulated call there is no voice worker, so nothing more is coming
+        // and every held turn can be emitted now. On a voice call the last turn's EOU/STT/TTS
+        // numbers are still in flight (they arrive a few hundred ms later, as a turn_metrics
+        // signal) — emitting here would publish that turn with half its waterfall missing, so it is
+        // left to the signal, with the shutdown flush as the backstop.
+        if ((r.endCall || r.outcome !== null) && row.channel !== "voice") yield* tracing.finalize(row.id);
         yield* emit({
           type: "turn_end",
           turn_id: params.turnId,
@@ -728,6 +781,15 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
       });
 
     /* ---------------------------- processNoInput ---------------------------- */
+
+    /**
+     * A call can end down several paths — a turn, a no-input strike, a hangup or no-answer signal —
+     * and every one of them must release the turns the tracer is still holding for voice-worker
+     * metrics. Missing one does not lose a turn quietly: it leaves it buffered until the process
+     * exits, which on a long-running server means the trace is never written at all.
+     */
+    const finalizeTracingIfEnded = (conversationId: string) => (r: TurnResult) =>
+      r.endCall || r.outcome !== null ? tracing.finalize(conversationId) : Effect.void;
 
     const processNoInput = (conversationId: string, actionId: string | null = null) =>
       sql.withTransaction(
@@ -750,7 +812,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           yield* append(row.id, { type: "AGENT_TURN", payload: { text, state: row.currentState, speak_mode: "interruptible" } }, at);
           return { turnId: `no-input-${strike}`, agentText: text, newState: row.currentState, toolCalled: null, callControlAction: null, outcome: null, endCall: false, degraded: false, ttftMs: null } satisfies TurnResult;
         }),
-      );
+      ).pipe(Effect.tap(finalizeTracingIfEnded(conversationId)));
 
     /* ---------------------------- processSignal ---------------------------- */
 
@@ -771,6 +833,22 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
             ...r,
           });
 
+          if (signal.kind === "turn_metrics") {
+            // Pure telemetry: merged into the turn row that already holds ttft_ms, and handed to the
+            // tracer, which has been holding this turn's span open waiting for exactly these numbers.
+            const latency = {
+              eou_delay_ms: signal.eouDelayMs ?? null,
+              transcription_delay_ms: signal.transcriptionDelayMs ?? null,
+              tts_ttfb_ms: signal.ttsTtfbMs ?? null,
+            };
+            yield* conv.mergeTurnResult({ conversationId: row.id, turnId: signal.turnId, patch: latency });
+            yield* tracing.turnLatency(row.id, signal.turnId, {
+              eouDelayMs: latency.eou_delay_ms,
+              transcriptionDelayMs: latency.transcription_delay_ms,
+              ttsTtfbMs: latency.tts_ttfb_ms,
+            });
+            return done({ agentText: "", newState: row.currentState });
+          }
           if (signal.kind === "playout") {
             yield* append(row.id, { type: "AGENT_TURN_PLAYOUT", payload: { turn_id: signal.turnId, heard_text: signal.heardText, interrupted: signal.interrupted } }, at);
             return done({ agentText: "", newState: row.currentState });
@@ -821,7 +899,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           yield* finalize({ row, ctx, currentState: row.currentState, outcome, metadata: { reason: signal.reason ?? "hangup" }, at });
           return done({ agentText: "", newState: "COMPLETED", callControlAction: { action: "HANGUP", action_id: logged.action_id }, outcome, endCall: true });
         }),
-      );
+      ).pipe(Effect.tap(finalizeTracingIfEnded(conversationId)));
 
     return { processTurn, processNoInput, processSignal } as const;
   }),

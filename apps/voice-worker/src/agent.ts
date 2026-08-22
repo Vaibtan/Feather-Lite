@@ -142,6 +142,14 @@ export default defineAgent({
       if (m["type"] === "tts_metrics" || m["type"] === "eou_metrics") {
         log("metrics", { type: m["type"], ttfbMs: m["ttfbMs"], eouDelayMs: m["endOfUtteranceDelayMs"], transcriptionDelayMs: m["transcriptionDelayMs"] });
       }
+      // ...and on to the ledger, so the turn row holds the whole waterfall rather than the worker's
+      // half of it living only in this log line.
+      const num = (v: unknown) => (typeof v === "number" ? v : undefined);
+      if (m["type"] === "eou_metrics") {
+        agent.onEouMetrics({ eouDelayMs: num(m["endOfUtteranceDelayMs"]), transcriptionDelayMs: num(m["transcriptionDelayMs"]) });
+      } else if (m["type"] === "tts_metrics") {
+        void agent.onTtsMetrics({ ttfbMs: num(m["ttfbMs"]) });
+      }
     });
     session.on(voice.AgentSessionEventTypes.Error, (ev) => log("session error", { error: String(ev.error) }));
     session.on(voice.AgentSessionEventTypes.Close, (ev) => {

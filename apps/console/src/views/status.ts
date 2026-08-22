@@ -4,6 +4,7 @@
  */
 import { api, apiBase, apiToken, setApiBase, setApiToken, type SystemStatus } from "../api.js";
 import { ago, clear, h, pre } from "../dom.js";
+import { renderLatencyAggregate } from "./latency.js";
 
 export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) => {
   clear(root);
@@ -11,6 +12,7 @@ export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) 
   const counters = h("div", { class: "card" });
   const ledger = h("div", { class: "grid3" });
   const agents = h("div", { class: "card" });
+  const latency = h("div", { class: "card" });
   const seedOut = h("div", { class: "small muted", style: "margin-top:8px" });
 
   const baseInput = h("input", { value: apiBase(), placeholder: "https://api.example.com (empty = same origin)", style: "min-width:340px" }) as HTMLInputElement;
@@ -31,6 +33,8 @@ export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) 
     agents,
     h("h2", {}, "Ledger (durable)"),
     ledger,
+    h("h2", {}, "Turn latency (recent calls)"),
+    latency,
     h("h2", {}, "Process counters (since start)"),
     counters,
     h("h2", {}, "Demo data"),
@@ -68,6 +72,11 @@ export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) 
       );
       clear(counters);
       counters.append(pre(s.counters));
+      clear(latency);
+      // Its own request and its own failure mode: an empty ledger is not an unhealthy API.
+      latency.append(
+        await api.latencyAggregate(20).then(renderLatencyAggregate, (e: unknown) => h("div", { class: "err small" }, `latency unavailable: ${String(e)}`)),
+      );
     } catch (e) {
       clear(health);
       health.append(card("API", false, `unreachable: ${(e as Error).message}`));

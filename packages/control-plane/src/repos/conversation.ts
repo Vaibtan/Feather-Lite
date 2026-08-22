@@ -325,7 +325,17 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
       sql`UPDATE conversation_turns SET status = ${params.status}, result = ${sql.json(params.result)}, finished_at = ${params.finishedAt}
           WHERE conversation_id = ${params.conversationId} AND turn_id = ${params.turnId}`.pipe(Effect.asVoid);
 
+    /**
+     * Merge extra keys into a finished turn's `result` without disturbing what is already there.
+     * Used for the voice worker's latency numbers, which arrive after the turn has been written.
+     * `||` is jsonb concatenation, so this is a single statement and needs no read-modify-write.
+     */
+    const mergeTurnResult = (params: { conversationId: string; turnId: string; patch: Record<string, unknown> }) =>
+      sql`UPDATE conversation_turns SET result = COALESCE(result, '{}'::jsonb) || ${sql.json(params.patch)}
+          WHERE conversation_id = ${params.conversationId} AND turn_id = ${params.turnId}`.pipe(Effect.asVoid);
+
     return {
+      mergeTurnResult,
       findOpenWorkflow,
       findWorkflow,
       lockWorkflow,

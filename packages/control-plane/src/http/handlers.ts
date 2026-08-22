@@ -58,6 +58,8 @@ const toSignal = (s: SignalRequest): Signal => {
       return { kind: "opening_played", text: s.text };
     case "voicemail_drop":
       return { kind: "voicemail_drop", confidence: s.confidence, actionId: s.action_id };
+    case "turn_metrics":
+      return { kind: "turn_metrics", turnId: s.turn_id, eouDelayMs: s.eou_delay_ms, transcriptionDelayMs: s.transcription_delay_ms, ttsTtfbMs: s.tts_ttfb_ms };
   }
 };
 
@@ -102,6 +104,7 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
           };
         }),
       )
+      .handle("latency", ({ urlParams }) => queries.latencyAggregate(Math.min(200, Math.max(1, urlParams.calls ?? 20))).pipe(Effect.orDie))
       .handle("heartbeat", ({ payload }) =>
         Effect.gen(function* () {
           const now = DateTime.toDateUtc(yield* DateTime.now);
@@ -224,6 +227,15 @@ export const ConversationsLive = HttpApiBuilder.group(FeatherApi, "conversations
         orch.processNoInput(path.id).pipe(
           Effect.map((r) => ({ agent_text: r.agentText, new_state: r.newState, call_control_action: r.callControlAction, outcome: r.outcome, end_call: r.endCall })),
           Effect.catchTags({ NotFound: (e) => Effect.fail(mapNotFound(e)), ConversationCompleted: (e) => Effect.fail(mapConflict(e)) }),
+          Effect.orDie,
+        ),
+      )
+      .handle("latency", ({ path }) =>
+        // 404 on an unknown conversation rather than an empty list, so the console can tell
+        // "no such call" from "this call has no turns yet".
+        queries.conversationDetail(path.id).pipe(
+          Effect.catchTag("NotFound", (e) => Effect.fail(mapNotFound(e))),
+          Effect.flatMap(() => queries.turnLatencies(path.id)),
           Effect.orDie,
         ),
       );
