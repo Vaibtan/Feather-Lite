@@ -7,16 +7,16 @@
   "agent_hung_up": 5,
   "equivalence_green": 5,
   "duration_ms": {
-    "p50": 60749,
-    "p95": 64130,
-    "max": 64130
+    "p50": 61001,
+    "p95": 69530,
+    "max": 69530
   },
   "turn_latency_ms": {
     "n": 15,
     "unanswered": 0,
-    "p50": 2145,
-    "p95": 5500,
-    "max": 5500
+    "p50": 3039,
+    "p95": 3916,
+    "max": 3916
   },
   "reference": {
     "scenario_id": "happy-path-promise-to-pay",
@@ -38,22 +38,22 @@
   "results": [
     {
       "label": "call00",
-      "conversation_id": "7461481d-3495-450b-80b4-c9ee3eff7209",
+      "conversation_id": "1e16240d-e17a-4641-91fc-216c9fcb81a5",
       "hung_up": true,
-      "agent_audio_frames": 4839,
-      "duration_ms": 52920,
+      "agent_audio_frames": 5213,
+      "duration_ms": 53411,
       "turn_latencies": [
         {
           "turn": "yes this is the borrower",
-          "ms": 2207
+          "ms": 3178
         },
         {
-          "turn": "BARGE-IN: I can pay on Friday",
-          "ms": 1962
+          "turn": "BARGE-IN: I can pay 550 on Friday",
+          "ms": 2794
         },
         {
           "turn": "yes, that's correct",
-          "ms": 2084
+          "ms": 2776
         }
       ],
       "unanswered_turns": [],
@@ -77,22 +77,22 @@
     },
     {
       "label": "call01",
-      "conversation_id": "039950c0-3d19-404d-8a69-b57caa9d46b1",
+      "conversation_id": "24a7e0a0-1608-4ebb-9bc2-6c3f606c7d96",
       "hung_up": true,
-      "agent_audio_frames": 5286,
-      "duration_ms": 61230,
+      "agent_audio_frames": 5392,
+      "duration_ms": 58508,
       "turn_latencies": [
         {
           "turn": "yes this is the borrower",
-          "ms": 2190
+          "ms": 2940
         },
         {
-          "turn": "BARGE-IN: I can pay on Friday",
-          "ms": 2215
+          "turn": "BARGE-IN: I can pay 550 on Friday",
+          "ms": 3916
         },
         {
           "turn": "yes, that's correct",
-          "ms": 5500
+          "ms": 3177
         }
       ],
       "unanswered_turns": [],
@@ -116,22 +116,22 @@
     },
     {
       "label": "call02",
-      "conversation_id": "143f0005-a82d-4aaa-835b-4b92ae75834d",
+      "conversation_id": "0d14f0a0-3947-4bdd-981e-1d5bcbecc0bf",
       "hung_up": true,
-      "agent_audio_frames": 4738,
-      "duration_ms": 64130,
+      "agent_audio_frames": 5336,
+      "duration_ms": 66214,
       "turn_latencies": [
         {
           "turn": "yes this is the borrower",
-          "ms": 2250
+          "ms": 2969
         },
         {
-          "turn": "BARGE-IN: I can pay on Friday",
-          "ms": 1923
+          "turn": "BARGE-IN: I can pay 550 on Friday",
+          "ms": 2866
         },
         {
           "turn": "yes, that's correct",
-          "ms": 2003
+          "ms": 3075
         }
       ],
       "unanswered_turns": [],
@@ -155,22 +155,22 @@
     },
     {
       "label": "call03",
-      "conversation_id": "43e84ad1-7fec-44f6-be71-7ce981189926",
+      "conversation_id": "72674fe4-6966-433e-a182-4f4a149f3cd5",
       "hung_up": true,
-      "agent_audio_frames": 4753,
-      "duration_ms": 48743,
+      "agent_audio_frames": 5242,
+      "duration_ms": 69530,
       "turn_latencies": [
         {
           "turn": "yes this is the borrower",
-          "ms": 2091
+          "ms": 2812
         },
         {
-          "turn": "BARGE-IN: I can pay on Friday",
-          "ms": 2093
+          "turn": "BARGE-IN: I can pay 550 on Friday",
+          "ms": 3161
         },
         {
           "turn": "yes, that's correct",
-          "ms": 2240
+          "ms": 3039
         }
       ],
       "unanswered_turns": [],
@@ -194,22 +194,22 @@
     },
     {
       "label": "call04",
-      "conversation_id": "8939acfc-0e68-4e93-b82a-70a18f3af1b6",
+      "conversation_id": "9a27cbf3-689f-426d-a7a5-8270fc888a4f",
       "hung_up": true,
-      "agent_audio_frames": 4837,
-      "duration_ms": 60749,
+      "agent_audio_frames": 5254,
+      "duration_ms": 61001,
       "turn_latencies": [
         {
           "turn": "yes this is the borrower",
-          "ms": 2061
+          "ms": 3203
         },
         {
-          "turn": "BARGE-IN: I can pay on Friday",
-          "ms": 2158
+          "turn": "BARGE-IN: I can pay 550 on Friday",
+          "ms": 2798
         },
         {
           "turn": "yes, that's correct",
-          "ms": 2145
+          "ms": 3086
         }
       ],
       "unanswered_turns": [],
