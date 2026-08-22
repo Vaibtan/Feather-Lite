@@ -76,6 +76,15 @@ export class FeatherAgent extends voice.Agent {
    * here until the turn is created, then reported together with that turn's TTS time-to-first-byte.
    */
   private pendingEou: { eouDelayMs?: number | undefined; transcriptionDelayMs?: number | undefined } | null = null;
+  /**
+   * Turns for which TTS actually produced audio (any `tts_metrics` arrived). A TTS stream can stall
+   * and produce ZERO frames (seen: Deepgram websocket connect hang); the framework's 10s watchdog
+   * then force-closes the speech and the chat item arrives looking fully played. Reporting that as
+   * heard would poison the fully-heard guard — the ledger would believe the borrower heard a
+   * read-back that was never spoken. `tts_metrics` fires on first synthesis byte, well before the
+   * item-added event that triggers `reportPlayout`, so its absence at report time means silence.
+   */
+  private ttsProducedAudio = new Set<string>();
 
   constructor(private readonly deps: FeatherAgentDeps) {
     super({ instructions: "Feather-Lite voice runtime. Spoken text is supplied by the control plane; the model is never called here." });
@@ -116,6 +125,7 @@ export class FeatherAgent extends voice.Agent {
   async onTtsMetrics(m: { ttfbMs?: number | undefined }): Promise<void> {
     const turnId = this.currentTurnId;
     if (!turnId) return; // the opening and other say()s are not control-plane turns
+    this.ttsProducedAudio.add(turnId);
     const eou = this.pendingEou;
     this.pendingEou = null;
     await this.deps.client
@@ -134,8 +144,23 @@ export class FeatherAgent extends voice.Agent {
     const turnId = this.currentTurnId;
     if (!turnId || turnId === this.lastReportedTurnId) return;
     this.lastReportedTurnId = turnId;
+    // TTS produced no audio at all: the borrower heard silence, whatever the chat item claims.
+    // `interrupted: true` + empty heard_text makes the orchestrator's fully-heard guard treat the
+    // segment as unheard, so a proposal read-back gets repeated instead of silently "confirmed".
+    // The check applies only to UN-interrupted items (a stall force-closes as played-in-full,
+    // `interrupted: false`): for a barge-in the framework aborts the TTS stream, so `tts_metrics`
+    // fires after the truncated item is reported — measured, not assumed — and the item's own
+    // playback-truncated text is already the audio truth.
+    const silent = !item.interrupted && !this.ttsProducedAudio.has(turnId);
+    this.ttsProducedAudio.delete(turnId);
+    if (silent) this.deps.log("tts produced no audio for this turn; reporting empty playout", { turnId });
     await this.deps.client
-      .signal(this.deps.conversationId, { kind: "playout", turn_id: turnId, heard_text: item.textContent ?? "", interrupted: item.interrupted })
+      .signal(this.deps.conversationId, {
+        kind: "playout",
+        turn_id: turnId,
+        heard_text: silent ? "" : (item.textContent ?? ""),
+        interrupted: silent ? true : item.interrupted,
+      })
       .catch((e) => this.deps.log("playout signal failed", { error: String(e) }));
   }
 
@@ -171,9 +196,17 @@ export class FeatherAgent extends voice.Agent {
 
     const playout =
       previousTurnId && lastAssistant && lastAssistant.interrupted && previousTurnId !== this.lastReportedTurnId
-        ? { turn_id: previousTurnId, heard_text: lastAssistant.textContent ?? "", interrupted: true }
+        ? {
+            turn_id: previousTurnId,
+            // Same zero-audio truth as reportPlayout: if TTS never made a frame, nothing was heard.
+            heard_text: this.ttsProducedAudio.has(previousTurnId) ? (lastAssistant.textContent ?? "") : "",
+            interrupted: true,
+          }
         : undefined;
-    if (playout) this.lastReportedTurnId = previousTurnId;
+    if (playout && previousTurnId) {
+      this.lastReportedTurnId = previousTurnId;
+      this.ttsProducedAudio.delete(previousTurnId);
+    }
 
     this.deps.log("turn", { turnId, userText, interruptedPrevious: Boolean(playout) });
     const frames = this.deps.client.turn(this.deps.conversationId, { turn_id: turnId, user_text: userText, ...(playout ? { playout } : {}), supersede: true });
