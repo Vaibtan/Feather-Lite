@@ -135,6 +135,33 @@ describe("transcript and timeline (PRD §5.2.6)", () => {
     expect(t[0]?.interrupted).toBe(true);
   });
 
+  it("keeps superseded borrower lines by default, and drops them when the decider asks", () => {
+    // A barge-in: t1's USER_TURN_FINAL was already appended in T1, then t2 superseded it, so t1
+    // never gets an AGENT_TURN and its borrower line is left orphaned.
+    const events = [
+      rec(1, "AGENT_TURN", { text: "May I speak with Jordan?", state: "GREETING", turn_id: "opening" }),
+      rec(2, "USER_TURN_FINAL", { text: "hold on", turn_id: "t1" }),
+      rec(3, "TURN_SUPERSEDED", { turn_id: "t1", superseded_by: "t2" }),
+      rec(4, "USER_TURN_FINAL", { text: "yes this is Jordan", turn_id: "t2" }),
+      rec(5, "AGENT_TURN", { text: "Thank you, Jordan.", state: "VERIFYING_IDENTITY", turn_id: "t2" }),
+    ];
+    // The ledger view (console, outbox) keeps it: the borrower did say it.
+    expect(buildTranscript(events).map((e) => e.text)).toEqual(["May I speak with Jordan?", "hold on", "yes this is Jordan", "Thank you, Jordan."]);
+    // The prompt-assembly view drops it, so the decider never sees two borrower lines in a row.
+    const forPrompt = buildTranscript(events, { excludeSuperseded: true });
+    expect(forPrompt.map((e) => e.text)).toEqual(["May I speak with Jordan?", "yes this is Jordan", "Thank you, Jordan."]);
+    expect(forPrompt.map((e) => e.speaker)).toEqual(["AGENT", "BORROWER", "AGENT"]);
+  });
+
+  it("excludeSuperseded leaves turns that completed, and lines with no turn_id, alone", () => {
+    const events = [
+      rec(1, "USER_TURN_FINAL", { text: "no turn id at all" }),
+      rec(2, "USER_TURN_FINAL", { text: "a turn that finished", turn_id: "t1" }),
+      rec(3, "AGENT_TURN", { text: "ok", state: "GREETING", turn_id: "t1" }),
+    ];
+    expect(buildTranscript(events, { excludeSuperseded: true })).toHaveLength(3);
+  });
+
   it("timeline keeps every event, in order, with payloads intact", () => {
     const tl = buildTimeline([...happyPath].reverse());
     expect(tl.map((e) => e.sequence_no)).toEqual(happyPath.map((e) => e.sequence_no));

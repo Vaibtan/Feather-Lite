@@ -485,7 +485,9 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           // The old slice(-12) was ~6 exchanges, so the opening Mini-Miranda and anything the borrower
           // said early -- hardship, a dispute, a callback preference -- fell out mid-call and the model
           // could not recover it. `slice` is kept as a bound against an unbounded prompt, not as a window.
-          const transcript = buildTranscript(t1.events).slice(-100).map((e) => ({ speaker: e.speaker, text: e.text }));
+          const transcript = buildTranscript(t1.events, { excludeSuperseded: true })
+            .slice(-100)
+            .map((e) => ({ speaker: e.speaker, text: e.text }));
           const snapshot = replay(t1.events);
           // Barge-in truth may arrive with this request or as an earlier `playout` signal: consult both.
           const heardFromLedger = ((): string | null => {
