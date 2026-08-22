@@ -51,7 +51,14 @@ export const OpenAITurnDeciderLive: Layer.Layer<TurnDecider, never, AppConfig | 
           tools: toolSpecsFor(input.state, input.allowedTools),
           temperature: 0.3,
           maxTokens: 220,
-          cacheKey: input.conversationId,
+          // Keyed by state, not conversation. The key only routes requests to a cache shard; the
+          // match is by prefix. Same-state requests share their whole prefix up to where the calls'
+          // transcripts diverge (tools + persona + the deterministic opening ≈ the 1,024-token
+          // floor), so one shard per state means call N+1's GREETING turn reuses call N's prefix.
+          // The old per-conversation key scattered byte-identical prefixes across shards: measured
+          // cached_tokens=0 on two identical 1,221-token GREETING prompts 57s apart, versus a hit
+          // (1,280 cached) the one time two same-conversation requests raced to the same shard.
+          cacheKey: `decider:${input.state}`,
           metadata: { conversation_id: input.conversationId, turn_id: input.turnId, state: input.state },
         };
         const acc: Acc = { content: "", mode: "unknown", toolName: null, toolId: null, toolArgs: "", finished: false, usage: null };
