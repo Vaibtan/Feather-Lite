@@ -20,7 +20,6 @@
     "@feather-lite/contracts": "workspace:*",
     "@feather-lite/domain": "workspace:*",
     "@livekit/agents": "^1.6.4",
-    "@livekit/agents-plugin-cartesia": "1.6.4",
     "@livekit/agents-plugin-deepgram": "1.6.4",
     "@livekit/agents-plugin-livekit": "^1.6.4",
     "@livekit/agents-plugin-silero": "^1.6.4",

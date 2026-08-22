@@ -8,15 +8,15 @@
  *
  * `STT_TTS_PROVIDER` selects which:
  *   inference (default) — unchanged Cloud behaviour, models from LIVEKIT_STT_MODEL/LIVEKIT_TTS_MODEL
- *   plugins             — Deepgram STT + Cartesia TTS with their own API keys; the same model
- *                         strings are reused with the `provider/` prefix stripped, so one env block
- *                         describes both targets.
+ *   plugins             — Deepgram STT + Deepgram Aura TTS with one DEEPGRAM_API_KEY. Aura has no
+ *                         separate voice id: the voice IS the model (e.g. `aura-2-asteria-en`), so
+ *                         in plugins mode the `voice` argument/env must be an Aura model name and
+ *                         LIVEKIT_TTS_MODEL (a Cloud Inference string) is ignored.
  *
  * Everything else in the session (silero VAD, the multilingual EOT model, RemoteOrchestratorLLM) is
  * provider-independent.
  */
 import { type stt as sttBase, type tts as ttsBase, inference } from "@livekit/agents";
-import * as cartesia from "@livekit/agents-plugin-cartesia";
 import * as deepgram from "@livekit/agents-plugin-deepgram";
 
 export type SpeechProvider = "inference" | "plugins";
@@ -31,8 +31,10 @@ export interface SpeechStack {
 
 const DEFAULT_STT_MODEL = "deepgram/nova-3";
 const DEFAULT_TTS_MODEL = "cartesia/sonic-3";
-/** The agent's voice on both targets (Cartesia voice id, also used by Inference). */
+/** The agent's voice on Cloud Inference (a Cartesia voice id). */
 const DEFAULT_TTS_VOICE = "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc";
+/** The agent's voice in plugins mode (Deepgram Aura: the voice IS the model). */
+const DEFAULT_PLUGINS_TTS_VOICE = "aura-2-asteria-en";
 
 /** `deepgram/nova-3` -> `nova-3`; a bare `nova-3` is left alone. */
 const stripProvider = (model: string): string => (model.includes("/") ? model.slice(model.indexOf("/") + 1) : model);
@@ -70,12 +72,13 @@ export const buildSpeechStack = (voice?: string): SpeechStack => {
     };
   }
 
-  const deepgramModel = stripProvider(sttModel);
-  const cartesiaModel = stripProvider(ttsModel);
+  const deepgramSttModel = stripProvider(sttModel);
+  const auraModel = voice ?? process.env["DEEPGRAM_TTS_MODEL"] ?? DEFAULT_PLUGINS_TTS_VOICE;
+  const apiKey = requireKey("DEEPGRAM_API_KEY", "Deepgram STT + Aura TTS");
   return {
     provider,
-    stt: new deepgram.STT({ apiKey: requireKey("DEEPGRAM_API_KEY", "Deepgram STT"), model: deepgramModel, language: "en" }),
-    tts: new cartesia.TTS({ apiKey: requireKey("CARTESIA_API_KEY", "Cartesia TTS"), model: cartesiaModel, voice: ttsVoice }),
-    describe: `plugins stt=deepgram/${deepgramModel} tts=cartesia/${cartesiaModel} voice=${ttsVoice}`,
+    stt: new deepgram.STT({ apiKey, model: deepgramSttModel, language: "en" }),
+    tts: new deepgram.TTS({ apiKey, model: auraModel }),
+    describe: `plugins stt=deepgram/${deepgramSttModel} tts=deepgram/${auraModel}`,
   };
 };

@@ -29,7 +29,7 @@ v1 came first and was rewritten after the review in `docs/reviews/`; it is gone 
 | Voice worker (`apps/voice-worker`): LiveKit Agents 1.6 `llmNode` → `/turn`, barge-in heard-text, interruptible read-back guard, AMD-gated SIP path, heartbeats | done (browser path) | automated real voice call on LiveKit Cloud with GPT-4.1; scripted voice call == simulation scenario (state path, tools, outcome) |
 | Operator console (`apps/console`): conversations, transcript + timeline + replay, simulate (streaming), **call me in the browser**, scenario matrix, status/seed | done | headless run: 20/20 matrix, PTP simulation, browser call joined LiveKit Cloud with live transcript |
 | Deployment on free tiers (Neon + Cloudflare Tunnel + Pages + LiveKit Build) | documented, needs your accounts | `docs/deploy/free-tier-live-demo.md` |
-| **Self-hosted media plane**: LiveKit SFU in Docker (`pnpm lk:up`), Deepgram/Cartesia direct plugins behind `STT_TTS_PROVIDER` | done | headless voice call + browser call on the local SFU, both equivalence-green vs the simulation; ADR 0006 |
+| **Self-hosted media plane**: LiveKit SFU in Docker (`pnpm lk:up`), Deepgram direct plugins (nova-3 STT + Aura TTS) behind `STT_TTS_PROVIDER` | done | headless voice call + browser call on the local SFU, both equivalence-green vs the simulation; ADR 0006 |
 | **Load tested**: control plane to 200 concurrent conversations, voice fleet to 5 concurrent real calls (10 = CPU ceiling) | done | 200/200 correct outcomes at C=200, 5/5 equivalence-green at N=5; `docs/loadtest/` |
 | PSTN via SIP trunk, Oracle always-on VM, latency waterfall panel, chaos (kill worker mid-call) test, Effect 4 | **not done** | listed honestly in "Not built" below |
 
@@ -54,7 +54,7 @@ flowchart LR
     AG[FeatherAgent.llmNode → POST /turn]
   end
   UI -- REST/SSE --> API
-  UI -- WebRTC --> LK[LiveKit SFU<br/>Cloud or self-hosted<br/>STT deepgram/nova-3 · TTS cartesia/sonic-3]
+  UI -- WebRTC --> LK[LiveKit SFU<br/>Cloud or self-hosted<br/>STT deepgram/nova-3 · TTS sonic-3 Cloud / aura-2 local]
   LK <--> AG
   AG -- SSE frames --> API
   ORCH -- tools --> LLM[OpenAI gpt-4.1 / 4.1-mini]
@@ -128,9 +128,8 @@ pnpm lk:up                       # livekit-server in Docker: ws://127.0.0.1:7880
 LIVEKIT_URL=ws://127.0.0.1:7880
 LIVEKIT_API_KEY=devkey
 LIVEKIT_API_SECRET=<deploy/livekit/livekit.yaml keys.devkey>
-STT_TTS_PROVIDER=plugins         # LiveKit Inference is Cloud-only; use Deepgram + Cartesia directly
-DEEPGRAM_API_KEY=... 
-CARTESIA_API_KEY=...
+STT_TTS_PROVIDER=plugins         # LiveKit Inference is Cloud-only; use Deepgram directly (nova-3 STT + Aura TTS)
+DEEPGRAM_API_KEY=...
 ```
 
 Nothing else changes — the server, console and tracers work against either target. Going back to

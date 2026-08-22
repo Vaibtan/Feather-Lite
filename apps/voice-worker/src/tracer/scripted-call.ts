@@ -30,11 +30,18 @@ import {
   TrackSource,
 } from "@livekit/rtc-node";
 import { AccessToken, AgentDispatchClient, RoomServiceClient } from "livekit-server-sdk";
-import { buildSpeechStack } from "../speech.js";
+import { buildSpeechStack, speechProvider } from "../speech.js";
 import { synthesizeCached } from "./line-cache.js";
 
-/** A different voice than the agent's, so a human listening can tell the two apart. */
-const BORROWER_VOICE = "a0e99841-438c-4a64-b679-ae501e7d6091";
+/**
+ * A different voice than the agent's, so a human listening can tell the two apart.
+ * Resolved lazily: harnesses load .env after module imports are hoisted, so reading
+ * STT_TTS_PROVIDER at module level would always see the "inference" default.
+ */
+const borrowerVoice = (): string =>
+  speechProvider() === "plugins"
+    ? "aura-2-orion-en" // Deepgram Aura model name (the voice IS the model)
+    : "a0e99841-438c-4a64-b679-ae501e7d6091"; // Cartesia voice id via Cloud Inference
 
 /** How long to wait for the agent's reply to start before giving up on a clean barge-in. */
 const SPEECH_START_TIMEOUT_MS = 60_000;
@@ -56,11 +63,11 @@ export interface ScriptedLines {
  * the frames across every call in a fleet.
  */
 export const loadScriptedLines = async (): Promise<ScriptedLines> => {
-  const speech = buildSpeechStack(BORROWER_VOICE);
+  const speech = buildSpeechStack(borrowerVoice());
   const key = `${speech.provider}|${speech.describe}`;
   try {
-    // Sequential on purpose: the Cartesia plugin multiplexes synthesis over one pooled WebSocket,
-    // and three concurrent streams on it drop a generation.
+    // Sequential on purpose: some TTS plugins (Cartesia was one) multiplex synthesis over a single
+    // pooled WebSocket and silently drop a generation under concurrency; sequential costs nothing here.
     const yes = await synthesizeCached(speech.tts, "Yes, this is Jordan.", key);
     const pay = await synthesizeCached(speech.tts, "Actually, wait. I can pay on Friday.", key);
     const confirm = await synthesizeCached(speech.tts, "Yes, that's correct.", key);

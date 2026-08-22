@@ -107,9 +107,6 @@ importers:
       '@livekit/agents':
         specifier: ^1.6.4
         version: 1.6.4(@livekit/rtc-node@0.13.33)(@types/node@22.20.1)(typescript@5.9.3)(zod@3.25.76)
-      '@livekit/agents-plugin-cartesia':
-        specifier: 1.6.4
-        version: 1.6.4(@livekit/agents@1.6.4(@livekit/rtc-node@0.13.33)(@types/node@22.20.1)(typescript@5.9.3)(zod@3.25.76))(@livekit/rtc-node@0.13.33)(zod@3.25.76)
       '@livekit/agents-plugin-deepgram':
         specifier: 1.6.4
         version: 1.6.4(@livekit/agents@1.6.4(@livekit/rtc-node@0.13.33)(@types/node@22.20.1)(typescript@5.9.3)(zod@3.25.76))(@livekit/rtc-node@0.13.33)
@@ -807,13 +804,6 @@ packages:
 
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
-
-  '@livekit/agents-plugin-cartesia@1.6.4':
-    resolution: {integrity: sha512-PX+QrztTOLjbD6n80+egRAk24kIS5edX3EKtVZjqgFdg9AqYEyYMjHKodEuexsS125CWF0dvm7AMhhzB+Ojjlw==}
-    peerDependencies:
-      '@livekit/agents': 1.6.4
-      '@livekit/rtc-node': ^0.13.33
-      zod: ^3.25.76 || ^4.1.8
 
   '@livekit/agents-plugin-deepgram@1.6.4':
     resolution: {integrity: sha512-LHfgOoxH21acrcqNzcjadXbf+W4d/pWfkCTwTPGP84Ge4nbHt3q5fkROp9APAN++faY7svx1C/HmSWrKIumHyQ==}
@@ -2948,16 +2938,6 @@ snapshots:
     optional: true
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
-
-  '@livekit/agents-plugin-cartesia@1.6.4(@livekit/agents@1.6.4(@livekit/rtc-node@0.13.33)(@types/node@22.20.1)(typescript@5.9.3)(zod@3.25.76))(@livekit/rtc-node@0.13.33)(zod@3.25.76)':
-    dependencies:
-      '@livekit/agents': 1.6.4(@livekit/rtc-node@0.13.33)(@types/node@22.20.1)(typescript@5.9.3)(zod@3.25.76)
-      '@livekit/rtc-node': 0.13.33
-      ws: 8.21.3
-      zod: 3.25.76
-    transitivePeerDependencies:
-      - bufferutil
-      - utf-8-validate
 
   '@livekit/agents-plugin-deepgram@1.6.4(@livekit/agents@1.6.4(@livekit/rtc-node@0.13.33)(@types/node@22.20.1)(typescript@5.9.3)(zod@3.25.76))(@livekit/rtc-node@0.13.33)':
     dependencies:
