@@ -42,7 +42,7 @@ if (result.error) log(`call error: ${result.error}`);
 
 // Composite response latency (borrower falls silent -> agent starts replying), per scripted turn.
 // This is the baseline the turn-detector and STT swaps are measured against.
-for (const t of result.turnLatencies) log(`response latency  ${t.turn}: ${t.ms}ms`);
+for (const t of result.turnLatencies) log(`response latency  ${t.turn}: ${t.ms}ms (first audio ${t.audioMs === null ? "not seen" : `${t.audioMs}ms`})`);
 for (const t of result.unansweredTurns) log(`response latency  ${t}: UNANSWERED (not measured)`);
 if (result.turnLatencies.length === 0) {
   log("response latency: no turns measured");
@@ -50,6 +50,11 @@ if (result.turnLatencies.length === 0) {
   const ms = result.turnLatencies.map((t) => t.ms);
   const mean = Math.round(ms.reduce((a, b) => a + b, 0) / ms.length);
   log(`response latency  turns=${ms.length} unanswered=${result.unansweredTurns.length} mean=${mean}ms min=${Math.min(...ms)}ms max=${Math.max(...ms)}ms`);
+  const audio = result.turnLatencies.map((t) => t.audioMs).filter((v): v is number => v !== null);
+  if (audio.length > 0) {
+    const audioMean = Math.round(audio.reduce((a, b) => a + b, 0) / audio.length);
+    log(`first-audio latency  turns=${audio.length} mean=${audioMean}ms min=${Math.min(...audio)}ms max=${Math.max(...audio)}ms`);
+  }
 }
 
 if (!result.hungUp) {

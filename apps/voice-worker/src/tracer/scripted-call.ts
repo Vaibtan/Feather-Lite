@@ -121,6 +121,14 @@ export interface TurnLatency {
   /** Which scripted borrower line this reply answers. */
   readonly turn: string;
   readonly ms: number;
+  /**
+   * Same interval, but measured to the first agent audio frame with speech-level RMS energy
+   * instead of the first transcription delta. The transcription stream is paced by the framework
+   * against playout and consistently lags the audio itself; this is the number a human ear
+   * experiences. Null when no energetic frame was seen before the transcription delta (should not
+   * happen; kept honest rather than defaulted).
+   */
+  readonly audioMs: number | null;
 }
 
 export interface ScriptedCallResult {
@@ -195,7 +203,7 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
   const turnLatencies: Array<TurnLatency> = [];
   const unansweredTurns: Array<string> = [];
   /** Set when the borrower falls silent; cleared by the first delta of the next agent segment. */
-  const awaiting: { reply: { turn: string; at: number } | null } = { reply: null };
+  const awaiting: { reply: { turn: string; at: number; audioAt: number | null } | null } = { reply: null };
   /**
    * Give up on the pending turn. Recorded rather than dropped: a silently shorter `turnLatencies`
    * would flatter the mean, which is exactly the optimistic summary this harness must not produce.
@@ -219,7 +227,21 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       log(`subscribed to agent audio (${participant.identity})`);
       const stream = new AudioStream(track);
       void (async () => {
-        for await (const _frame of stream) audioFrames += 1;
+        // The track carries frames continuously, silence included, so frame ARRIVAL says nothing —
+        // but frame ENERGY does. RMS over int16 samples: measured here, agent TTS speech peaks
+        // around 250 and channel silence stays under ~25, so 80 splits them cleanly. First
+        // energetic frame after the borrower fell silent is when a human would hear the reply.
+        const SPEECH_RMS = 80;
+        for await (const frame of stream) {
+          audioFrames += 1;
+          const pending = awaiting.reply;
+          if (pending && pending.audioAt === null) {
+            const data = frame.data;
+            let sum = 0;
+            for (let i = 0; i < data.length; i++) sum += data[i]! * data[i]!;
+            if (Math.sqrt(sum / data.length) > SPEECH_RMS) pending.audioAt = Date.now();
+          }
+        }
       })();
     });
     room.registerTextStreamHandler("lk.transcription", (reader, participantInfo) => {
@@ -238,8 +260,9 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
             const pending = awaiting.reply;
             if (pending && openedAt >= pending.at) {
               const ms = Date.now() - pending.at;
-              turnLatencies.push({ turn: pending.turn, ms });
-              log(`response latency (${pending.turn}): ${ms}ms`);
+              const audioMs = pending.audioAt !== null ? pending.audioAt - pending.at : null;
+              turnLatencies.push({ turn: pending.turn, ms, audioMs });
+              log(`response latency (${pending.turn}): ${ms}ms (first audio: ${audioMs === null ? "not seen" : `${audioMs}ms`})`);
               awaiting.reply = null;
             }
           }
@@ -277,7 +300,7 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       await source.waitForPlayout();
       log(`finished: ${label}`);
       abandonPendingReply("before the next line"); // the script waited, timed out, and moved on
-      awaiting.reply = { turn: label, at: Date.now() };
+      awaiting.reply = { turn: label, at: Date.now(), audioAt: null };
     };
     /** Wait until the agent has produced a final segment matching `pattern` (after index `from`). */
     const waitAgentSaid = async (pattern: RegExp, from: number, timeoutMs: number): Promise<number> => {
