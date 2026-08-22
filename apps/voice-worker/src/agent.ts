@@ -2,7 +2,7 @@
  * Feather-Lite voice worker (LiveKit Agents). Registers with LiveKit Cloud under LIVEKIT_AGENT_NAME
  * and, per dispatched job:
  *   1. reads conversation/mode/opening from the room metadata written by POST /api/voice/sessions
- *   2. starts an AgentSession (STT/TTS via LiveKit Inference, silero VAD, multilingual EOT,
+ *   2. starts an AgentSession (STT/TTS via LiveKit Inference, silero VAD, audio-native EOT,
  *      preemptive generation OFF, speech during non-interruptible segments buffered)
  *   3. browser mode: waits for the participant, speaks the opening, then every user turn is a
  *      control-plane turn (FeatherAgent.llmNode)
@@ -14,7 +14,6 @@
 import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
 import { type JobContext, type JobProcess, ServerOptions, cli, defineAgent, voice } from "@livekit/agents";
-import * as livekitPlugin from "@livekit/agents-plugin-livekit";
 import * as silero from "@livekit/agents-plugin-silero";
 import { RoomServiceClient, SipClient } from "livekit-server-sdk";
 import { ControlPlaneClient } from "./control-plane-client.js";
@@ -112,8 +111,17 @@ export default defineAgent({
       tts: speech.tts,
       vad: ctx.proc.userData.vad as silero.VAD,
       turnHandling: {
-        turnDetection: new livekitPlugin.turnDetector.MultilingualModel(),
-        endpointing: { minDelay: 500, maxDelay: 3000 },
+        // No `turnDetection` and no `endpointing` on purpose. Leaving turnDetection undefined makes
+        // the session auto-provision the audio-native inference.TurnDetector (turn-detector-v1-mini,
+        // in-process via @livekit/local-inference, so it works off LiveKit Cloud). The text-based
+        // MultilingualModel it replaces is deprecated in 1.6.4 and, being text-based, could not
+        // decide the turn was over until STT had produced a transcript -- it serialised EOU behind
+        // transcription instead of overlapping it.
+        //
+        // The explicit endpointing had to go with it: keys the caller supplies always win, so
+        // leaving 500/3000 here would have silently cancelled the swap. Unset keys now fall back to
+        // the tighter streamingEndpointingOptions (300/2500) that 1.6.4 applies when the detector is
+        // a streaming audio model.
         interruption: { enabled: true, mode: "adaptive", falseInterruptionTimeout: 2000, resumeFalseInterruption: true, discardAudioIfUninterruptible: false },
         preemptiveGeneration: { enabled: false }, // one control-plane turn per confirmed user turn
       },
