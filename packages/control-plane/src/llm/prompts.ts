@@ -167,7 +167,12 @@ export const buildMessages = (input: DeciderInput): ReadonlyArray<ChatMessage> =
       ? `ACCOUNT (verified borrower only): name ${prot.borrower_full_name}; balance due ${prot.balance_due}; due date ${prot.due_date}; status ${prot.loan_status}; ${prot.delinquency_days} days delinquent${prot.last_promise_date ? `; last promise date ${prot.last_promise_date}` : ""}.`
       : `ACCOUNT: not available in this state. Do not discuss balances, due dates, loans or payments.`,
     mem
-      ? `HISTORY: ${mem.prior_conversation_count} prior call(s); recent outcomes ${mem.recent_outcomes.join(", ") || "none"}${mem.last_promise_to_pay ? `; last promise ${mem.last_promise_to_pay.amount} by ${mem.last_promise_to_pay.date}` : ""}${mem.last_callback_requested_at ? `; last callback requested for ${mem.last_callback_requested_at}` : ""}.`
+      ? joinLines([
+          `HISTORY: ${mem.prior_conversation_count} prior call(s)${mem.last_promise_to_pay ? `; last promise ${mem.last_promise_to_pay.amount} by ${mem.last_promise_to_pay.date}` : ""}${mem.last_callback_requested_at ? `; last callback requested for ${mem.last_callback_requested_at}` : ""}.`,
+          // One deterministic line per prior call (newest first), from the ledger wrap-up — what
+          // they said and committed to, not just the outcome enum (research 2026-08-22 §3.3).
+          ...mem.prior_calls.map((c) => `- ${c.ended_at ? c.ended_at.slice(0, 10) : "(unknown date)"}: ${c.note}`),
+        ])
       : ``,
     input.heardAgentText !== null ? `NOTE: the borrower interrupted your previous sentence; they heard only: "${input.heardAgentText}".` : ``,
   ]);

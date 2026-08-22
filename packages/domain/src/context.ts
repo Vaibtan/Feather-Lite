@@ -33,6 +33,16 @@ export const ProtectedContext = Schema.Struct({
 });
 export type ProtectedContext = typeof ProtectedContext.Type;
 
+/** One prior call rendered as a single prompt line (research 2026-08-22 §3.3). */
+export const PriorCallNote = Schema.Struct({
+  outcome: Schema.String,
+  /** ISO instant of the call's end, or null while a row is (unexpectedly) open. */
+  ended_at: Schema.NullOr(Schema.String),
+  /** Deterministic, ledger-derived one-liner: what actually happened on that call. */
+  note: Schema.String,
+});
+export type PriorCallNote = typeof PriorCallNote.Type;
+
 /** Compact, machine-readable memory from the last few conversations (PRD §5.2.3). */
 export const MemoryBlock = Schema.Struct({
   recent_outcomes: Schema.Array(Schema.String),
@@ -40,6 +50,8 @@ export const MemoryBlock = Schema.Struct({
   last_callback_requested_at: Schema.NullOr(Schema.String),
   last_right_party_contact_at: Schema.NullOr(Schema.String),
   prior_conversation_count: Schema.Number,
+  /** Newest first, at most the memory window. Empty for a first-contact borrower. */
+  prior_calls: Schema.Array(PriorCallNote),
 });
 export type MemoryBlock = typeof MemoryBlock.Type;
 
@@ -49,6 +61,7 @@ export const EMPTY_MEMORY: MemoryBlock = {
   last_callback_requested_at: null,
   last_right_party_contact_at: null,
   prior_conversation_count: 0,
+  prior_calls: [],
 };
 
 export interface ContextBundle {
@@ -91,6 +104,48 @@ export const PROTECTED_FIELD_NAMES: ReadonlyArray<keyof ProtectedContext> = [
   "last_promise_date",
 ];
 
+const str = (v: unknown): string | null => (typeof v === "string" ? v : v == null ? null : String(v));
+
+const quote = (v: string | null, max: number): string | null => (v && v.trim().length > 0 ? `"${v.trim().slice(0, max)}"` : null);
+
+/**
+ * One deterministic line about a prior call, from its outcome + metadata (which carries the
+ * override excerpts written at escalation time and the `wrap_up` the SUMMARY outbox job persists).
+ * What a collector needs on attempt #3 is what the borrower said and committed to last time —
+ * research 2026-08-22 §3.3; the outcome enum alone was the "thin" version.
+ */
+export const priorCallNote = (final_outcome: Outcome | null, meta: Readonly<Record<string, unknown>>): string => {
+  const wrap = (typeof meta["wrap_up"] === "object" && meta["wrap_up"] !== null ? meta["wrap_up"] : {}) as Readonly<Record<string, unknown>>;
+  const lastWords = quote(str(wrap["borrower_last"]), 140);
+  const excerpt = quote(str(meta["transcript_excerpt"]), 140);
+  const parts: string[] = [];
+  switch (final_outcome) {
+    case "PROMISE_TO_PAY":
+      parts.push(`promised ${str(meta["promised_amount"]) ?? "?"} by ${str(meta["promised_date"]) ?? "?"}`);
+      break;
+    case "CALLBACK_SCHEDULED":
+      parts.push(`asked to be called back at ${str(meta["callback_at"]) ?? "?"}`);
+      break;
+    case "DISPUTED":
+      parts.push(`disputed the debt${excerpt ? `, saying ${excerpt}` : ""}`);
+      break;
+    case "ESCALATED":
+      parts.push(str(meta["reason"]) === "hardship_or_distress" ? `expressed hardship${excerpt ? `, saying ${excerpt}` : ""}` : `escalated to a human${str(meta["reason"]) ? ` (${str(meta["reason"])})` : ""}`);
+      break;
+    case "OPT_OUT":
+      parts.push("asked for no further calls");
+      break;
+    case "WRONG_NUMBER":
+    case "THIRD_PARTY_CONTACT":
+      parts.push("did not reach the borrower");
+      break;
+    default:
+      parts.push(final_outcome === "NO_ANSWER" ? "no answer" : (final_outcome ?? "IN_PROGRESS").toLowerCase().replace(/_/g, " "));
+  }
+  if (lastWords && final_outcome !== "DISPUTED" && final_outcome !== "ESCALATED") parts.push(`their last words: ${lastWords}`);
+  return parts.join("; ");
+};
+
 /** Build a memory block from prior conversations, newest first. Pure. */
 export const buildMemoryBlock = (
   prior: ReadonlyArray<{
@@ -105,7 +160,6 @@ export const buildMemoryBlock = (
   const lastPtp = recent.find((c) => c.final_outcome === "PROMISE_TO_PAY");
   const lastCallback = recent.find((c) => c.final_outcome === "CALLBACK_SCHEDULED");
   const lastRightParty = recent.find((c) => c.protected_context_unlocked && c.ended_at);
-  const str = (v: unknown): string | null => (typeof v === "string" ? v : v == null ? null : String(v));
   const ptpAmount = str(lastPtp?.final_outcome_metadata["promised_amount"]);
   const ptpDate = str(lastPtp?.final_outcome_metadata["promised_date"]);
   return {
@@ -114,5 +168,10 @@ export const buildMemoryBlock = (
     last_callback_requested_at: str(lastCallback?.final_outcome_metadata["callback_at"]),
     last_right_party_contact_at: lastRightParty?.ended_at ?? null,
     prior_conversation_count: prior.length,
+    prior_calls: recent.map((c) => ({
+      outcome: c.final_outcome ?? "IN_PROGRESS",
+      ended_at: c.ended_at,
+      note: priorCallNote(c.final_outcome, c.final_outcome_metadata),
+    })),
   };
 };

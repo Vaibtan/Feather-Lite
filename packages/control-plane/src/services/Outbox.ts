@@ -2,7 +2,7 @@
  * Outbox (SPEC §15.2): post-call jobs enqueued in the SAME transaction as the outcome
  * (summary, evaluation, vector-index stub), processed by a worker with retry/backoff.
  */
-import { DateTime, Effect } from "effect";
+import { DateTime, Effect, Option } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import type { OutboxJobType } from "@feather-lite/domain";
 import { buildTranscript, replay } from "@feather-lite/domain";
@@ -61,6 +61,22 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
                 agent_last: (agentLines.at(-1) ?? "").slice(0, 220),
                 tools: snapshot.executedTools,
               };
+              // Persist the cross-call wrap-up (research 2026-08-22 §3.3) onto the conversation row,
+              // where `priorConversations` -> `buildMemoryBlock` reads it on the borrower's NEXT
+              // call. Same jsonb the outcome tools already write, so nothing new to migrate or gate:
+              // memory stays behind the right-party unlock like the rest of the metadata.
+              const row = yield* conv.lockConversation(job.conversationId);
+              if (Option.isSome(row)) {
+                yield* conv.updateConversation(job.conversationId, {
+                  finalOutcomeMetadata: {
+                    ...row.value.finalOutcomeMetadata,
+                    wrap_up: {
+                      borrower_last: (borrowerLines.at(-1) ?? "").slice(0, 200),
+                      turns: transcript.length,
+                    },
+                  },
+                });
+              }
               break;
             }
             case "EVALUATION": {

@@ -120,7 +120,12 @@ describe("prompt construction — the request the model actually sees", () => {
         context: {
           publicContext: input().context.publicContext,
           protectedContext: { borrower_full_name: "Jordan Avery", balance_due: "550.00", due_date: "2026-08-01", loan_status: "DELINQUENT", delinquency_days: 15, last_promise_date: null },
-          memory: { ...EMPTY_MEMORY, recent_outcomes: ["NO_ANSWER"], prior_conversation_count: 1 },
+          memory: {
+            ...EMPTY_MEMORY,
+            recent_outcomes: ["NO_ANSWER"],
+            prior_conversation_count: 1,
+            prior_calls: [{ outcome: "NO_ANSWER", ended_at: "2026-08-10T10:00:00Z", note: "no answer" }],
+          },
         },
         allowedTools: ["get_account_context", "propose_promise_to_pay", "schedule_callback"],
       }),
@@ -128,7 +133,8 @@ describe("prompt construction — the request the model actually sees", () => {
     // Account and memory are volatile, so they live in the trailing block, not the cached prefix.
     const text = msgs.at(-2)!.content;
     expect(text).toContain("balance due 550.00");
-    expect(text).toContain("HISTORY: 1 prior call(s); recent outcomes NO_ANSWER");
+    expect(text).toContain("HISTORY: 1 prior call(s).");
+    expect(text).toContain("- 2026-08-10: no answer");
     expect(toolSpecsFor("DISCUSSING_PAYMENT", ["propose_promise_to_pay"]).map((t) => t.name)).toEqual(["propose_promise_to_pay", "end_call", "request_human"]);
     // Tool JSON schema is derived from the domain schema.
     const spec = toolSpecsFor("DISCUSSING_PAYMENT", ["propose_promise_to_pay"])[0]!;

@@ -6,6 +6,7 @@ import {
   POLICY,
   PROTECTED_FIELD_NAMES,
   buildMemoryBlock,
+  priorCallNote,
   evaluatePreCall,
   isWithinContactWindow,
   localIsoDate,
@@ -175,6 +176,31 @@ describe("visibleContext — the right-party gate, over every state", () => {
     expect(m.last_callback_requested_at).toBe("2026-07-21T15:00:00Z");
     expect(m.last_right_party_contact_at).toBe("2026-08-01T10:00:00Z");
     expect(m.prior_conversation_count).toBe(3);
+    expect(m.prior_calls.map((c) => c.note)).toEqual([
+      "no answer",
+      "promised 500.00 by 2026-08-05",
+      "asked to be called back at 2026-07-21T15:00:00Z",
+    ]);
+  });
+
+  it("prior-call notes carry what the borrower said, from override excerpts and the wrap-up", () => {
+    expect(
+      priorCallNote("DISPUTED", { reason: "debt_dispute", transcript_excerpt: "I already paid this off in June" }),
+    ).toBe('disputed the debt, saying "I already paid this off in June"');
+    expect(
+      priorCallNote("ESCALATED", { reason: "hardship_or_distress", transcript_excerpt: "I just lost my job" }),
+    ).toBe('expressed hardship, saying "I just lost my job"');
+    expect(
+      priorCallNote("PROMISE_TO_PAY", {
+        promised_amount: "550.00",
+        promised_date: "2026-08-28",
+        wrap_up: { borrower_last: "Yes. That's correct." },
+      }),
+    ).toBe(`promised 550.00 by 2026-08-28; their last words: "Yes. That's correct."`);
+    expect(priorCallNote("OPT_OUT", {})).toBe("asked for no further calls");
+    // A long excerpt is clamped, so the memory block can never blow up the prompt.
+    const long = priorCallNote("DISPUTED", { transcript_excerpt: "x".repeat(500) });
+    expect(long.length).toBeLessThan(200);
   });
 });
 
