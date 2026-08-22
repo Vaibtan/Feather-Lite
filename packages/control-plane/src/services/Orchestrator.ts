@@ -480,7 +480,12 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
 
         if (Option.isNone(override)) {
           const visible = visibleContext(ctx.bundle, state, row.protectedContextUnlocked);
-          const transcript = buildTranscript(t1.events).slice(-12).map((e) => ({ speaker: e.speaker, text: e.text }));
+          // Effectively the whole call. A collections call is ~52-90s (docs/loadtest tier 2); even a
+          // pathological 30-turn one is 1-2k prompt tokens, against gpt-4.1's 1,047,576-token window.
+          // The old slice(-12) was ~6 exchanges, so the opening Mini-Miranda and anything the borrower
+          // said early -- hardship, a dispute, a callback preference -- fell out mid-call and the model
+          // could not recover it. `slice` is kept as a bound against an unbounded prompt, not as a window.
+          const transcript = buildTranscript(t1.events).slice(-100).map((e) => ({ speaker: e.speaker, text: e.text }));
           const snapshot = replay(t1.events);
           // Barge-in truth may arrive with this request or as an earlier `playout` signal: consult both.
           const heardFromLedger = ((): string | null => {
