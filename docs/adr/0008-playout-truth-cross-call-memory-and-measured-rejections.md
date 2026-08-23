@@ -116,6 +116,9 @@ minutes out-of-band, which cannot serve a next call placed 20 minutes later, let
 Tonight's tier-2 N=5 fleet ran p50 3039 ms / p95 3916 ms against the 2145 ms p50 recorded on
 2026-08-23 daytime, with per-stage numbers (EOU ~580, decide 0.8–1.4 s, TTS TTFB ~400) individually
 similar to before. The new first-audio metric (RMS onset) confirms the transcript-based measurement
-tracks real audio within ~100 ms, so the gap is real but unattributed — candidates are provider-side
-nighttime latency and the six extra Docker services now running. Re-measure in daytime conditions
-before treating either number as the baseline.
+tracks real audio within ~100 ms, so the gap is real. Two candidate causes were then tested and
+**eliminated the same night**: the Langfuse exporter (kill switch off: p50 3044 ms — identical) and
+the six Langfuse containers' load (whole stack stopped: p50 3092 ms — identical). What remains is
+provider-side: OpenAI decide and Deepgram STT/TTS latency at this hour, which the waterfall
+attributes but cannot control. Re-measure in daytime conditions before treating either number as
+the baseline; the per-stage rows in Postgres make that a query, not an argument.
