@@ -5,7 +5,7 @@
  */
 import { Either } from "effect";
 import { describe, expect, it } from "vitest";
-import { decodeEventRecord, isSilentPlayout, ttsAggregate, ttsScores, type EventRecord } from "../src/index.js";
+import { decodeEventRecord, silentPlayoutTurnIds, ttsAggregate, ttsScores, type EventRecord } from "../src/index.js";
 
 const playout = (payload: Record<string, unknown>): EventRecord => {
   const decoded = decodeEventRecord({ sequence_no: 1, created_at: "2026-08-26T10:00:00.000Z", type: "AGENT_TURN_PLAYOUT", payload });
@@ -13,31 +13,50 @@ const playout = (payload: Record<string, unknown>): EventRecord => {
   return decoded.right;
 };
 
-describe("isSilentPlayout", () => {
-  it("is a playout that reported nothing heard and was cut short", () => {
-    expect(isSilentPlayout(playout({ turn_id: "t1", heard_text: "", interrupted: true }))).toBe(true);
+const superseded = (turnId: string, by: string): EventRecord => {
+  const decoded = decodeEventRecord({ sequence_no: 2, created_at: "2026-08-26T10:00:01.000Z", type: "TURN_SUPERSEDED", payload: { turn_id: turnId, superseded_by: by } });
+  if (Either.isLeft(decoded)) throw new Error("fixture invalid");
+  return decoded.right;
+};
+
+describe("silentPlayoutTurnIds", () => {
+  const ids = (events: ReadonlyArray<EventRecord>) => [...silentPlayoutTurnIds(events)];
+
+  it("finds a playout that reported nothing heard and was cut short", () => {
+    expect(ids([playout({ turn_id: "t1", heard_text: "", interrupted: true })])).toEqual(["t1"]);
   });
 
-  it("is not a turn the borrower heard in full", () => {
-    expect(isSilentPlayout(playout({ turn_id: "t1", heard_text: "Hello there.", interrupted: false }))).toBe(false);
+  it("ignores a turn the borrower heard in full", () => {
+    expect(ids([playout({ turn_id: "t1", heard_text: "Hello there.", interrupted: false })])).toEqual([]);
   });
 
-  it("is not a barge-in that cut real speech short", () => {
+  it("ignores a barge-in that cut real speech short", () => {
     // The borrower talking over the agent mid-sentence is a healthy call, not a broken voice.
-    expect(isSilentPlayout(playout({ turn_id: "t1", heard_text: "Hello th", interrupted: true }))).toBe(false);
+    expect(ids([playout({ turn_id: "t1", heard_text: "Hello th", interrupted: true })])).toEqual([]);
   });
 
-  it("is not an empty playout that was never cut short", () => {
+  it("ignores an empty playout that was never cut short", () => {
     // The voice runtime signals a zero-audio turn by reporting it interrupted (ADR 0008): the
     // framework force-closes the item, so "played in full and said nothing" is a different, and
     // much less alarming, shape than the failure this predicate exists to catch.
-    expect(isSilentPlayout(playout({ turn_id: "t1", heard_text: "", interrupted: false }))).toBe(false);
+    expect(ids([playout({ turn_id: "t1", heard_text: "", interrupted: false })])).toEqual([]);
   });
 
-  it("is not some other kind of event", () => {
-    const agentTurn = decodeEventRecord({ sequence_no: 1, created_at: "2026-08-26T10:00:00.000Z", type: "AGENT_TURN", payload: { text: "", state: "GREETING" } });
-    if (Either.isLeft(agentTurn)) throw new Error("fixture invalid");
-    expect(isSilentPlayout(agentTurn.right)).toBe(false);
+  it("ignores a turn the borrower superseded before the agent ever replied", () => {
+    // Measured on a fleet run: the scripted borrower says "Actually, wait." and then immediately
+    // the real sentence, superseding the first turn before any reply exists. Nothing was heard
+    // because nothing was synthesised. Counting it put the fleet's silent-playout rate at 22% when
+    // one turn in eighteen had genuinely failed.
+    expect(ids([playout({ turn_id: "t1", heard_text: "", interrupted: true }), superseded("t1", "t2")])).toEqual([]);
+  });
+
+  it("still finds a real failure on a call that also had a superseded turn", () => {
+    const events = [
+      playout({ turn_id: "t1", heard_text: "", interrupted: true }),
+      superseded("t1", "t2"),
+      playout({ turn_id: "t3", heard_text: "", interrupted: true }),
+    ];
+    expect(ids(events)).toEqual(["t3"]);
   });
 });
 

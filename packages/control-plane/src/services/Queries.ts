@@ -179,15 +179,25 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
                  (t.result->>'tts_ttfb_ms')::float8                AS tts_ttfb_ms,
                  (t.result->>'tts_audio_ms')::float8               AS tts_audio_ms,
                  (t.result->>'tts_chars')::float8                  AS tts_chars,
-                 -- The SQL twin of the domain's isSilentPlayout: nothing heard *and* cut short, which is
-                 -- how the worker reports a zero-audio turn (ADR 0008). Change one, change both.
-                 EXISTS (
-                   SELECT 1 FROM conversation_events e
-                   WHERE e.conversation_id = t.conversation_id
-                     AND e.type = 'AGENT_TURN_PLAYOUT'
-                     AND e.payload->>'turn_id' = t.turn_id
-                     AND e.payload->>'interrupted' = 'true'
-                     AND e.payload->>'heard_text' = ''
+                 -- The SQL twin of the domain's silentPlayoutTurnIds: nothing heard *and* cut short,
+                 -- which is how the worker reports a zero-audio turn (ADR 0008), *and* not a turn the
+                 -- borrower superseded before the agent ever replied -- that reports the same shape
+                 -- and is not a TTS failure. Change one, change both.
+                 (
+                   EXISTS (
+                     SELECT 1 FROM conversation_events e
+                     WHERE e.conversation_id = t.conversation_id
+                       AND e.type = 'AGENT_TURN_PLAYOUT'
+                       AND e.payload->>'turn_id' = t.turn_id
+                       AND e.payload->>'interrupted' = 'true'
+                       AND e.payload->>'heard_text' = ''
+                   )
+                   AND NOT EXISTS (
+                     SELECT 1 FROM conversation_events s
+                     WHERE s.conversation_id = t.conversation_id
+                       AND s.type = 'TURN_SUPERSEDED'
+                       AND s.payload->>'turn_id' = t.turn_id
+                   )
                  )                                                 AS tts_silent
           FROM conversation_turns t
           WHERE t.conversation_id = ${conversationId}

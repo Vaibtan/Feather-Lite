@@ -76,6 +76,21 @@ describe("reliability counts (from the ledger)", () => {
           // Exactly how the worker reports a TTS stream that produced no frames (ADR 0008): the
           // borrower heard nothing, whatever the chat item claimed.
           yield* orch.processSignal(started.conversationId, { kind: "playout", turnId: "t1", heardText: "", interrupted: true });
+          // A turn the borrower superseded before the agent replied reports the very same shape and
+          // is NOT a TTS failure -- nothing was heard because nothing was synthesised. Measured on a
+          // fleet run, where counting these put the silent-playout rate at 22% against one real
+          // failure in eighteen turns. The supersession is written straight to the ledger rather
+          // than raced into existence: what needs proving here is that the SQL agrees with the
+          // domain predicate, and the race itself is already covered by concurrency.test.ts.
+          const conv = yield* ConversationRepo;
+          yield* orch.processSignal(started.conversationId, { kind: "playout", turnId: "t2", heardText: "", interrupted: true });
+          yield* conv.lockConversation(started.conversationId);
+          yield* conv.appendEvent({
+            id: yield* (yield* IdGen).next(),
+            conversationId: started.conversationId,
+            event: { type: "TURN_SUPERSEDED", payload: { turn_id: "t2", superseded_by: "t3" } },
+            createdAt: DateTime.toDateUtc(NOW),
+          });
           // Two strikes close the call.
           yield* orch.processNoInput(started.conversationId);
           yield* orch.processNoInput(started.conversationId);

@@ -12,7 +12,7 @@ import {
   decodeJudgeVerdict,
   evaluateCall,
   evaluationScores,
-  isSilentPlayout,
+  silentPlayoutTurnIds,
   JUDGE_DIMENSIONS,
   JUDGE_RESPONSE_SCHEMA,
   judgePrompt,
@@ -187,7 +187,7 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
               // TTS facts live in the turn rows rather than the ledger, so they are read back here
               // and scored alongside the ledger-derived ones — one job, one set of post-call scores.
               const ttsRows = yield* conv.turnTtsFacts(job.conversationId);
-              const silentTurns = new Set(events.filter(isSilentPlayout).map((e) => e.payload.turn_id));
+              const silentTurns = silentPlayoutTurnIds(events);
               const written = yield* scores.recordMany([
                 ...evaluationScores(job.conversationId, evaluation),
                 ...ttsScores(

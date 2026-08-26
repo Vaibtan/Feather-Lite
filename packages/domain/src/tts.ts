@@ -21,23 +21,46 @@
  * Neither says the speech sounded good. Both are computed from numbers the voice worker already
  * reports, so they cost nothing on the turn path.
  */
-import type { EventOf, EventRecord } from "./events.js";
+import type { EventRecord } from "./events.js";
 import { booleanScore, numericScore, type ScoreRecord } from "./scores.js";
 
 /**
- * A turn whose synthesis produced no audio at all.
+ * The turns whose synthesis produced no audio at all.
  *
- * The ledger's evidence is an `AGENT_TURN_PLAYOUT` that heard nothing *and* was cut short: the
- * voice worker reports a zero-audio turn that way on purpose (ADR 0008), because the framework
+ * The ledger's evidence is an `AGENT_TURN_PLAYOUT` that heard nothing *and* was cut short: the voice
+ * worker reports a zero-audio turn that way on purpose (ADR 0008), because the framework
  * force-closes such an item and would otherwise have it recorded as played in full. Requiring both
- * halves is what separates it from a barge-in, where the borrower talked over real speech and
+ * halves separates it from an ordinary barge-in, where the borrower talked over real speech and
  * `heard_text` carries the part they did hear.
  *
- * The same predicate is expressed in SQL by `ConversationRepo.reliabilityCounts` and by
- * `Queries.turnLatencies`; if this definition changes, those change with it.
+ * **Those two halves are not enough, which a fleet run proved.** A turn the borrower superseded
+ * before the agent ever produced a reply — "Actually, wait." followed immediately by the real
+ * sentence — reports exactly the same shape: nothing heard, cut short. Nothing was heard because
+ * nothing was ever synthesised, and counting it as a TTS failure put the fleet's silent-playout
+ * rate at 22% when one turn in eighteen had actually failed. A rate that reads as a broken voice
+ * when the voice is fine is worse than no rate.
+ *
+ * So supersession excludes. The other candidate discriminator was "is there an `AGENT_TURN` for
+ * this turn id", which is the more direct question but the less reliable signal: `turn_id` is
+ * optional on `AGENT_TURN`, and a genuine zero-audio turn missed because of a missing id would be
+ * a false negative on a compliance-adjacent counter — the expensive direction to be wrong in.
+ *
+ * This function takes the whole event list rather than one event because the exclusion cannot be
+ * decided from the playout alone. The same predicate is expressed in SQL by
+ * `ConversationRepo.reliabilityCounts` and `Queries.turnLatencies`; change one, change those.
  */
-export const isSilentPlayout = (e: EventRecord): e is EventRecord & EventOf<"AGENT_TURN_PLAYOUT"> =>
-  e.type === "AGENT_TURN_PLAYOUT" && e.payload.interrupted && e.payload.heard_text === "";
+export const silentPlayoutTurnIds = (events: ReadonlyArray<EventRecord>): ReadonlySet<string> => {
+  const superseded = new Set<string>();
+  for (const e of events) if (e.type === "TURN_SUPERSEDED") superseded.add(e.payload.turn_id);
+  const out = new Set<string>();
+  for (const e of events) {
+    if (e.type !== "AGENT_TURN_PLAYOUT") continue;
+    if (!e.payload.interrupted || e.payload.heard_text !== "") continue;
+    if (superseded.has(e.payload.turn_id)) continue;
+    out.add(e.payload.turn_id);
+  }
+  return out;
+};
 
 /**
  * What the voice runtime reported about one turn's speech synthesis. `audioMs`/`chars` come from

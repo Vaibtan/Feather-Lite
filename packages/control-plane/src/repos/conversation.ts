@@ -220,7 +220,17 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
           count(*) FILTER (WHERE type = 'TURN_SUPERSEDED')::text AS turns_superseded,
           count(*) FILTER (WHERE type = 'CALL_CONTROL' AND payload->>'action' = 'NO_INPUT_CLOSE')::text AS no_input_closes,
           count(*) FILTER (WHERE type = 'TURN_DECISION_REJECTED' AND payload->>'reason' = 'DECIDER_UNAVAILABLE')::text AS decider_unavailable,
-          count(*) FILTER (WHERE type = 'AGENT_TURN_PLAYOUT' AND payload->>'interrupted' = 'true' AND payload->>'heard_text' = '')::text AS tts_silent_playouts,
+          -- The SQL twin of the domain's silentPlayoutTurnIds. The NOT EXISTS is load-bearing: a
+          -- turn the borrower superseded before the agent replied reports the same shape and is not
+          -- a TTS failure. Change one, change both.
+          count(*) FILTER (
+            WHERE type = 'AGENT_TURN_PLAYOUT' AND payload->>'interrupted' = 'true' AND payload->>'heard_text' = ''
+              AND NOT EXISTS (
+                SELECT 1 FROM conversation_events s
+                WHERE s.conversation_id = conversation_events.conversation_id
+                  AND s.type = 'TURN_SUPERSEDED' AND s.payload->>'turn_id' = conversation_events.payload->>'turn_id'
+              )
+          )::text AS tts_silent_playouts,
           count(*) FILTER (WHERE type = 'TOOL_REJECTED' AND payload->>'name' = 'record_promise_to_pay'
                              AND payload->>'reason' = 'INVALID_ARGS' AND payload->>'detail' = ${READBACK_INTERRUPTED_DETAIL})::text AS readbacks_repeated_unheard,
           count(*) FILTER (WHERE type = 'CALL_CONTROL' AND payload->>'action' = 'HANGUP' AND payload->>'reason' = ${ORPHANED_REASON})::text AS calls_orphaned
