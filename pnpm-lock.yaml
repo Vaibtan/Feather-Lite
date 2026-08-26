@@ -181,6 +181,9 @@ importers:
       '@feather-lite/domain':
         specifier: workspace:*
         version: link:../domain
+      '@langfuse/client':
+        specifier: ^5.10.1
+        version: 5.10.1(@opentelemetry/api@1.9.1)
       '@langfuse/otel':
         specifier: ^5.10.1
         version: 5.10.1(@opentelemetry/api@1.9.1)(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/exporter-trace-otlp-http@0.221.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.10.0(@opentelemetry/api@1.9.1))
@@ -813,6 +816,11 @@ packages:
 
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
+
+  '@langfuse/client@5.10.1':
+    resolution: {integrity: sha512-isfMUbb55mXnp5EjIKnKmdB6aVxy+jPYK65RkaLdi2xveUbifVeov9kAwHQN6lWtzkR/ssSk6+JwvTCLaPcvTQ==}
+    peerDependencies:
+      '@opentelemetry/api': ^1.9.0
 
   '@langfuse/core@5.10.1':
     resolution: {integrity: sha512-W8UArizWSy1DdeLGTsTwJwl7bkA7OQQcGZW8RtoopXyJZ93O0rwG7wzzeiZjhjpj5OtWOUTEaJuNkwOrF31UDw==}
@@ -2018,6 +2026,10 @@ packages:
   multipasta@0.2.8:
     resolution: {integrity: sha512-ZPWuMKyv0cSO29f7hozp+k6+crZbQijV8ipMvxNxRf2SwtYGTX1ZX89Kd20VV4H9Znonx+EQn+iy1wGQsJ+b+Q==}
 
+  mustache@4.2.0:
+    resolution: {integrity: sha512-71ippSywq5Yb7/tVYyGbkBggbU8H3u5Rz56fH60jGFgr8uHwxs+aSKeqmluIVzM0m0kB7xQjKS6qPfd0b2ZoqQ==}
+    hasBin: true
+
   nanoid@3.3.18:
     resolution: {integrity: sha512-DTg4MJbGMWkfi6VZFdNt2/caMbQy4Ou+Op/hJQvGEWcnVfoA1QA+xzRKAzw9jD6+GVOOeYr/mIcuDSdug6F6+w==}
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
@@ -2989,6 +3001,13 @@ snapshots:
     optional: true
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
+
+  '@langfuse/client@5.10.1(@opentelemetry/api@1.9.1)':
+    dependencies:
+      '@langfuse/core': 5.10.1(@opentelemetry/api@1.9.1)
+      '@langfuse/tracing': 5.10.1(@opentelemetry/api@1.9.1)
+      '@opentelemetry/api': 1.9.1
+      mustache: 4.2.0
 
   '@langfuse/core@5.10.1(@opentelemetry/api@1.9.1)':
     dependencies:
@@ -4049,6 +4068,8 @@ snapshots:
       msgpackr-extract: 3.0.4
 
   multipasta@0.2.8: {}
+
+  mustache@4.2.0: {}
 
   nanoid@3.3.18: {}
 

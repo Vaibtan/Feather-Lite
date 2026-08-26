@@ -10,6 +10,8 @@
  *   POST /api/conversations/:id/turn               streaming turn (SSE frames, see turnFrames.ts)
  *   POST /api/conversations/:id/signal             runtime/telephony signals
  *   POST /api/conversations/:id/no_input           no-input strike
+ *   GET  /api/conversations/:id/scores             quality scores for one call
+ *   POST /api/conversations/:id/scores             ingest scores (harness runs, human labels)
  *   GET  /api/testing/scenarios ; POST /api/testing/scenarios/:id/run ; POST /api/testing/scenarios/run-all
  *   GET  /api/borrowers                            demo directory
  *   POST /api/agents/heartbeat ; GET /api/system/status
@@ -19,7 +21,7 @@
  */
 import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiSchema } from "@effect/platform";
 import { Schema } from "effect";
-import { CallControlAction, ConversationState, Outcome, PreCallFailure } from "@feather-lite/domain";
+import { CallControlAction, ConversationState, Outcome, PreCallFailure, ScoreDataType, ScoreName, ScoreSource } from "@feather-lite/domain";
 import { CallControlSummary, ToolCalledSummary } from "./turnFrames.js";
 
 /* ------------------------------ errors ------------------------------ */
@@ -269,6 +271,45 @@ export const TurnLatencyRow = Schema.Struct({
   total_ms: Schema.NullOr(Schema.Number),
 });
 
+/**
+ * One quality measurement about a call (or one of its turns). `value` is always numeric — a BOOLEAN
+ * score is 1/0 and a CATEGORICAL one carries its label in `string_value` — because that is the
+ * shape Langfuse stores and having two disagree would defeat the point of mirroring them.
+ */
+export const ScoreRow = Schema.Struct({
+  conversation_id: Schema.String,
+  turn_id: Schema.NullOr(Schema.String),
+  name: ScoreName,
+  value: Schema.Number,
+  data_type: ScoreDataType,
+  string_value: Schema.NullOr(Schema.String),
+  source: ScoreSource,
+  comment: Schema.NullOr(Schema.String),
+  evidence: Schema.NullOr(JsonRecord),
+  created_at: Schema.String,
+});
+export type ScoreRow = typeof ScoreRow.Type;
+
+/**
+ * Score ingest. Sources are restricted to the ones that legitimately come from outside the server:
+ * a harness run posting its measured WER and equivalence verdict, an operator recording a label,
+ * and SYSTEM for out-of-process probes. EVALUATOR, JUDGE and SCENARIO are written by the jobs and
+ * the suite that produce them, so no client can post a judge verdict the judge never reached.
+ */
+export const PostScoresRequest = Schema.Struct({
+  scores: Schema.Array(
+    Schema.Struct({
+      name: ScoreName,
+      value: Schema.Number,
+      source: Schema.Literal("HARNESS", "HUMAN", "SYSTEM"),
+      turn_id: Schema.optional(Schema.NullOr(Schema.String)),
+      string_value: Schema.optional(Schema.NullOr(Schema.String)),
+      comment: Schema.optional(Schema.NullOr(Schema.String)),
+      evidence: Schema.optional(Schema.NullOr(JsonRecord)),
+    }),
+  ).pipe(Schema.minItems(1), Schema.maxItems(200)),
+});
+
 const Percentiles = Schema.Struct({ n: Schema.Number, p50: Schema.NullOr(Schema.Number), p95: Schema.NullOr(Schema.Number) });
 
 export type TurnLatencyRow = typeof TurnLatencyRow.Type;
@@ -331,7 +372,16 @@ export const ConversationsGroup = HttpApiGroup.make("conversations")
   )
   .add(HttpApiEndpoint.post("signal", "/api/conversations/:id/signal").setPath(IdPath).setPayload(SignalRequest).addSuccess(RuntimeResult).addError(ApiNotFound).addError(ApiConflict))
   .add(HttpApiEndpoint.post("noInput", "/api/conversations/:id/no_input").setPath(IdPath).addSuccess(RuntimeResult).addError(ApiNotFound).addError(ApiConflict))
-  .add(HttpApiEndpoint.get("latency", "/api/conversations/:id/latency").setPath(IdPath).addSuccess(Schema.Array(TurnLatencyRow)).addError(ApiNotFound));
+  .add(HttpApiEndpoint.get("latency", "/api/conversations/:id/latency").setPath(IdPath).addSuccess(Schema.Array(TurnLatencyRow)).addError(ApiNotFound))
+  .add(HttpApiEndpoint.get("scores", "/api/conversations/:id/scores").setPath(IdPath).addSuccess(Schema.Array(ScoreRow)).addError(ApiNotFound))
+  .add(
+    HttpApiEndpoint.post("postScores", "/api/conversations/:id/scores")
+      .setPath(IdPath)
+      .setPayload(PostScoresRequest)
+      .addSuccess(Schema.Struct({ written: Schema.Number }))
+      .addError(ApiNotFound)
+      .addError(ApiBadRequest),
+  );
 
 export const TestingGroup = HttpApiGroup.make("testing")
   .add(HttpApiEndpoint.get("scenarios", "/api/testing/scenarios").addSuccess(Schema.Array(ScenarioSummary)))

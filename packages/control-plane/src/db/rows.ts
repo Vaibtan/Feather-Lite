@@ -18,6 +18,9 @@ import {
   OutboxJobType,
   ScheduledActionStatus,
   ScheduledActionType,
+  ScoreDataType,
+  ScoreName,
+  ScoreSource,
   WorkflowExecutionStatus,
   WorkflowType,
 } from "@feather-lite/domain";
@@ -174,3 +177,18 @@ export const HeartbeatRow = Schema.Struct({
   lastSeenAt: Ts,
   meta: JsonRecord,
 });
+
+export const ScoreRow = Schema.Struct({
+  id: Schema.String,
+  conversationId: Schema.String,
+  turnId: Schema.NullOr(Schema.String),
+  name: ScoreName,
+  value: Schema.Number,
+  dataType: ScoreDataType,
+  stringValue: Schema.NullOr(Schema.String),
+  source: ScoreSource,
+  comment: Schema.NullOr(Schema.String),
+  evidence: Schema.NullOr(JsonRecord),
+  createdAt: Ts,
+});
+export type ScoreRow = typeof ScoreRow.Type;

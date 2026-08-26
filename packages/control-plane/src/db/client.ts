@@ -9,6 +9,7 @@ import { PgClient, PgMigrator } from "@effect/sql-pg";
 import { Migrator, SqlClient } from "@effect/sql";
 import { AppConfig } from "../config.js";
 import { migration0001 } from "./migrations/0001_initial.js";
+import { migration0002 } from "./migrations/0002_scores.js";
 
 export const PgLive: Layer.Layer<SqlClient.SqlClient | PgClient.PgClient, unknown, AppConfig> = Layer.unwrapEffect(
   Effect.gen(function* () {
@@ -28,6 +29,7 @@ export const PgLive: Layer.Layer<SqlClient.SqlClient | PgClient.PgClient, unknow
 export const MigrationsLive = PgMigrator.layer({
   loader: Migrator.fromRecord({
     "0001_initial": migration0001,
+    "0002_scores": migration0002,
   }),
 }).pipe(Layer.provide(NodeContext.layer));
 

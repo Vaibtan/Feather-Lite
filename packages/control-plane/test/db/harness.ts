@@ -49,7 +49,7 @@ export const makeInfraLayer = (overrides: Partial<AppConfigShape> = {}) =>
 export const truncateAll = Effect.gen(function* () {
   const sql = yield* PgClient.PgClient;
   yield* sql`TRUNCATE TABLE
-    conversation_turns, conversation_events, outbox_jobs, scheduled_actions, conversations, call_attempts,
+    conversation_scores, conversation_turns, conversation_events, outbox_jobs, scheduled_actions, conversations, call_attempts,
     workflow_executions, loans, borrower_contact_points, contact_points, borrowers, agent_versions, agent_heartbeats
     RESTART IDENTITY CASCADE`;
 });

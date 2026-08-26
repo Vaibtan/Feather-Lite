@@ -17,11 +17,13 @@ import {
   type SignalRequest,
   type TurnFrame,
 } from "@feather-lite/contracts";
+import { scoreRecordProblem } from "@feather-lite/domain";
 import { AppConfig } from "../config.js";
 import { ConversationCompleted, NotFound, PreCallRejected, TelephonyError, TurnInProgress, UnknownScenario } from "../errors.js";
 import { SchedulingRepo } from "../repos/scheduling.js";
 import { Orchestrator, type Signal } from "../services/Orchestrator.js";
 import { Queries } from "../services/Queries.js";
+import { Scores } from "../services/Scores.js";
 import { ScenarioRunner } from "../services/Scenarios.js";
 import { SeedService } from "../services/Seed.js";
 import { VoiceSessions } from "../services/VoiceSessions.js";
@@ -144,6 +146,7 @@ export const ConversationsLive = HttpApiBuilder.group(FeatherApi, "conversations
     const orch = yield* Orchestrator;
     const runner = yield* TurnRunner;
     const metrics = yield* Metrics;
+    const scores = yield* Scores;
     return handlers
       .handle("list", ({ urlParams }) =>
         queries.listConversations(Math.min(urlParams.limit ?? 50, 200), urlParams.offset ?? 0).pipe(Effect.orDie),
@@ -238,6 +241,53 @@ export const ConversationsLive = HttpApiBuilder.group(FeatherApi, "conversations
           Effect.flatMap(() => queries.turnLatencies(path.id)),
           Effect.orDie,
         ),
+      )
+      .handle("scores", ({ path }) =>
+        queries.conversationDetail(path.id).pipe(
+          Effect.catchTag("NotFound", (e) => Effect.fail(mapNotFound(e))),
+          Effect.flatMap(() => scores.listForConversation(path.id)),
+          Effect.map((rows) =>
+            rows.map((r) => ({
+              conversation_id: r.conversationId,
+              turn_id: r.turnId,
+              name: r.name,
+              value: r.value,
+              data_type: r.dataType,
+              string_value: r.stringValue,
+              source: r.source,
+              comment: r.comment,
+              evidence: r.evidence,
+              created_at: r.createdAt.toISOString(),
+            })),
+          ),
+          Effect.orDie,
+        ),
+      )
+      .handle("postScores", ({ path, payload }) =>
+        Effect.gen(function* () {
+          // The conversation must exist: a score against a typo'd id would sit in the table forever
+          // with nothing to join it to. (The scenario suite's synthetic id is written server-side
+          // and does not come through here.)
+          yield* queries.conversationDetail(path.id).pipe(Effect.catchTag("NotFound", (e) => Effect.fail(mapNotFound(e))), Effect.orDie);
+          const records = payload.scores.map((s) => ({
+            conversationId: path.id,
+            turnId: s.turn_id ?? null,
+            name: s.name,
+            value: s.value,
+            source: s.source,
+            stringValue: s.string_value ?? null,
+            comment: s.comment ?? null,
+            evidence: s.evidence ?? null,
+          }));
+          // A caller gets told which of its scores were malformed and none are written. In-process
+          // producers take the other branch deliberately (`recordMany` logs and skips a bad record
+          // so one typo cannot cost a call its other measurements) — but a client that posted five
+          // scores and silently got three back has no way to learn which two went missing.
+          const problems = records.map(scoreRecordProblem).filter((p): p is string => p !== null);
+          if (problems.length > 0) return yield* Effect.fail(new ApiBadRequest({ message: problems.join("; ").slice(0, 300) }));
+          const written = yield* scores.recordMany(records).pipe(Effect.orDie);
+          return { written };
+        }),
       );
   }),
 );

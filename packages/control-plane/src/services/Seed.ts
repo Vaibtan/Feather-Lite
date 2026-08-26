@@ -186,7 +186,7 @@ export class SeedService extends Effect.Service<SeedService>()("@feather-lite/Se
     /** Demo reset: wipe conversations/attempts/actions/jobs, keep borrowers; then re-run history. */
     const reset = () =>
       Effect.gen(function* () {
-        yield* sql`TRUNCATE TABLE conversation_turns, conversation_events, outbox_jobs, scheduled_actions, conversations, call_attempts, workflow_executions, loans, borrower_contact_points, contact_points, borrowers RESTART IDENTITY CASCADE`;
+        yield* sql`TRUNCATE TABLE conversation_scores, conversation_turns, conversation_events, outbox_jobs, scheduled_actions, conversations, call_attempts, workflow_executions, loans, borrower_contact_points, contact_points, borrowers RESTART IDENTITY CASCADE`;
         return yield* run();
       });
 
