@@ -168,6 +168,17 @@ export const TransitionTrigger = Schema.Literal(
 );
 export type TransitionTrigger = typeof TransitionTrigger.Type;
 
+/**
+ * The hangup reason that marks a call finalized by the orphaned-call sweeper rather than by
+ * anyone hanging up (spec 2026-08-26, D6).
+ *
+ * It lives in the domain because two independent places must agree on it and neither may own it:
+ * the sweeper writes it, and the orchestrator reads it to decide the outcome. An orphan is FAILED,
+ * not NO_ANSWER — nobody ended the call, the worker died mid-conversation, and recording that as
+ * "no answer" would schedule a polite retry for what is a system failure.
+ */
+export const ORPHANED_REASON = "ORPHANED";
+
 /** Deterministic override classes, in precedence order (SPEC §8.4). */
 export const OverrideReason = Schema.Literal("OPT_OUT", "DISPUTE", "HARDSHIP", "WRONG_NUMBER");
 export type OverrideReason = typeof OverrideReason.Type;

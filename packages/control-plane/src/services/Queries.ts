@@ -142,6 +142,7 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
             decider_unavailable: reliability.deciderUnavailable,
             tts_silent_playouts: reliability.ttsSilentPlayouts,
             readbacks_repeated_unheard: reliability.readbacksRepeatedUnheard,
+            calls_orphaned: reliability.callsOrphaned,
           },
         };
       });

@@ -106,8 +106,18 @@ export class ControlPlaneClient {
     await fetch(`${this.cfg.baseUrl}/api/system/provider-events`, { method: "POST", headers: this.headers(), body: JSON.stringify({ events }) }).catch(() => undefined);
   }
 
-  async heartbeat(agentName: string, meta: Record<string, unknown>): Promise<void> {
-    await fetch(`${this.cfg.baseUrl}/api/agents/heartbeat`, { method: "POST", headers: this.headers(), body: JSON.stringify({ agent_name: agentName, meta }) }).catch(() => undefined);
+  /**
+   * Liveness. `conversations` is what this process is serving right now: the control plane records
+   * a last-seen time per conversation, and the orphaned-call sweeper finalizes anything nobody has
+   * claimed for three intervals (D6). A job process reports its own call; the main worker reports
+   * none, and the control plane only ever touches the ids it is given.
+   */
+  async heartbeat(agentName: string, meta: Record<string, unknown>, conversations: ReadonlyArray<string> = []): Promise<void> {
+    await fetch(`${this.cfg.baseUrl}/api/agents/heartbeat`, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({ agent_name: agentName, meta, conversations }),
+    }).catch(() => undefined);
   }
 
   async conversation(conversationId: string): Promise<{ conversation: { current_state: string; final_outcome: string | null } }> {

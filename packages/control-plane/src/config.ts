@@ -31,6 +31,17 @@ export interface AppConfigShape {
   /** Public-demo hardening budgets. Raised deliberately for load runs (docs/loadtest/). */
   readonly rateLimitPerMinute: number;
   readonly dailyTurnCap: number;
+  /**
+   * Orphaned-call sweeper (spec 2026-08-26, D6). A conversation is a candidate once no worker has
+   * claimed it for `orphanMissedHeartbeats` heartbeat intervals; the media plane is then asked
+   * whether an agent is still in the room, and only a definite "no" finalizes it. When the media
+   * plane cannot answer, the much longer `orphanUnconfirmedMs` applies instead, so a LiveKit outage
+   * degrades into a slower sweep rather than a fleet-wide hangup.
+   */
+  readonly sweeperEnabled: boolean;
+  readonly orphanMissedHeartbeats: number;
+  readonly orphanHeartbeatIntervalMs: number;
+  readonly orphanUnconfirmedMs: number;
 }
 
 export class AppConfig extends Context.Tag("@feather-lite/AppConfig")<AppConfig, AppConfigShape>() {}
@@ -79,6 +90,10 @@ export const appConfig: Config.Config<AppConfigShape> = Config.all({
   apiBearerToken: optionalRedacted("API_BEARER_TOKEN"),
   rateLimitPerMinute: Config.integer("RATE_LIMIT_PER_MINUTE").pipe(Config.withDefault(120)),
   dailyTurnCap: Config.integer("DAILY_TURN_CAP").pipe(Config.withDefault(5000)),
+  sweeperEnabled: Config.boolean("SWEEPER_ENABLED").pipe(Config.withDefault(true)),
+  orphanMissedHeartbeats: Config.integer("ORPHAN_MISSED_HEARTBEATS").pipe(Config.withDefault(3)),
+  orphanHeartbeatIntervalMs: Config.integer("ORPHAN_HEARTBEAT_INTERVAL_MS").pipe(Config.withDefault(10_000)),
+  orphanUnconfirmedMs: Config.integer("ORPHAN_UNCONFIRMED_MS").pipe(Config.withDefault(300_000)),
 }).pipe(
   Config.map((c): AppConfigShape => {
     const models = { ...DEFAULT_MODELS };
@@ -108,6 +123,10 @@ export const appConfig: Config.Config<AppConfigShape> = Config.all({
       apiBearerToken: c.apiBearerToken._tag === "Some" ? c.apiBearerToken.value : null,
       rateLimitPerMinute: c.rateLimitPerMinute,
       dailyTurnCap: c.dailyTurnCap,
+      sweeperEnabled: c.sweeperEnabled,
+      orphanMissedHeartbeats: c.orphanMissedHeartbeats,
+      orphanHeartbeatIntervalMs: c.orphanHeartbeatIntervalMs,
+      orphanUnconfirmedMs: c.orphanUnconfirmedMs,
     };
   }),
 );

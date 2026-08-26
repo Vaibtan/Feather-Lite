@@ -19,6 +19,8 @@ import {
   DatabaseLive,
   HttpLive,
   LangfuseTracingLive,
+  LiveKitMediaPlaneLive,
+  MediaPlane,
   Metrics,
   OpenAILlmClientLive,
   OpenAITurnDeciderLive,
@@ -26,6 +28,7 @@ import {
   SchedulingService,
   ScriptedTurnDeciderLive,
   ServicesLive,
+  Sweeper,
 } from "@feather-lite/control-plane";
 
 loadEnv({ path: fileURLToPath(new URL("../../../.env", import.meta.url)) });
@@ -53,8 +56,11 @@ const DeciderLive = Layer.unwrapEffect(
 /** Background loops: claim + process due scheduled actions and outbox jobs. */
 const SchedulersLive = Layer.scopedDiscard(
   Effect.gen(function* () {
+    const cfg = yield* AppConfig;
     const scheduling = yield* SchedulingService;
     const outbox = yield* OutboxService;
+    const sweeper = yield* Sweeper;
+    const media = yield* MediaPlane;
     const tick = <A, E, R>(name: string, run: Effect.Effect<A, E, R>, every: Duration.DurationInput) =>
       run.pipe(
         Effect.tapError((e) => Effect.logError(`${name} tick failed`, e)),
@@ -64,7 +70,12 @@ const SchedulersLive = Layer.scopedDiscard(
       );
     yield* tick("scheduled-actions", scheduling.runOnce(20), "15 seconds");
     yield* tick("outbox", outbox.runOnce(20), "5 seconds");
-    yield* Effect.logInfo("schedulers started");
+    // Every 10 s, so worst-case detection is one heartbeat interval past the staleness window
+    // (~40 s) and typical is ~35 s — the number D6 set.
+    yield* tick("sweeper", sweeper.runOnce(20), "10 seconds");
+    // Which media plane resolved matters: without LiveKit every sweep falls back to the long
+    // unconfirmed window, which is a very different detection time than the ~35 s headline.
+    yield* Effect.logInfo(`schedulers started (sweeper ${cfg.sweeperEnabled ? `on, ${sweeper.stalenessMs} ms staleness, confirming via ${media.name}` : "off"})`);
   }),
 );
 
@@ -89,6 +100,7 @@ const MainLive = Layer.mergeAll(HttpLive, RootRoute, SchedulersLive).pipe(
   // provider failures, the orchestrator counts the conversation-loop ones and the status handler
   // reads them. Three instances would each hold a third of the answer.
   Layer.provideMerge(Metrics.Default),
+  Layer.provideMerge(LiveKitMediaPlaneLive),
   Layer.provideMerge(LangfuseTracingLive),
   Layer.provideMerge(DatabaseLive),
   Layer.provideMerge(AppConfigLive),

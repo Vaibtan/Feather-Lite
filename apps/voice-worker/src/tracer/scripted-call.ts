@@ -101,6 +101,12 @@ export interface ScriptedCallOptions {
   /** Short tag used in log lines so concurrent calls are readable. */
   readonly label: string;
   readonly log?: (message: string) => void;
+  /**
+   * Chaos hook: once the agent has actually replied — so there is a live call to break — this is
+   * invoked and the call is abandoned where it stands, with no further lines and no hangup. Only
+   * `chaos-orphan.ts` uses it; every other harness leaves it unset and runs the full script.
+   */
+  readonly abandonAfterFirstReply?: (() => void) | undefined;
 }
 
 /**
@@ -333,6 +339,26 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
     //    seen to take 25s+, and barging in before the agent speaks is not a barge-in — the line lands
     //    in silence, the agent then talks over it, and the turn is lost.
     log("waiting for agent reply to start...");
+    if (opts.abandonAfterFirstReply) {
+      // Abandon the call mid-conversation: no more lines, no hangup, nothing that would let the
+      // control plane learn the call is over. That is exactly the state a killed worker leaves.
+      const replied = await waitAgentSpeaking(SPEECH_START_TIMEOUT_MS);
+      if (!replied) log("agent never replied; abandoning anyway");
+      opts.abandonAfterFirstReply();
+      return {
+        label: opts.label,
+        borrowerName: opts.borrowerName,
+        conversationId,
+        roomName,
+        hungUp: false,
+        agentSegments: agentSaid.map((s) => s.text),
+        agentAudioFrames: audioFrames,
+        durationMs: Date.now() - t0,
+        turnLatencies: [...turnLatencies],
+        unansweredTurns: [...unansweredTurns],
+        error: null,
+      };
+    }
     if (await waitAgentSpeaking(SPEECH_START_TIMEOUT_MS)) {
       await sleep(2000);
       await speak("BARGE-IN: I can pay 550 on Friday", opts.lines.pay);

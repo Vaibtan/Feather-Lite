@@ -19,6 +19,8 @@ export * from "./services/Outbox.js";
 export * from "./services/Orchestrator.js";
 export * from "./services/Queries.js";
 export * from "./services/Scores.js";
+export * from "./services/MediaPlane.js";
+export * from "./services/Sweeper.js";
 export * from "./services/Scenarios.js";
 export * from "./services/Seed.js";
 export * from "./services/VoiceSessions.js";

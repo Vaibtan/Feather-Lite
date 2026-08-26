@@ -141,6 +141,46 @@ export class SchedulingRepo extends Effect.Service<SchedulingRepo>()("@feather-l
       sql`INSERT INTO agent_heartbeats (agent_name, last_seen_at, meta) VALUES (${agentName}, ${at}, ${sql.json(meta)})
           ON CONFLICT (agent_name) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at, meta = EXCLUDED.meta`.pipe(Effect.asVoid);
 
+    /**
+     * Record that a worker is still serving these conversations, as of `at`. Upsert-only: a row is
+     * never deleted, because staleness is decided by age and a finished call's row is simply old.
+     */
+    const touchLiveness = (conversationIds: ReadonlyArray<string>, agentName: string, at: Date) =>
+      conversationIds.length === 0
+        ? Effect.void
+        : Effect.forEach(
+            conversationIds,
+            (id) =>
+              sql`INSERT INTO conversation_liveness (conversation_id, last_seen_at, agent_name) VALUES (${id}, ${at}, ${agentName})
+                  ON CONFLICT (conversation_id) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at, agent_name = EXCLUDED.agent_name`,
+            { discard: true },
+          );
+
+    /**
+     * Voice conversations with no final outcome that no worker has claimed recently.
+     *
+     * `started_at < staleBefore` is the grace period as well as the staleness bound: a call that
+     * began two seconds ago has not had time to be heartbeated, and sweeping it would be a
+     * guaranteed false positive. Simulated conversations are excluded — they have no worker to
+     * lose, and an abandoned console simulation is a different (much longer) rule.
+     */
+    const staleConversations = SqlSchema.findAll({
+      Request: Schema.Struct({ staleBefore: Schema.DateFromSelf, limit: Schema.Number }),
+      Result: Schema.Struct({
+        id: Schema.String,
+        startedAt: Schema.DateFromSelf,
+        lastSeenAt: Schema.NullOr(Schema.DateFromSelf),
+      }),
+      execute: ({ staleBefore, limit }) => sql`
+        SELECT c.id, c.started_at, l.last_seen_at
+        FROM conversations c
+        LEFT JOIN conversation_liveness l ON l.conversation_id = c.id
+        WHERE c.ended_at IS NULL AND c.final_outcome IS NULL AND c.channel = 'voice'
+          AND c.started_at < ${staleBefore}
+          AND (l.last_seen_at IS NULL OR l.last_seen_at < ${staleBefore})
+        ORDER BY c.started_at ASC LIMIT ${limit}`,
+    });
+
     const listHeartbeats = SqlSchema.findAll({
       Request: Schema.Void,
       Result: HeartbeatRow,
@@ -163,6 +203,8 @@ export class SchedulingRepo extends Effect.Service<SchedulingRepo>()("@feather-l
       finishJob,
       upsertHeartbeat,
       listHeartbeats,
+      touchLiveness,
+      staleConversations,
     } as const;
   }),
 }) {}

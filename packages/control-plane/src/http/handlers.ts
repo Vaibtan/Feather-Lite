@@ -116,6 +116,9 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
         Effect.gen(function* () {
           const now = DateTime.toDateUtc(yield* DateTime.now);
           yield* sched.upsertHeartbeat(payload.agent_name, now, payload.meta ?? {}).pipe(Effect.orDie);
+          // Only the listed conversations are touched, never a replace: several job processes share
+          // one agent name, and each knows about only its own call.
+          yield* sched.touchLiveness(payload.conversations ?? [], payload.agent_name, now).pipe(Effect.orDie);
           return { ok: true as const };
         }),
       )

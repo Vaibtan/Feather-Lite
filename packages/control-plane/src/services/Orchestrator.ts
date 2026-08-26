@@ -41,6 +41,7 @@ import {
   NO_PENDING_PROPOSAL_DETAIL,
   noInputPrompt,
   optOutConfirmation,
+  ORPHANED_REASON,
   overrideTransition,
   POLICY,
   promiseReadback,
@@ -897,7 +898,12 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           }
           // hangup: the borrower (or provider) ended the call before a disposition.
           const logged = yield* callControl.logAction({ conversationId: row.id, events, action: "HANGUP", actionId: signal.actionId ?? null, payload: { reason: signal.reason ?? "participant_disconnected" }, now: at });
-          const outcome: Outcome = row.protectedContextUnlocked ? "FAILED" : "NO_ANSWER";
+          // A hangup normally means the borrower or the provider ended the call, and an unverified
+          // one is a NO_ANSWER. An orphan is different: nobody ended anything, the worker died
+          // mid-call, and calling that NO_ANSWER would schedule a polite retry for a system failure.
+          // The sweeper's reason is what distinguishes them (spec 2026-08-26, D6).
+          const orphaned = signal.reason === ORPHANED_REASON;
+          const outcome: Outcome = orphaned || row.protectedContextUnlocked ? "FAILED" : "NO_ANSWER";
           yield* finalize({ row, ctx, currentState: row.currentState, outcome, metadata: { reason: signal.reason ?? "hangup" }, at });
           return done({ agentText: "", newState: "COMPLETED", callControlAction: { action: "HANGUP", action_id: logged.action_id }, outcome, endCall: true });
         }),

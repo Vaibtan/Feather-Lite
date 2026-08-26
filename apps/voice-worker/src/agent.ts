@@ -64,10 +64,22 @@ export default defineAgent({
 
     const lk = { url: process.env["LIVEKIT_URL"] ?? "", key: process.env["LIVEKIT_API_KEY"] ?? "", secret: process.env["LIVEKIT_API_SECRET"] ?? "" };
     const rooms = new RoomServiceClient(lk.url, lk.key, lk.secret);
+    /**
+     * Per-conversation liveness for the orphaned-call sweeper (spec 2026-08-26, D6). This runs in
+     * the *job* process, which is the only one that knows which call it is on, and it stops the
+     * moment the call ends — so a worker that dies mid-call simply stops reporting, which is
+     * exactly the signal the sweeper is looking for.
+     */
+    const beat = () => void client.heartbeat(AGENT_NAME, { pid: process.pid, mode: "job", room: roomName }, [conversationId]);
+    beat();
+    const livenessTimer = setInterval(beat, 10_000);
+    livenessTimer.unref();
+
     let ended = false;
     const hangup = async (reason: string) => {
       if (ended) return;
       ended = true;
+      clearInterval(livenessTimer);
       log("hangup", { reason });
       try {
         await rooms.deleteRoom(roomName);

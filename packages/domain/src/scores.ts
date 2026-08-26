@@ -58,6 +58,9 @@ export const SCORE_NAMES = [
   "harness.equivalence_pass",
   "scenario.pass_rate",
 
+  /** Reliability: how long the sweeper took to notice a conversation had lost its worker (SYSTEM). */
+  "system.orphan_detect_ms",
+
   /** The operator's own label — the calibration target for `judge.overall_pass` (HUMAN). */
   "human.overall_pass",
 ] as const;
@@ -114,6 +117,7 @@ export const SCORE_DATA_TYPE_BY_NAME: Readonly<Record<ScoreName, ScoreDataType>>
   "latency.slo_pass": "BOOLEAN",
   "harness.equivalence_pass": "BOOLEAN",
   "scenario.pass_rate": "NUMERIC",
+  "system.orphan_detect_ms": "NUMERIC",
   "human.overall_pass": "BOOLEAN",
 };
 

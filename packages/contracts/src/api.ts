@@ -239,7 +239,16 @@ export const RecordedProviderEvent = Schema.Struct({
   at: Schema.String,
 });
 
-export const HeartbeatRequest = Schema.Struct({ agent_name: Schema.String, meta: Schema.optional(JsonRecord) });
+/**
+ * Worker liveness. `conversations` is the list this worker is serving right now — the signal the
+ * orphaned-call sweeper runs on (D6). Explicit rather than buried in `meta` because the control
+ * plane acts on it: a conversation nobody has claimed for three intervals becomes a sweep candidate.
+ */
+export const HeartbeatRequest = Schema.Struct({
+  agent_name: Schema.String,
+  meta: Schema.optional(JsonRecord),
+  conversations: Schema.optional(Schema.Array(Schema.String).pipe(Schema.maxItems(200))),
+});
 export const SystemStatus = Schema.Struct({
   ok: Schema.Boolean,
   database: Schema.Literal("ok", "down"),
