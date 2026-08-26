@@ -151,7 +151,24 @@ export default defineAgent({
         void agent.onTtsMetrics({ ttfbMs: num(m["ttfbMs"]) });
       }
     });
-    session.on(voice.AgentSessionEventTypes.Error, (ev) => log("session error", { error: String(ev.error) }));
+    session.on(voice.AgentSessionEventTypes.Error, (ev) => {
+      log("session error", { error: String(ev.error) });
+      // The framework's error union is discriminated by pipeline stage and carries the plugin's own
+      // label (e.g. "deepgram.STT") plus whether it will be retried, which is exactly the shape the
+      // control plane's provider counters want. Reported rather than only logged so a degrading
+      // vendor shows up on the status page instead of in a log nobody is tailing.
+      const err = ev.error as { type?: string; label?: string; recoverable?: boolean; error?: { message?: string } };
+      const stage = err.type === "stt_error" ? "stt" : err.type === "tts_error" ? "tts" : err.type === "llm_error" ? "llm" : "media";
+      void client.providerEvents([
+        {
+          provider: err.label ?? "livekit",
+          kind: err.recoverable === true ? "retry" : "error",
+          stage,
+          message: String(err.error?.message ?? ev.error).slice(0, 300),
+          conversation_id: conversationId,
+        },
+      ]);
+    });
     session.on(voice.AgentSessionEventTypes.Close, (ev) => {
       log("session closed", { reason: String(ev.reason) });
       if (!agent.ended && !ended) {

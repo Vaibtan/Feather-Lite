@@ -153,7 +153,15 @@ export class FeatherAgent extends voice.Agent {
     // playback-truncated text is already the audio truth.
     const silent = !item.interrupted && !this.ttsProducedAudio.has(turnId);
     this.ttsProducedAudio.delete(turnId);
-    if (silent) this.deps.log("tts produced no audio for this turn; reporting empty playout", { turnId });
+    if (silent) {
+      this.deps.log("tts produced no audio for this turn; reporting empty playout", { turnId });
+      // A stall that the framework force-closes as "played in full" raises no session Error event,
+      // so this is the only place it can be counted. It is the ADR 0008 failure mode; watching it
+      // is the point of the counter.
+      void this.deps.client.providerEvents([
+        { provider: `tts:${process.env["STT_TTS_PROVIDER"] === "plugins" ? "deepgram" : "livekit-inference"}`, kind: "timeout", stage: "tts", message: `no audio produced for turn ${turnId}`, conversation_id: this.deps.conversationId },
+      ]);
+    }
     await this.deps.client
       .signal(this.deps.conversationId, {
         kind: "playout",

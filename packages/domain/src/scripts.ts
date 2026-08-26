@@ -38,6 +38,16 @@ const spokenAmount = (amount: MoneyAmount | string): string => {
   return frac === "00" ? `${dollars} dollars` : `${dollars} dollars and ${Number(frac)} cents`;
 };
 
+/**
+ * Why a `record_promise_to_pay` was refused. Both are `TOOL_REJECTED` / `INVALID_ARGS`, and they
+ * mean opposite things: the first is the fully-heard guard doing its job on a real proposal, the
+ * second is the model inventing a record with nothing to record. They live here, next to the
+ * read-back they are about, because the reliability counter keys off the difference — matching a
+ * prose string written somewhere else is exactly how a counter starts lying.
+ */
+export const READBACK_INTERRUPTED_DETAIL = "read-back was interrupted; repeating it";
+export const NO_PENDING_PROPOSAL_DETAIL = "no pending proposal to record";
+
 /** Read-back for a proposed promise to pay (non-interruptible). */
 export const promiseReadback = (p: { readonly amount: MoneyAmount | string; readonly date: IsoDate | string }): string =>
   `To confirm: you will pay ${spokenAmount(p.amount)} by ${spokenDate(p.date)}. Is that correct? Please say yes to confirm.`;

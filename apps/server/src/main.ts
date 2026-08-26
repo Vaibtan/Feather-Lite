@@ -19,6 +19,7 @@ import {
   DatabaseLive,
   HttpLive,
   LangfuseTracingLive,
+  Metrics,
   OpenAILlmClientLive,
   OpenAITurnDeciderLive,
   OutboxService,
@@ -84,6 +85,10 @@ const NodeServerLive = NodeHttpServer.layer(() => createServer(), { port, host }
 const MainLive = Layer.mergeAll(HttpLive, RootRoute, SchedulersLive).pipe(
   Layer.provide(ServicesLive),
   Layer.provide(DeciderLive),
+  // Metrics is provided once, at the root, for the same reason Tracing is: the decider counts
+  // provider failures, the orchestrator counts the conversation-loop ones and the status handler
+  // reads them. Three instances would each hold a third of the answer.
+  Layer.provideMerge(Metrics.Default),
   Layer.provideMerge(LangfuseTracingLive),
   Layer.provideMerge(DatabaseLive),
   Layer.provideMerge(AppConfigLive),

@@ -17,6 +17,7 @@ import { TOOL_NAMES, decision, textDelta } from "@feather-lite/domain";
 import { AppConfig } from "../config.js";
 import { TurnDeciderInvalidOutput, TurnDeciderUnavailable } from "../errors.js";
 import type { DeciderInput } from "../services/types.js";
+import { Metrics } from "../services/Metrics.js";
 import { Tracing } from "../services/Tracing.js";
 import { TurnDecider, type TurnDeciderShape } from "../services/TurnDecider.js";
 import { LlmClient, type LlmDelta, type TokenUsage } from "./LlmClient.js";
@@ -35,12 +36,13 @@ interface Acc {
   usage: TokenUsage | null;
 }
 
-export const OpenAITurnDeciderLive: Layer.Layer<TurnDecider, never, AppConfig | LlmClient | Tracing> = Layer.effect(
+export const OpenAITurnDeciderLive: Layer.Layer<TurnDecider, never, AppConfig | LlmClient | Tracing | Metrics> = Layer.effect(
   TurnDecider,
   Effect.gen(function* () {
     const cfg = yield* AppConfig;
     const llm = yield* LlmClient;
     const tracing = yield* Tracing;
+    const metrics = yield* Metrics;
 
     const shape: TurnDeciderShape = {
       name: `openai:${llm.name}`,
@@ -66,9 +68,26 @@ export const OpenAITurnDeciderLive: Layer.Layer<TurnDecider, never, AppConfig | 
         /** First byte of model output, whatever kind — the generation's completion-start. */
         let firstChunkAt: number | null = null;
 
+        /** Nothing has reached the caller yet, so restarting the stream is still safe. */
+        const beforeAnyOutput = () => acc.mode === "unknown" && acc.content.length === 0;
+
         const deltas = llm.stream(request).pipe(
+          // Every provider failure is counted, whether or not the retry below rescues it, so the
+          // status page shows OpenAI degrading before it shows calls degrading. The same predicate
+          // decides the label and the retry, so a "retry" is counted exactly when one will happen.
+          Stream.tapError((e) =>
+            metrics.providerEvent({
+              provider: `openai:${llm.name}`,
+              kind: beforeAnyOutput() ? "retry" : "error",
+              stage: "llm",
+              // `String()` on a tagged error yields only its tag; the detail is the part that
+              // tells an operator which vendor failure this was.
+              message: `${e._tag}: ${e.detail}`.slice(0, 300),
+              conversationId: input.conversationId,
+            }),
+          ),
           // One retry on transport failure BEFORE any output was produced (never mid-stream).
-          Stream.retry(Schedule.recurs(1).pipe(Schedule.whileInput(() => acc.mode === "unknown" && acc.content.length === 0))),
+          Stream.retry(Schedule.recurs(1).pipe(Schedule.whileInput(beforeAnyOutput))),
         );
 
         const chunks: Stream.Stream<TurnChunk, TurnDeciderUnavailable | TurnDeciderInvalidOutput> = deltas.pipe(

@@ -8,7 +8,6 @@ import { Effect, Layer, Redacted } from "effect";
 import { FeatherApi } from "@feather-lite/contracts";
 import { AppConfig } from "../config.js";
 import { CallsLive, ConversationsLive, DemoLive, SystemLive, TestingLive, VoiceLive } from "./handlers.js";
-import { Metrics } from "./Metrics.js";
 import { TurnRunner } from "./TurnRunner.js";
 import { Orchestrator } from "../services/Orchestrator.js";
 import { OutboxService } from "../services/Outbox.js";
@@ -39,7 +38,6 @@ export const ServicesLive = Layer.mergeAll(
   VoiceSessions.Default,
   WorkflowService.Default,
   SchedulingRepo.Default,
-  Metrics.Default,
 );
 
 const RATE_LIMITED_PREFIXES = ["/api/calls/start", "/api/voice/sessions", "/api/conversations"];

@@ -38,12 +38,14 @@ import {
   hardshipClose,
   holdForTransfer,
   matchOverride,
+  NO_PENDING_PROPOSAL_DETAIL,
   noInputPrompt,
   optOutConfirmation,
   overrideTransition,
   POLICY,
   promiseReadback,
   promiseRecordedConfirmation,
+  READBACK_INTERRUPTED_DETAIL,
   replay,
   safeFallback,
   thirdPartyClose,
@@ -327,7 +329,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
               ? !params.events.some((e) => e.type === "AGENT_TURN_PLAYOUT" && e.payload.turn_id === proposal.read_back_turn_id && e.payload.interrupted)
               : false;
             if (!proposal || !heardFully) {
-              rejected = { reason: "INVALID_ARGS", detail: proposal ? "read-back was interrupted; repeating it" : "no pending proposal to record" };
+              rejected = { reason: "INVALID_ARGS", detail: proposal ? READBACK_INTERRUPTED_DETAIL : NO_PENDING_PROPOSAL_DETAIL };
               yield* append(row.id, { type: "TOOL_REJECTED", payload: { name: call.name, tool_call_id: toolCallId, state, reason: rejected.reason, detail: rejected.detail } }, at);
               if (proposal) {
                 // Repeat the read-back and re-arm the guard for this turn.

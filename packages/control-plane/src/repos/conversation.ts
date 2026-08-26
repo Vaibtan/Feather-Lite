@@ -19,7 +19,7 @@ import type {
   WorkflowExecutionStatus,
   WorkflowType,
 } from "@feather-lite/domain";
-import { decodeEventRecord } from "@feather-lite/domain";
+import { decodeEventRecord, READBACK_INTERRUPTED_DETAIL } from "@feather-lite/domain";
 import {
   CallAttemptRow,
   ConversationRow,
@@ -189,6 +189,42 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
         GROUP BY 1 ORDER BY 1`,
     });
 
+    /**
+     * The reliability counts D6 asks for, derived from the ledger rather than incremented in
+     * process (spec 2026-08-26, D6).
+     *
+     * The first version of this incremented an in-memory counter as each event was written. That
+     * was wrong twice over: the write happens inside the three-phase turn's transaction, so a
+     * rollback after the append left the counter claiming an event that no longer exists; and it
+     * put an interpretation of every event type inside a repository whose job is CRUD. Every one of
+     * these is a fact about committed rows, so counting them as such is both simpler and exact —
+     * and it survives a restart, which a process counter does not.
+     *
+     * `readbacks_repeated_unheard` keys off the rejection detail because `record_promise_to_pay` /
+     * INVALID_ARGS covers two opposite situations: the fully-heard guard refusing a real proposal
+     * the borrower did not hear, and the model asking to record a promise that was never proposed.
+     * Only the first is a read-back repeated unheard.
+     */
+    const reliabilityCounts = SqlSchema.single({
+      Request: Schema.Void,
+      Result: Schema.Struct({
+        turnsSuperseded: Schema.NumberFromString,
+        noInputCloses: Schema.NumberFromString,
+        deciderUnavailable: Schema.NumberFromString,
+        ttsSilentPlayouts: Schema.NumberFromString,
+        readbacksRepeatedUnheard: Schema.NumberFromString,
+      }),
+      execute: () => sql`
+        SELECT
+          count(*) FILTER (WHERE type = 'TURN_SUPERSEDED')::text AS turns_superseded,
+          count(*) FILTER (WHERE type = 'CALL_CONTROL' AND payload->>'action' = 'NO_INPUT_CLOSE')::text AS no_input_closes,
+          count(*) FILTER (WHERE type = 'TURN_DECISION_REJECTED' AND payload->>'reason' = 'DECIDER_UNAVAILABLE')::text AS decider_unavailable,
+          count(*) FILTER (WHERE type = 'AGENT_TURN_PLAYOUT' AND payload->>'interrupted' = 'true' AND payload->>'heard_text' = '')::text AS tts_silent_playouts,
+          count(*) FILTER (WHERE type = 'TOOL_REJECTED' AND payload->>'name' = 'record_promise_to_pay'
+                             AND payload->>'reason' = 'INVALID_ARGS' AND payload->>'detail' = ${READBACK_INTERRUPTED_DETAIL})::text AS readbacks_repeated_unheard
+        FROM conversation_events`,
+    });
+
     /** Prior completed conversations for cross-call memory (newest first). */
     const priorConversations = SqlSchema.findAll({
       Request: Schema.Struct({ borrowerId: Schema.String, excludeId: Schema.String, limit: Schema.Number }),
@@ -355,6 +391,7 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
       countConversations,
       outcomeCounts,
       guardrailCounts,
+      reliabilityCounts,
       priorConversations,
       claimTurn,
       takeOverTurn,

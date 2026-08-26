@@ -15,6 +15,7 @@
  *   GET  /api/testing/scenarios ; POST /api/testing/scenarios/:id/run ; POST /api/testing/scenarios/run-all
  *   GET  /api/borrowers                            demo directory
  *   POST /api/agents/heartbeat ; GET /api/system/status
+ *   POST /api/system/provider-events               vendor failures the voice worker saw
  *   POST /api/voice/sessions                       LiveKit room + dispatch + browser token
  *   POST /api/demo/seed ; POST /api/demo/reset     (demo mode)
  *   GET  /healthz ; GET /readyz
@@ -211,6 +212,33 @@ export const BorrowerDirectoryEntry = Schema.Struct({
   loan: Schema.NullOr(Schema.Struct({ balance_due: Schema.String, due_date: Schema.String, status: Schema.String, delinquency_days: Schema.Number })),
 });
 
+/**
+ * A vendor failure the voice worker saw and handled (spec 2026-08-26, D6). Reported out of band
+ * rather than as a conversation signal: a retried Deepgram socket is not something that happened
+ * *on the call* in the replayable sense, and it must not consume a `sequence_no` or take the
+ * conversation row lock on a path that is already degraded. `conversation_id` is optional because
+ * a provider can fail before, between or outside calls.
+ */
+export const ProviderEventBody = Schema.Struct({
+  provider: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(60)),
+  kind: Schema.Literal("error", "retry", "timeout"),
+  stage: Schema.Literal("stt", "tts", "llm", "media"),
+  message: Schema.String.pipe(Schema.maxLength(300)),
+  conversation_id: Schema.optional(Schema.NullOr(Schema.String)),
+});
+export const ProviderEventsRequest = Schema.Struct({
+  events: Schema.Array(ProviderEventBody).pipe(Schema.minItems(1), Schema.maxItems(50)),
+});
+
+export const RecordedProviderEvent = Schema.Struct({
+  provider: Schema.String,
+  kind: Schema.String,
+  stage: Schema.String,
+  message: Schema.String,
+  conversation_id: Schema.NullOr(Schema.String),
+  at: Schema.String,
+});
+
 export const HeartbeatRequest = Schema.Struct({ agent_name: Schema.String, meta: Schema.optional(JsonRecord) });
 export const SystemStatus = Schema.Struct({
   ok: Schema.Boolean,
@@ -222,6 +250,20 @@ export const SystemStatus = Schema.Struct({
     conversations_total: Schema.Number,
     outcomes: Schema.Record({ key: Schema.String, value: Schema.Number }),
     guardrails: Schema.Record({ key: Schema.String, value: Schema.Number }),
+    /**
+     * The failure modes ADR 0008 found, counted from committed events rather than incremented in
+     * process — so they are exact, and they survive a restart.
+     */
+    reliability: Schema.Record({ key: Schema.String, value: Schema.Number }),
+  }),
+  /**
+   * Vendor reliability, live view. `counters` never resets except on restart and `recent` is a
+   * short ring, so this answers "what is degrading right now"; the durable rates live on
+   * /api/system/quality.
+   */
+  provider_events: Schema.Struct({
+    counters: Schema.Record({ key: Schema.String, value: Schema.Number }),
+    recent: Schema.Array(RecordedProviderEvent),
   }),
   turn_decider: Schema.String,
   demo_mode: Schema.Boolean,
@@ -340,7 +382,12 @@ export const SystemGroup = HttpApiGroup.make("system")
       .setUrlParams(Schema.Struct({ calls: Schema.optional(Schema.NumberFromString) }))
       .addSuccess(LatencyAggregate),
   )
-  .add(HttpApiEndpoint.post("heartbeat", "/api/agents/heartbeat").setPayload(HeartbeatRequest).addSuccess(Schema.Struct({ ok: Schema.Literal(true) })));
+  .add(HttpApiEndpoint.post("heartbeat", "/api/agents/heartbeat").setPayload(HeartbeatRequest).addSuccess(Schema.Struct({ ok: Schema.Literal(true) })))
+  .add(
+    HttpApiEndpoint.post("providerEvents", "/api/system/provider-events")
+      .setPayload(ProviderEventsRequest)
+      .addSuccess(Schema.Struct({ recorded: Schema.Number })),
+  );
 
 export const CallsGroup = HttpApiGroup.make("calls")
   .add(HttpApiEndpoint.post("start", "/api/calls/start").setPayload(StartCallRequest).addSuccess(StartCallResponse).addError(ApiPreCallRejected).addError(ApiNotFound))

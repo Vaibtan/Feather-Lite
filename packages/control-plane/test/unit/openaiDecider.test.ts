@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { EMPTY_MEMORY } from "@feather-lite/domain";
 import {
   AppConfigTest,
+  Metrics,
   NoopTracingLive,
   OpenAITurnDeciderLive,
   RecordingLlmClient,
@@ -36,7 +37,7 @@ const input = (over: Partial<DeciderInput> = {}): DeciderInput => ({
 
 const run = (script: ReadonlyArray<LlmDelta>, i: DeciderInput) => {
   const rec = RecordingLlmClient(() => script);
-  const layer = OpenAITurnDeciderLive.pipe(Layer.provide(rec.layer), Layer.provide(NoopTracingLive), Layer.provide(AppConfigTest()));
+  const layer = OpenAITurnDeciderLive.pipe(Layer.provide(rec.layer), Layer.provide(NoopTracingLive), Layer.provide(Metrics.Default), Layer.provide(AppConfigTest()));
   const program = Effect.gen(function* () {
     const d = yield* TurnDecider;
     const chunks = yield* Stream.runCollect(d.decide(i));

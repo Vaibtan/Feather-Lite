@@ -28,7 +28,7 @@ import { ScenarioRunner } from "../services/Scenarios.js";
 import { SeedService } from "../services/Seed.js";
 import { VoiceSessions } from "../services/VoiceSessions.js";
 import { WorkflowService } from "../services/Workflow.js";
-import { Metrics } from "./Metrics.js";
+import { Metrics } from "../services/Metrics.js";
 import { TurnRunner } from "./TurnRunner.js";
 
 /* --------------------------- error mapping --------------------------- */
@@ -94,13 +94,18 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
           const dbOk = yield* sql`SELECT 1`.pipe(Effect.as(true), Effect.catchAll(() => Effect.succeed(false)));
           const beats = yield* queries.heartbeats().pipe(Effect.catchAll(() => Effect.succeed([])));
           const now = Date.now();
-          const ledger = yield* queries.ledgerCounts().pipe(Effect.catchAll(() => Effect.succeed({ conversations_total: 0, outcomes: {}, guardrails: {} })));
+          const ledger = yield* queries.ledgerCounts().pipe(Effect.catchAll(() => Effect.succeed({ conversations_total: 0, outcomes: {}, guardrails: {}, reliability: {} })));
           return {
             ok: dbOk,
             database: dbOk ? ("ok" as const) : ("down" as const),
             agents: beats.map((b) => ({ ...b, online: now - Date.parse(b.last_seen_at) < 30_000 })),
             counters: yield* metrics.snapshot(),
             ledger,
+            // The counters are already wire-shaped; the ring is internal camelCase, so it is
+            // mapped here rather than snake-casing the service's own type.
+            provider_events: yield* metrics
+              .providerEvents()
+              .pipe(Effect.map((p) => ({ counters: p.counters, recent: p.recent.map((e) => ({ provider: e.provider, kind: e.kind, stage: e.stage, message: e.message, conversation_id: e.conversationId, at: e.at })) }))),
             turn_decider: cfg.turnDecider,
             demo_mode: cfg.demoMode,
           };
@@ -112,6 +117,14 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
           const now = DateTime.toDateUtc(yield* DateTime.now);
           yield* sched.upsertHeartbeat(payload.agent_name, now, payload.meta ?? {}).pipe(Effect.orDie);
           return { ok: true as const };
+        }),
+      )
+      .handle("providerEvents", ({ payload }) =>
+        Effect.gen(function* () {
+          for (const e of payload.events) {
+            yield* metrics.providerEvent({ provider: e.provider, kind: e.kind, stage: e.stage, message: e.message, conversationId: e.conversation_id ?? null });
+          }
+          return { recorded: payload.events.length };
         }),
       );
   }),

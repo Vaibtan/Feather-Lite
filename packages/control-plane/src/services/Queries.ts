@@ -131,10 +131,18 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
         const total = yield* conv.countConversations();
         const outcomes = yield* conv.outcomeCounts();
         const guardrails = yield* conv.guardrailCounts();
+        const reliability = yield* conv.reliabilityCounts();
         return {
           conversations_total: total.count,
           outcomes: Object.fromEntries(outcomes.map((o) => [o.outcome, o.count])),
           guardrails: Object.fromEntries(guardrails.map((g) => [g.type, g.count])),
+          reliability: {
+            turns_superseded: reliability.turnsSuperseded,
+            no_input_closes: reliability.noInputCloses,
+            decider_unavailable: reliability.deciderUnavailable,
+            tts_silent_playouts: reliability.ttsSilentPlayouts,
+            readbacks_repeated_unheard: reliability.readbacksRepeatedUnheard,
+          },
         };
       });
 

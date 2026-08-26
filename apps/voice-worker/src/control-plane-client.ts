@@ -27,6 +27,14 @@ export type SignalBody =
   | { kind: "voicemail_drop"; confidence?: number; action_id?: string }
   | { kind: "turn_metrics"; turn_id: string; eou_delay_ms?: number; transcription_delay_ms?: number; tts_ttfb_ms?: number };
 
+export interface ProviderEventBody {
+  readonly provider: string;
+  readonly kind: "error" | "retry" | "timeout";
+  readonly stage: "stt" | "tts" | "llm" | "media";
+  readonly message: string;
+  readonly conversation_id?: string | null;
+}
+
 export interface RuntimeResult {
   readonly agent_text: string;
   readonly new_state: string;
@@ -85,6 +93,17 @@ export class ControlPlaneClient {
     const res = await fetch(`${this.cfg.baseUrl}/api/conversations/${conversationId}/no_input`, { method: "POST", headers: this.headers() });
     if (!res.ok) throw new Error(`no_input ${res.status}: ${(await res.text()).slice(0, 300)}`);
     return (await res.json()) as RuntimeResult;
+  }
+
+  /**
+   * Report vendor failures the runtime saw (spec 2026-08-26, D6). Deliberately not a conversation
+   * signal: a retried STT socket is not an event on the call, and it must not consume a
+   * `sequence_no` on a path that is already degraded. Fire-and-forget for the same reason the
+   * heartbeat is — telemetry must never be able to fail a call.
+   */
+  async providerEvents(events: ReadonlyArray<ProviderEventBody>): Promise<void> {
+    if (events.length === 0) return;
+    await fetch(`${this.cfg.baseUrl}/api/system/provider-events`, { method: "POST", headers: this.headers(), body: JSON.stringify({ events }) }).catch(() => undefined);
   }
 
   async heartbeat(agentName: string, meta: Record<string, unknown>): Promise<void> {

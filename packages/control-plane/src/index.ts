@@ -22,7 +22,7 @@ export * from "./services/Scores.js";
 export * from "./services/Scenarios.js";
 export * from "./services/Seed.js";
 export * from "./services/VoiceSessions.js";
-export * from "./http/Metrics.js";
+export * from "./services/Metrics.js";
 export * from "./http/TurnRunner.js";
 export * from "./http/handlers.js";
 export * from "./http/app.js";
