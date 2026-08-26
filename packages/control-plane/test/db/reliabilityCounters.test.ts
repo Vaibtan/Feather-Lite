@@ -179,6 +179,7 @@ describe("provider events (in process)", () => {
     const alwaysFails = Layer.succeed(LlmClient, {
       name: "gpt-test",
       stream: () => Stream.fail(new TurnDeciderUnavailable({ detail: "connection reset" })),
+      complete: () => Effect.die("this test never takes the non-streaming path"),
     });
     // `provideMerge`, not two separate `provide`s: the decider and this test must read the same
     // Metrics instance, and two builds of `Metrics.Default` are two different maps.

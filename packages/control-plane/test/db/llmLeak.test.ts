@@ -2,6 +2,14 @@
  * Protected-context leak test at the provider boundary (plan rev.2 R12): drive a call through the
  * real orchestrator with the OpenAI decider and a recording LLM client, then assert on the exact
  * request bodies: nothing protected before RIGHT_PARTY_CONFIRMED, everything needed after.
+ *
+ * This is the one place that asserts on **every** request body leaving this system for a model, so
+ * the post-call judge is checked here too (spec 2026-08-26, D3). The judge is a second model that
+ * reads the whole finished call, which makes it the obvious place for account data to escape by
+ * accident: the borrower here is verified, so the *decider's* later prompts legitimately carry the
+ * balance, and only the judge's input distinguishes "what the borrower was told" from "what the
+ * system knows". The judge's behaviour is tested in `judgeJob.test.ts`; what is tested here is the
+ * request body.
  */
 import { Effect, Layer } from "effect";
 import { PgClient } from "@effect/sql-pg";
@@ -12,8 +20,12 @@ import {
   NoopTracingLive,
   OpenAITurnDeciderLive,
   Orchestrator,
+  OutboxService,
   Queries,
   RecordingLlmClient,
+  SchedulingRepo,
+  Scores,
+  ScoresRepo,
   WorkflowService,
   FROZEN_NOW,
   type LlmDelta,
@@ -28,11 +40,35 @@ const rec = RecordingLlmClient((i, req): ReadonlyArray<LlmDelta> => {
   if (/pay 550/i.test(lastUser)) return [{ _tag: "ToolCallStart", index: 0, id: `c${i}`, name: "propose_promise_to_pay" }, { _tag: "ToolCallArgs", index: 0, argsFragment: '{"amount":"550.00","date":"2026-08-21"}' }, { _tag: "Finish", reason: "tool_calls", usage: null }];
   if (/^yes$/i.test(lastUser.trim())) return [{ _tag: "ToolCallStart", index: 0, id: `c${i}`, name: "record_promise_to_pay" }, { _tag: "ToolCallArgs", index: 0, argsFragment: '{"confirmed":true}' }, { _tag: "Finish", reason: "tool_calls", usage: null }];
   return [{ _tag: "Content", text: "Could you say that again?" }, { _tag: "Finish", reason: "stop", usage: null }];
-});
+},
+// The judge's reply. Its content does not matter here — what is under test is the request.
+() =>
+  JSON.stringify({
+    task_completion: { pass: true, rationale: "promise recorded", evidence: "\"550 dollars\"" },
+    compliance: { pass: true, rationale: "disclosure first", evidence: "\"attempt to collect a debt\"" },
+    factual_accuracy: { pass: true, rationale: "matches", evidence: "\"550 dollars\"" },
+    empathy_professionalism: { pass: true, rationale: "calm", evidence: "\"of course\"" },
+    escalation_judgment: { pass: true, rationale: "nothing raised", evidence: "" },
+    overall_pass: true,
+    confidence: 0.9,
+  }));
 
-const layer = Layer.mergeAll(Orchestrator.Default, WorkflowService.Default, Queries.Default, ConversationRepo.Default, IdGen.Default).pipe(
+const layer = Layer.mergeAll(
+  Orchestrator.Default,
+  WorkflowService.Default,
+  OutboxService.Default,
+  Queries.Default,
+  Scores.Default,
+  ScoresRepo.Default,
+  ConversationRepo.Default,
+  SchedulingRepo.Default,
+  IdGen.Default,
+).pipe(
   Layer.provide(OpenAITurnDeciderLive.pipe(Layer.provide(rec.layer), Layer.provide(NoopTracingLive))),
-  Layer.provideMerge(makeInfraLayer()),
+  // The same recording client for the judge, so both models this system talks to are recorded in
+  // one place; `provide` over the infra layer's refusing client.
+  Layer.provide(rec.layer),
+  Layer.provideMerge(makeInfraLayer({ judge: { enabled: true, model: "gpt-5.6-luna", reasoningEffort: "medium", maxTokens: 4000 } })),
 );
 const rt = makeRuntime(layer);
 
@@ -99,5 +135,31 @@ describe("LLM request bodies never carry protected context before verification",
     expect(r1.tools.find((t) => t.name === "lookup_contact_profile")?.parameters).toEqual({ type: "object", properties: {}, additionalProperties: false });
     expect(JSON.stringify(r3)).toContain("CURRENT STATE: DISCUSSING_PAYMENT");
     expect(JSON.stringify(r4)).toContain("CURRENT STATE: CONFIRMING_OUTCOME");
+  });
+
+  it("the post-call judge sees the call, not the account behind it", async () => {
+    // D3: "the judge prompt must never receive protected account data beyond what the transcript
+    // already contains". The call above ended in a promise, so its outbox is armed; run it.
+    // Real clock, not FROZEN_NOW: the call above ran on the wall clock, so its jobs are due now.
+    // Claiming with the frozen time would find nothing due and quietly assert on an empty list.
+    const processed = await rt.runPromise(Effect.flatMap(OutboxService, (o) => o.runOnce(20)));
+    expect(processed.filter((j) => j.jobType === "JUDGE").map((j) => j.status)).toEqual(["DONE"]);
+
+    const judged = rec.completions.map((c) => c.request);
+    expect(judged).toHaveLength(1);
+    const body = JSON.stringify(judged[0]);
+
+    // The loan facts the decider was legitimately given after verification. None of them reach the
+    // judge: it is told what was said, and the ledger facts the evaluator derived, and nothing else.
+    expect(body).not.toContain("10000.00");
+    expect(body).not.toContain("DELINQUENT");
+    expect(body).not.toContain("2026-08-01");
+    // Nor the decider's prompt, which would smuggle the whole account block in with it.
+    expect(body).not.toContain("CURRENT STATE:");
+    expect(body).not.toContain("ACCOUNT:");
+    expect(body).not.toContain("RULES:");
+    // It does get the conversation, which is the point of having a judge at all.
+    expect(body).toContain("PROMISE_TO_PAY");
+    expect(body).toContain("Am I speaking with Jordan?");
   });
 });

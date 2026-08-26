@@ -67,6 +67,21 @@ export interface TurnRecord {
 }
 
 /**
+ * The judge's model call (spec 2026-08-26, D3). Not a `GenerationRecord`: it belongs to the call,
+ * not to any one turn, so it has no turn to nest under and no place in the turn buffer. It gets its
+ * own span on the conversation's session, which is what puts the verdict beside the turns it is
+ * about rather than in a trace of its own that nothing links to.
+ */
+export interface JudgeRecord {
+  readonly conversationId: string;
+  readonly model: string;
+  readonly input: unknown;
+  readonly output: unknown;
+  readonly latencyMs: number;
+  readonly usage: { readonly promptTokens: number; readonly completionTokens: number; readonly cachedTokens: number } | null;
+}
+
+/**
  * One quality measurement mirrored into Langfuse, so quality sits beside the latency and cost the
  * turn spans already carry. The ledger is the source of truth; this is the copy.
  */
@@ -92,6 +107,8 @@ export interface TracingShape {
   readonly turnLatency: (conversationId: string, turnId: string, latency: WorkerTurnLatency) => Effect.Effect<void>;
   /** Emit every turn of a conversation still waiting on worker metrics that will never arrive. */
   readonly finalize: (conversationId: string) => Effect.Effect<void>;
+  /** The post-call judge's model call, as its own span on the conversation's session. */
+  readonly judge: (j: JudgeRecord) => Effect.Effect<void>;
   /** Mirror one score onto the conversation's session (or its turn's observation). */
   readonly score: (s: ScoreTrace) => Effect.Effect<void>;
   readonly flush: () => Effect.Effect<void>;
@@ -102,6 +119,7 @@ export class Tracing extends Context.Tag("@feather-lite/Tracing")<Tracing, Traci
 const noop: TracingShape = {
   name: "noop",
   generation: () => Effect.void,
+  judge: () => Effect.void,
   turn: () => Effect.void,
   turnLatency: () => Effect.void,
   finalize: () => Effect.void,
@@ -117,18 +135,22 @@ export const RecordingTracing = (): {
   readonly records: GenerationRecord[];
   readonly turns: TurnRecord[];
   readonly scores: ScoreTrace[];
+  readonly judges: JudgeRecord[];
 } => {
   const records: GenerationRecord[] = [];
   const turns: TurnRecord[] = [];
   const scores: ScoreTrace[] = [];
+  const judges: JudgeRecord[] = [];
   return {
     records,
     turns,
     scores,
+    judges,
     layer: Layer.succeed(Tracing, {
       ...noop,
       name: "recording",
       generation: (g) => Effect.sync(() => void records.push(g)),
+      judge: (j) => Effect.sync(() => void judges.push(j)),
       turn: (t) => Effect.sync(() => void turns.push(t)),
       score: (s) => Effect.sync(() => void scores.push(s)),
     }),
@@ -346,6 +368,41 @@ export const LangfuseTracingLive: Layer.Layer<Tracing, never, AppConfig> = Layer
       finalize: (conversationId) =>
         guard(() => {
           for (const [k, p] of [...pending]) if (p.conversationId === conversationId) emit(k, p);
+        }),
+      judge: (j) =>
+        guard(() => {
+          const started = new Date(Date.now() - j.latencyMs);
+          // Same `propagateAttributes` shape as a turn: the session id is what files this span under
+          // the call it judged. A judge span in a trace of its own would be unreachable from the
+          // conversation, which is the only place anyone would go looking for it.
+          propagateAttributes({ sessionId: j.conversationId, traceName: "collections-call" }, () => {
+            startActiveObservation(
+              "judge",
+              () => {
+                startObservation(
+                  `judge:${j.model}`,
+                  {
+                    model: j.model,
+                    input: j.input,
+                    output: j.output,
+                    ...(j.usage
+                      ? {
+                          usageDetails: {
+                            input: j.usage.promptTokens,
+                            output: j.usage.completionTokens,
+                            input_cached_tokens: j.usage.cachedTokens,
+                            total: j.usage.promptTokens + j.usage.completionTokens,
+                          },
+                        }
+                      : {}),
+                    metadata: { conversation_id: j.conversationId },
+                  },
+                  { asType: "generation", startTime: started },
+                ).end();
+              },
+              { startTime: started },
+            );
+          });
         }),
       score: (s) =>
         guard(() => {

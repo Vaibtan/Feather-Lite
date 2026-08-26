@@ -5,7 +5,7 @@
 import { Effect, Layer, ManagedRuntime, Redacted } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import pg from "pg";
-import { AppConfigTest, DatabaseLive, Metrics, NoopTracingLive } from "../../src/index.js";
+import { AppConfigTest, DatabaseLive, Metrics, NoLlmClientLive, NoopTracingLive } from "../../src/index.js";
 import type { AppConfigShape } from "../../src/index.js";
 
 /**
@@ -38,12 +38,16 @@ const ensureTestDatabase = Effect.promise(async () => {
  * service under test — the counters only add up if the decider and the orchestrator write to the
  * same one. A test that wants to assert on what was traced provides `RecordingTracing().layer` over
  * the top.
+ *
+ * The refusing LLM client is deliberate: the outbox needs one for the judge, and a test that has
+ * not explicitly asked for a model must not be able to reach one. Judge tests provide
+ * `RecordingLlmClient(...).layer` over the top.
  */
 export const makeInfraLayer = (overrides: Partial<AppConfigShape> = {}) =>
   Layer.unwrapEffect(
     ensureTestDatabase.pipe(
       Effect.map(() =>
-        Layer.mergeAll(DatabaseLive, NoopTracingLive, Metrics.Default).pipe(Layer.provideMerge(AppConfigTest({ databaseUrl: Redacted.make(testUrl), ...overrides }))),
+        Layer.mergeAll(DatabaseLive, NoopTracingLive, NoLlmClientLive, Metrics.Default).pipe(Layer.provideMerge(AppConfigTest({ databaseUrl: Redacted.make(testUrl), ...overrides }))),
       ),
     ),
   );

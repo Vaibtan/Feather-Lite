@@ -46,7 +46,9 @@ const DeciderLive = Layer.unwrapEffect(
       // Tracing is provided once, at the root: the decider records the generation and the
       // orchestrator records the turn it belongs to, and they have to be the same instance for the
       // two halves to meet.
-      return OpenAITurnDeciderLive.pipe(Layer.provide(OpenAILlmClientLive));
+      // The client comes from the root rather than being provided here: the judge needs one too,
+      // and it must be the same one whichever decider is running.
+      return OpenAITurnDeciderLive;
     }
     yield* Effect.logInfo("turn decider: scripted (deterministic)");
     return ScriptedTurnDeciderLive;
@@ -96,6 +98,10 @@ const NodeServerLive = NodeHttpServer.layer(() => createServer(), { port, host }
 const MainLive = Layer.mergeAll(HttpLive, RootRoute, SchedulersLive).pipe(
   Layer.provide(ServicesLive),
   Layer.provide(DeciderLive),
+  // Provided unconditionally, not only for TURN_DECIDER=openai: the post-call judge calls a model
+  // regardless of which conversationalist ran the call, and constructing the client is free — it
+  // fails at call time, with a clear message, when no key is configured.
+  Layer.provideMerge(OpenAILlmClientLive),
   // Metrics is provided once, at the root, for the same reason Tracing is: the decider counts
   // provider failures, the orchestrator counts the conversation-loop ones and the status handler
   // reads them. Three instances would each hold a third of the answer.

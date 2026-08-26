@@ -127,7 +127,13 @@ export type ScheduledActionType = typeof ScheduledActionType.Type;
 export const ScheduledActionStatus = Schema.Literal("PENDING", "CLAIMED", "DONE", "CANCELED");
 export type ScheduledActionStatus = typeof ScheduledActionStatus.Type;
 
-export const OutboxJobType = Schema.Literal("SUMMARY", "EVALUATION", "VECTOR_INDEX");
+/**
+ * `JUDGE` is its own job rather than more of `EVALUATION` (spec 2026-08-26, D3): it costs money, it
+ * calls a model that can be down, and it is switched off entirely in CI and load runs. Sharing a
+ * job with the deterministic evaluator would mean a judge outage retrying — and eventually
+ * failing — the compliance checks that had already succeeded.
+ */
+export const OutboxJobType = Schema.Literal("SUMMARY", "EVALUATION", "VECTOR_INDEX", "JUDGE");
 export type OutboxJobType = typeof OutboxJobType.Type;
 
 export const OutboxJobStatus = Schema.Literal("PENDING", "CLAIMED", "DONE", "FAILED");

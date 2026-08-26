@@ -5,6 +5,14 @@
 import { Config, Context, Effect, Layer, Redacted } from "effect";
 import type { ConversationState } from "@feather-lite/domain";
 
+/**
+ * How hard a reasoning model thinks before answering, as OpenAI's models page defines it. A closed
+ * vocabulary rather than a string, so a typo is a compile error here instead of a 400 from the
+ * provider on a path that only runs after a call has ended.
+ */
+export const REASONING_EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
 export interface AppConfigShape {
   readonly databaseUrl: Redacted.Redacted<string>;
   readonly dbMaxConnections: number;
@@ -42,6 +50,22 @@ export interface AppConfigShape {
   readonly orphanMissedHeartbeats: number;
   readonly orphanHeartbeatIntervalMs: number;
   readonly orphanUnconfirmedMs: number;
+  /**
+   * The LLM judge (spec 2026-08-26, D3). Off by default so CI, tier-1 load runs and anyone who
+   * clones this repo do not spend money by accident; on in the dev `.env`, where the user decided
+   * cost is not a constraint.
+   *
+   * The model is **GPT-5.6 Luna and no other** — the efficient tier of the GPT-5.6 family, chosen
+   * by the user on 2026-08-26. The id is spelled out rather than using the bare `gpt-5.6` alias,
+   * which OpenAI routes to Sol (the frontier tier) and would quietly cost an order of magnitude
+   * more per call than was agreed.
+   */
+  readonly judge: {
+    readonly enabled: boolean;
+    readonly model: string;
+    readonly reasoningEffort: ReasoningEffort;
+    readonly maxTokens: number;
+  };
   /**
    * Latency SLO targets (spec 2026-08-26, D6). These are what this stack actually achieves plus
    * headroom, not the 800 ms-1.5 s "natural conversation" band vendor literature quotes: the
@@ -107,6 +131,11 @@ export const appConfig: Config.Config<AppConfigShape> = Config.all({
   orphanMissedHeartbeats: Config.integer("ORPHAN_MISSED_HEARTBEATS").pipe(Config.withDefault(3)),
   orphanHeartbeatIntervalMs: Config.integer("ORPHAN_HEARTBEAT_INTERVAL_MS").pipe(Config.withDefault(10_000)),
   orphanUnconfirmedMs: Config.integer("ORPHAN_UNCONFIRMED_MS").pipe(Config.withDefault(300_000)),
+  judgeEnabled: Config.boolean("JUDGE_ENABLED").pipe(Config.withDefault(false)),
+  judgeModel: Config.string("JUDGE_MODEL").pipe(Config.withDefault("gpt-5.6-luna")),
+  judgeReasoningEffort: Config.literal(...REASONING_EFFORTS)("JUDGE_REASONING_EFFORT").pipe(Config.withDefault("medium" as const)),
+  // Reasoning tokens are billed and counted here, and the visible answer is ~600 tokens of JSON.
+  judgeMaxTokens: Config.integer("JUDGE_MAX_TOKENS").pipe(Config.withDefault(4000)),
   sloTurnP95Ms: Config.integer("SLO_TURN_P95_MS").pipe(Config.withDefault(2500)),
   sloEouP95Ms: Config.integer("SLO_EOU_P95_MS").pipe(Config.withDefault(700)),
   sloTranscriptionP95Ms: Config.integer("SLO_TRANSCRIPTION_P95_MS").pipe(Config.withDefault(600)),
@@ -145,6 +174,12 @@ export const appConfig: Config.Config<AppConfigShape> = Config.all({
       orphanMissedHeartbeats: c.orphanMissedHeartbeats,
       orphanHeartbeatIntervalMs: c.orphanHeartbeatIntervalMs,
       orphanUnconfirmedMs: c.orphanUnconfirmedMs,
+      judge: {
+        enabled: c.judgeEnabled,
+        model: c.judgeModel,
+        reasoningEffort: c.judgeReasoningEffort,
+        maxTokens: c.judgeMaxTokens,
+      },
       slo: {
         turnP95Ms: c.sloTurnP95Ms,
         eouP95Ms: c.sloEouP95Ms,

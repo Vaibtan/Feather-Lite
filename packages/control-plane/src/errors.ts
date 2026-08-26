@@ -47,6 +47,15 @@ export class TurnDeciderInvalidOutput extends Data.TaggedError("TurnDeciderInval
   readonly detail: string;
 }> {}
 
+/**
+ * A non-streaming model call failed. Distinct from `TurnDeciderUnavailable` because nothing about
+ * it concerns a turn: the judge runs post-call in the outbox, where the answer to a failure is a
+ * retry on the job's own budget, not a degraded reply to a waiting borrower.
+ */
+export class LlmCallFailed extends Data.TaggedError("LlmCallFailed")<{
+  readonly detail: string;
+}> {}
+
 export class TelephonyError extends Data.TaggedError("TelephonyError")<{
   readonly detail: string;
 }> {}

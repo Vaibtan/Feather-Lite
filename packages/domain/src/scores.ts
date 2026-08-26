@@ -43,6 +43,10 @@ export const SCORE_NAMES = [
   "judge.empathy_professionalism",
   "judge.escalation_judgment",
   "judge.overall_pass",
+  /** The judge returned something that was not a verdict. Its own score so a broken judge is
+   *  visible as a broken judge, rather than as a call with no opinion — which is what an operator
+   *  would otherwise see, and would read as "nobody has looked at this one yet". */
+  "judge.invalid_output",
 
   /** Speech quality. WER needs ground truth, so it only ever comes from the harness (HARNESS). */
   "stt.wer",
@@ -109,6 +113,7 @@ export const SCORE_DATA_TYPE_BY_NAME: Readonly<Record<ScoreName, ScoreDataType>>
   "judge.empathy_professionalism": "BOOLEAN",
   "judge.escalation_judgment": "BOOLEAN",
   "judge.overall_pass": "BOOLEAN",
+  "judge.invalid_output": "BOOLEAN",
   "stt.wer": "NUMERIC",
   "stt.wer_worst_line": "NUMERIC",
   "tts.silent_playout": "BOOLEAN",
