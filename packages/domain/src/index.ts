@@ -13,3 +13,4 @@ export * from "./context.js";
 export * from "./scripts.js";
 export * from "./turn.js";
 export * from "./scores.js";
+export * from "./evaluation.js";

@@ -5,11 +5,12 @@
 import { DateTime, Effect, Option } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import type { OutboxJobType } from "@feather-lite/domain";
-import { buildTranscript, replay } from "@feather-lite/domain";
+import { buildTranscript, evaluateCall, evaluationScores, replay } from "@feather-lite/domain";
 import type { OutboxJobRow } from "../db/rows.js";
 import { ConversationRepo } from "../repos/conversation.js";
 import { SchedulingRepo } from "../repos/scheduling.js";
 import { IdGen } from "./Ids.js";
+import { Scores } from "./Scores.js";
 
 const JOB_TYPES: ReadonlyArray<OutboxJobType> = ["SUMMARY", "EVALUATION", "VECTOR_INDEX"];
 const MAX_RETRIES = 3;
@@ -20,6 +21,7 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
     const sched = yield* SchedulingRepo;
     const conv = yield* ConversationRepo;
     const ids = yield* IdGen;
+    const scores = yield* Scores;
 
     /** Enqueue post-call jobs (idempotent per job type) and log OUTBOX_ENQUEUED. Caller holds the tx. */
     const enqueuePostCall = (conversationId: string, now: Date) =>
@@ -80,19 +82,30 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
               break;
             }
             case "EVALUATION": {
-              // Deterministic compliance checks; the LLM-as-judge is a later stretch.
-              const unlockSeq = events.find((e) => e.type === "STATE_TRANSITION" && e.payload.triggered_by === "RIGHT_PARTY_CONFIRMED")?.sequence_no ?? null;
-              const protectedLeak = events.some(
-                (e) =>
-                  e.type === "AGENT_TURN" &&
-                  (unlockSeq === null || e.sequence_no < unlockSeq) &&
-                  /balance|due date|owe/i.test(e.payload.text),
-              );
-              const miniMirandaFirst = events.find((e) => e.type === "AGENT_TURN")?.payload.text.includes("attempt to collect a debt") ?? false;
-              const issues: string[] = [];
-              if (protectedLeak) issues.push("PROTECTED_CONTEXT_BEFORE_VERIFICATION");
-              if (!miniMirandaFirst) issues.push("MINI_MIRANDA_MISSING");
-              result = { issues, compliance_ok: issues.length === 0, agent_turns: transcript.filter((t) => t.speaker === "AGENT").length };
+              // The compliance checks and call facts are all ledger-derived, so the work is a pure
+              // function in the domain package (`evaluateCall`) and this job only persists it. The
+              // values go to `conversation_scores`, where they aggregate and can be re-derived; the
+              // job result keeps its long-standing `issues` / `compliance_ok` shape so the console's
+              // outbox panel and anything reading old rows are unaffected.
+              const evaluation = evaluateCall(events);
+              const written = yield* scores.recordMany(evaluationScores(job.conversationId, evaluation));
+              result = {
+                issues: evaluation.issues,
+                compliance_ok: evaluation.complianceOk,
+                agent_turns: evaluation.agentTurns,
+                borrower_turns: evaluation.borrowerTurns,
+                right_party_verified: evaluation.rightPartyVerified,
+                voicemail: evaluation.voicemail,
+                mini_miranda_first: evaluation.miniMirandaFirst,
+                no_protected_before_rpc: evaluation.noProtectedBeforeRpc,
+                no_promise_without_readback: evaluation.noPromiseWithoutReadback,
+                barge_in_count: evaluation.bargeInCount,
+                no_input_count: evaluation.noInputCount,
+                degraded_turns: evaluation.degradedTurns,
+                tool_rejections: evaluation.toolRejections,
+                duration_ms: evaluation.durationMs,
+                scores_written: written,
+              };
               break;
             }
             case "VECTOR_INDEX":
@@ -145,5 +158,5 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
 
     return { enqueuePostCall, processJob, runOnce } as const;
   }),
-  dependencies: [SchedulingRepo.Default, ConversationRepo.Default, IdGen.Default],
+  dependencies: [SchedulingRepo.Default, ConversationRepo.Default, IdGen.Default, Scores.Default],
 }) {}

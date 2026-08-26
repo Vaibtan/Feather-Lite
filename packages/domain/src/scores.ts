@@ -25,6 +25,17 @@ export const SCORE_NAMES = [
   "compliance.no_protected_before_rpc",
   "compliance.no_promise_without_readback",
 
+  /** Deterministic call facts, also ledger-derived (EVALUATOR) — the funnel and the judge read these. */
+  "call.right_party_verified",
+  "call.voicemail",
+  "call.barge_in_count",
+  "call.no_input_count",
+  "call.degraded_turns",
+  "call.tool_rejections",
+  "call.agent_turns",
+  "call.borrower_turns",
+  "call.duration_ms",
+
   /** LLM-as-judge verdicts: binary per dimension, with evidence (JUDGE). */
   "judge.task_completion",
   "judge.compliance",
@@ -80,6 +91,15 @@ export const SCORE_DATA_TYPE_BY_NAME: Readonly<Record<ScoreName, ScoreDataType>>
   "compliance.mini_miranda_first": "BOOLEAN",
   "compliance.no_protected_before_rpc": "BOOLEAN",
   "compliance.no_promise_without_readback": "BOOLEAN",
+  "call.right_party_verified": "BOOLEAN",
+  "call.voicemail": "BOOLEAN",
+  "call.barge_in_count": "NUMERIC",
+  "call.no_input_count": "NUMERIC",
+  "call.degraded_turns": "NUMERIC",
+  "call.tool_rejections": "NUMERIC",
+  "call.agent_turns": "NUMERIC",
+  "call.borrower_turns": "NUMERIC",
+  "call.duration_ms": "NUMERIC",
   "judge.task_completion": "BOOLEAN",
   "judge.compliance": "BOOLEAN",
   "judge.factual_accuracy": "BOOLEAN",

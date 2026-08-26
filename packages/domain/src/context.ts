@@ -104,6 +104,33 @@ export const PROTECTED_FIELD_NAMES: ReadonlyArray<keyof ProtectedContext> = [
   "last_promise_date",
 ];
 
+/**
+ * What each protected field sounds like when it is spoken out loud, for the post-call evaluator's
+ * "no account detail before right-party confirmation" check.
+ *
+ * Keyed by the protected field it protects, and typed as a total `Record<keyof ProtectedContext,
+ * ...>`, so the two halves of "protected" cannot drift: adding a field to `ProtectedContext` fails
+ * to compile until someone says how that field sounds, and renaming one moves its pattern with it.
+ * Co-locating a loose word list here would have looked the same and guaranteed nothing.
+ *
+ * `null` means the field has no general spoken form to match. A borrower's name is the case: it is
+ * a per-borrower value, not a vocabulary, and it is already withheld structurally by
+ * `visibleContext` — which is the real control. Everything here is a post-hoc audit over free text,
+ * deliberately narrow, because a check that fires on a compliant call teaches operators to ignore it.
+ */
+export const PROTECTED_DISCLOSURE_PATTERNS: Readonly<Record<keyof ProtectedContext, RegExp | null>> = {
+  borrower_full_name: null,
+  balance_due: /\b(balance|amount (?:due|owed)|(?:you )?ow(?:e|es|ed|ing))\b/i,
+  due_date: /\b(due date|due on|past due)\b/i,
+  loan_status: /\b(delinquen\w*|in default|charged off)\b/i,
+  delinquency_days: /\b(days? (?:late|past due|behind))\b/i,
+  last_promise_date: /\b(previously promised|last promised)\b/i,
+};
+
+/** True when a spoken line discloses any protected field's subject matter. */
+export const disclosesProtectedDetail = (text: string): boolean =>
+  Object.values(PROTECTED_DISCLOSURE_PATTERNS).some((re) => re !== null && re.test(text));
+
 const str = (v: unknown): string | null => (typeof v === "string" ? v : v == null ? null : String(v));
 
 const quote = (v: string | null, max: number): string | null => (v && v.trim().length > 0 ? `"${v.trim().slice(0, max)}"` : null);
