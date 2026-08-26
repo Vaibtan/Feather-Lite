@@ -9,7 +9,7 @@
 import { DateTime, Effect, Layer, Option, Ref, Stream } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import type { ConversationState, EventRecord, TurnChunk } from "@feather-lite/domain";
-import { decision, replay } from "@feather-lite/domain";
+import { decision, numericScore, replay } from "@feather-lite/domain";
 import type { TurnFrame } from "@feather-lite/contracts";
 import { AppConfig } from "../config.js";
 import { PreCallRejected, TurnDeciderUnavailable, UnknownScenario } from "../errors.js";
@@ -20,6 +20,7 @@ import { SchedulingRepo } from "../repos/scheduling.js";
 import { IdGen } from "./Ids.js";
 import { Orchestrator, type Signal } from "./Orchestrator.js";
 import { Queries, type ConversationDetail } from "./Queries.js";
+import { Scores } from "./Scores.js";
 import { TurnDecider, type TurnDeciderShape, scriptedTurnDecider } from "./TurnDecider.js";
 import type { DeciderInput, TurnResult } from "./types.js";
 import { WorkflowService } from "./Workflow.js";
@@ -545,6 +546,7 @@ export class ScenarioRunner extends Effect.Service<ScenarioRunner>()("@feather-l
     const ids = yield* IdGen;
     const workflow = yield* WorkflowService;
     const queries = yield* Queries;
+    const scores = yield* Scores;
 
     const list = () => SCENARIOS.map((s) => ({ scenario_id: s.id, description: s.description }));
 
@@ -649,11 +651,39 @@ export class ScenarioRunner extends Effect.Service<ScenarioRunner>()("@feather-l
         return result;
       }).pipe(Effect.provideService(SchedulingRepo, sched), Effect.provideService(CrmRepo, crm), Effect.provideService(ConversationRepo, conv), Effect.provideService(WorkflowService, workflow));
 
+    /**
+     * Run the suite, and record what share of it passed as a score (spec 2026-08-26, D9).
+     *
+     * The suite is scored against a **synthetic conversation id, minted per run**: it is a test
+     * run, not a call, and there is nothing in `conversations` to hang it on. `conversation_scores`
+     * carries no foreign key for exactly this reason. A fresh id per run means the history is a
+     * series of runs rather than one row overwritten each time — the opposite of the upsert
+     * behaviour every per-call score wants, and the right one here.
+     *
+     * Langfuse datasets and experiments were considered and not adopted: the suite already *is* the
+     * dataset, it lives in this repo beside the code it tests, and it runs in CI. Pushing a score is
+     * all that was missing to put CI correctness on the same page as call quality.
+     */
     const runAll = () =>
-      Effect.forEach(SCENARIOS, (s) => run(s.id), { concurrency: 1 });
+      Effect.gen(function* () {
+        const results = yield* Effect.forEach(SCENARIOS, (s) => run(s.id), { concurrency: 1 });
+        const failed = results.filter((r) => !r.passed).map((r) => r.scenario_id);
+        const suiteId = yield* ids.next();
+        yield* scores
+          .record(
+            numericScore(suiteId, "scenario.pass_rate", Math.round(((results.length - failed.length) / Math.max(1, results.length)) * 1000) / 1000, "SCENARIO", {
+              comment: `${results.length - failed.length}/${results.length} scenarios passed`,
+              evidence: { failed, total: results.length, suite_run_id: suiteId },
+            }),
+          )
+          // A scenario run must not fail because its score could not be written; the run's own
+          // result is the thing under test and it is already in hand.
+          .pipe(Effect.catchAllCause((cause) => Effect.logWarning("scenario pass-rate score not written").pipe(Effect.annotateLogs({ cause: String(cause) }))));
+        return results;
+      });
 
     void cfg;
     return { list, run, runAll } as const;
   }),
-  dependencies: [CrmRepo.Default, ConversationRepo.Default, SchedulingRepo.Default, IdGen.Default, WorkflowService.Default, Queries.Default],
+  dependencies: [CrmRepo.Default, ConversationRepo.Default, SchedulingRepo.Default, IdGen.Default, WorkflowService.Default, Queries.Default, Scores.Default],
 }) {}

@@ -19,7 +19,7 @@ the PRD (`PRD.md`) and implementation spec (`SPEC.md`) are the requirements, thi
 v1 came first and was rewritten after the review in `docs/reviews/`; it is gone from the tree (ADR
 0005 records why TypeScript won) and lives on only in git history.
 
-## What is here (v2, verified 2026-08-21)
+## What is here (v2, verified 2026-08-27)
 
 | Area | Status | Evidence |
 |---|---|---|
@@ -30,13 +30,20 @@ v1 came first and was rewritten after the review in `docs/reviews/`; it is gone 
 | Operator console (`apps/console`): conversations, transcript + timeline + replay, simulate (streaming), **call me in the browser**, scenario matrix, status/seed | done | headless run: 20/20 matrix, PTP simulation, browser call joined LiveKit Cloud with live transcript |
 | Deployment on free tiers (Neon + Cloudflare Tunnel + Pages + LiveKit Build) | documented, needs your accounts | `docs/deploy/free-tier-live-demo.md` |
 | **Self-hosted media plane**: LiveKit SFU in Docker (`pnpm lk:up`), Deepgram direct plugins (nova-3 STT + Aura TTS) behind `STT_TTS_PROVIDER` | done | headless voice call + browser call on the local SFU, both equivalence-green vs the simulation; ADR 0006 |
-| **Load tested**: control plane to 200 concurrent conversations, voice fleet to 5 concurrent real calls (10 = CPU ceiling) | done | 200/200 correct outcomes at C=200, 5/5 equivalence-green at N=5; `docs/loadtest/` |
+| **Load tested**: control plane to 200 concurrent conversations, voice fleet to 5 concurrent real calls (10 = CPU ceiling) | done | 200/200 correct outcomes at C=200, 5/5 equivalence-green at N=5 (2026-08-21). A 2026-08-27 re-measure got 3/5 on a loaded box while N=2 stayed clean — diagnosed as host starvation, not regression, and written up in `docs/loadtest/README.md` |
 | **Audio-native end-of-turn**: the deprecated text EOU model and its 500 ms endpointing replaced by the auto-provisioned `inference.TurnDetector` (local, no LiveKit Cloud) at 300/2500 | done | tier-2 N=5: per-turn latency p50 2397 → 2145 ms; worker EOU delay ~780 → ~578 ms |
 | **Prompt cache alignment**: static persona/RULES first, transcript next, volatile state/time/account last; static prefix sized past OpenAI's 1,024-token floor, `prompt_cache_key` per state | done | measured `cached_tokens` 1024 on the *next call's* first turn (cross-conversation prefix reuse) and 1792/1920 deep into a long call; latency-neutral at these prompt sizes — the win is cost (0.75× cached input) and early engagement (ADR 0008) |
 | **Cross-call memory**: SUMMARY outbox job persists a ledger-derived `wrap_up`; one deterministic line per prior call (promises, dispute/hardship verbatim, borrower's last words) in the decider's HISTORY block | done | verified live: call N+1's prompt carries "promised 550.00 by …; their last words: …"; equivalence stays green; no migration, no second store, gated behind right-party verification |
 | **Playout truth under TTS failure**: a TTS stream that stalls to zero audio is reported as unheard (`interrupted: true`), so the fully-heard guard repeats the read-back instead of accepting a confirmation of silence; Deepgram TTS websocket connect patched with a 4 s retryable timeout | done | reproduced live (53 s silent read-back recorded as "heard"), fixed, and re-verified across 8 instrumented runs + fleet N=5 (ADR 0008) |
 | **Per-turn latency waterfall**: EOU delay → transcription → decide TTFT → TTS TTFB, persisted per turn, on the Langfuse span, and drawn in the console (per call and as fleet p50/p95) | done | measured on a local voice call: 578 / 470 / 23 / 420 ms, total p50 1495 ms |
-| PSTN via SIP trunk, Oracle always-on VM, chaos (kill worker mid-call) test, Effect 4 | **not done** | listed honestly in "Not built" below |
+| **Quality scores**: one ledger-side score model (`conversation_scores`) fed by the deterministic evaluator, an LLM judge, the voice harness and human labels, mirrored to Langfuse; `GET/POST /api/conversations/:id/scores` | done | 6 producers on one table; scores visible in Langfuse and on the console's Quality view; ADR 0009 |
+| **LLM-as-judge**: GPT-5.6 Luna reads each finished call post-call in the outbox and returns a **binary pass/fail per dimension with a quoted piece of transcript evidence** (task completion, compliance, factual accuracy, empathy, escalation) | done, off by default (`JUDGE_ENABLED`) | live: a real call judged in one attempt, 6 scores with evidence quotes; unparseable output → `judge.invalid_output`, never silence; judge request body asserted to carry no account data (leak test) |
+| **Judge-vs-human agreement**: pass/fail label control on the conversation page; agreement measured only over calls carrying both | done | live: labelling one call moved agreement from null to 100% over 1 labelled call |
+| **Outcome funnel + SLO**: attempts → connected → right-party → promise-to-pay with each rate against the previous stage, promise ageing (PENDING/DUE_TODAY/OVERDUE in the borrower's own timezone), p95 vs target per latency component — one request, `GET /api/system/quality` | done | live: 6 attempts → 2 promises, SLO naming `ttft_ms` as its one breach; SPEC §17.2's right-party-verification and voicemail rates now present |
+| **STT word error rate**, measured by the voice harness against the exact text it spoke, normalised explicitly (contractions, number words, currency, spoken digit runs) and **gated in the fleet run** (`--max-wer`, default 0.20 from measurement) | done — **harness only** | 23 normaliser table tests; measured 0.000 on all three scripted lines, worst single reading 0.111 under barge-in. A production call has no ground truth, so there is no production WER and the console says so |
+| **TTS signal**: zero-audio playouts counted (excluding turns the borrower superseded before the agent replied — those look identical and are not failures), and characters-per-second flagged as an outlier beyond ±40% of the window's own median | done — **heuristic, not a quality score** | there is no MOS model here: UTMOS/NISQA are Python-only and were left unbuilt rather than faked. These answer "did any audio come out" and "was this turn spoken at a rate unlike the rest", and nothing about how the speech sounded (ADR 0009) |
+| **Reliability**: provider error/retry/timeout counters per vendor with a last-error ring, the six failure counts ADR 0008 found, and an **orphaned-call sweeper** (worker liveness + LiveKit confirmation, ~35–40 s) | done | chaos script under `apps/voice-worker/src/tracer/`; a killed worker's call is finalized FAILED/ORPHANED and the borrower is callable again |
+| PSTN via SIP trunk, Oracle always-on VM, Effect 4 | **not done** | listed honestly in "Not built" below |
 
 Progress by phase: `docs/plans/PROGRESS.md`. Decisions: `docs/adr/`. Review that led to v2:
 `docs/reviews/2026-08-16-plan-vs-implementation-review.md`.
@@ -191,7 +198,11 @@ console takes the API URL and bearer token from `?api=…#token=…`.
 - **Horizontal scale** is untested. Load testing found the knee at ~70–85 turns/s on one Node
   process and showed Postgres was nowhere near saturated (raising the pool made it slower); a second
   server process is the obvious next lever, and it has not been run.
-- **Chaos test** (kill the worker mid-call and prove the ledger resumes): the design supports it
-  (`active_turn_id`, idempotent turns); no automated test.
-- Semantic (embedding) override safety net, LLM-as-judge evaluation, Durable Objects/Queues,
-  Effect 4 — stretch items from the plan.
+- **MOS-class TTS quality** (UTMOS/NISQA). Python-only; deliberately not approximated. What is
+  measured instead is labelled a heuristic everywhere it appears — see ADR 0009.
+- **Production word error rate.** There is no ground truth for a live call; WER is a harness metric
+  and a fleet gate, and the console says so rather than showing an empty chart.
+- **Promise-kept rate.** Needs payment ingestion. `record_payment` is named as the missing input
+  rather than approximated from the promise date.
+- Semantic (embedding) override safety net, Durable Objects/Queues, Effect 4 — stretch items from
+  the plan.
