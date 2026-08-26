@@ -167,6 +167,25 @@ const key = (conversationId: string, turnId: string) => `${conversationId} ${tur
  * re-run of the evaluator corrects the score in Langfuse exactly as it does in Postgres instead of
  * leaving two contradictory ones side by side.
  */
+/**
+ * Where one score attaches in Langfuse.
+ *
+ * Extracted from the layer so the rule can be tested without a Langfuse: the ingestion API accepts
+ * **exactly one** target and rejects an `observationId` that does not name its `traceId` with a 400
+ * the SDK reports only on its own logger — a silent drop, and the reason every per-turn score
+ * vanished until 2026-08-27. There is no seam that can catch the real thing without a live server,
+ * so what is pinned instead is the shape of the request.
+ */
+export interface ScoreSpanRef {
+  readonly traceId: string;
+  readonly observationId: string;
+}
+
+export type ScoreTarget = { readonly traceId: string; readonly observationId: string } | { readonly sessionId: string };
+
+export const scoreTarget = (conversationId: string, span: ScoreSpanRef | undefined): ScoreTarget =>
+  span === undefined ? { sessionId: conversationId } : { traceId: span.traceId, observationId: span.observationId };
+
 const scoreId = (s: ScoreTrace): string =>
   createHash("sha256").update(`${s.conversationId}|${s.turnId ?? ""}|${s.name}|${s.source}`).digest("hex").slice(0, 32);
 
@@ -236,17 +255,26 @@ export const LangfuseTracingLive: Layer.Layer<Tracing, never, AppConfig> = Layer
     };
 
     /**
-     * Turn id -> the Langfuse observation id of that turn's span, learned when the span is emitted.
-     * A turn-level score (per-turn WER, chars-per-second) targets the observation so it lands on the
-     * turn rather than the whole call. Bounded for the same reason `pending` is: a long-running
-     * server must not accumulate one entry per turn it has ever traced. A score for a turn that has
-     * aged out (or whose span was never emitted) still lands, on the conversation's session, with
-     * the turn id in its comment — degraded placement, never a dropped measurement.
+     * Turn id -> the Langfuse trace *and* observation ids of that turn's span, learned when the span
+     * is emitted. A turn-level score (per-turn WER, chars-per-second) targets the observation so it
+     * lands on the turn rather than the whole call.
+     *
+     * **Both ids, not just the observation.** The ingestion API rejects a score carrying an
+     * `observationId` with no `traceId` — "ObservationId requires traceId", HTTP 400 — and the SDK
+     * reports that on its own logger rather than through the promise, so the first version dropped
+     * every per-turn score *silently* and exactly in the case it was written for: a turn whose span
+     * was still known. The ones that appeared in Langfuse were the ones that had aged out and taken
+     * the session fallback, which is why the gap looked like a flush problem rather than a bug.
+     *
+     * Bounded for the same reason `pending` is: a long-running server must not accumulate one entry
+     * per turn it has ever traced. A score for a turn that has aged out (or whose span was never
+     * emitted) still lands, on the conversation's session, with the turn id in its comment —
+     * degraded placement, never a dropped measurement.
      */
     const MAX_OBSERVATION_IDS = 2_000;
-    const observationIds = new Map<string, string>();
-    const rememberObservation = (k: string, observationId: string): void => {
-      observationIds.set(k, observationId);
+    const observationIds = new Map<string, ScoreSpanRef>();
+    const rememberObservation = (k: string, ref: ScoreSpanRef): void => {
+      observationIds.set(k, ref);
       while (observationIds.size > MAX_OBSERVATION_IDS) {
         const oldest = observationIds.keys().next();
         if (oldest.done) break;
@@ -273,7 +301,7 @@ export const LangfuseTracingLive: Layer.Layer<Tracing, never, AppConfig> = Layer
         startActiveObservation(
           `turn:${t.state}`,
           (span) => {
-            rememberObservation(key(t.conversationId, t.turnId), span.id);
+            rememberObservation(key(t.conversationId, t.turnId), { traceId: span.traceId, observationId: span.id });
             span.update({
               input: { user_text: t.userText },
               output: { agent_text: t.agentText, tool: t.tool, outcome: t.outcome, new_state: t.newState },
@@ -406,14 +434,14 @@ export const LangfuseTracingLive: Layer.Layer<Tracing, never, AppConfig> = Layer
         }),
       score: (s) =>
         guard(() => {
-          const observationId = s.turnId === null ? undefined : observationIds.get(key(s.conversationId, s.turnId));
+          const span = s.turnId === null ? undefined : observationIds.get(key(s.conversationId, s.turnId));
           // A turn-level score whose span has not been emitted (or has aged out) falls back to the
           // session, with the turn named in the comment, so the measurement is never lost.
-          const orphanedTurn = s.turnId !== null && observationId === undefined;
+          const orphanedTurn = s.turnId !== null && span === undefined;
           const comment = orphanedTurn ? `turn ${s.turnId}${s.comment ? ` — ${s.comment}` : ""}` : s.comment;
           client.score.create({
             id: scoreId(s),
-            ...(observationId !== undefined ? { observationId } : { sessionId: s.conversationId }),
+            ...scoreTarget(s.conversationId, span),
             name: s.name,
             // Langfuse takes the label for a categorical score and the number for everything else;
             // BOOLEAN must be exactly 1 or 0, which the domain vocabulary already guarantees.
