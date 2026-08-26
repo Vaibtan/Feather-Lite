@@ -126,6 +126,20 @@ export const SCORE_DATA_TYPE_BY_NAME: Readonly<Record<ScoreName, ScoreDataType>>
   "human.overall_pass": "BOOLEAN",
 };
 
+/**
+ * Prefixes whose boolean scores are a **verdict** — something passed or failed — as opposed to a
+ * fact about the call that happens to be boolean.
+ *
+ * `call.voicemail = 0` means "no answering machine picked up" and `call.right_party_verified = 0`
+ * means "this call never reached the borrower". Neither is a failure, and rendering them in the red
+ * reserved for a breached compliance check would teach an operator that red means nothing. The
+ * distinction lives here rather than in the console because both the Quality page and the
+ * conversation detail need it, and a rule spelled out in two views drifts.
+ */
+export const VERDICT_SCORE_PREFIXES: ReadonlyArray<string> = ["compliance.", "judge.", "human.", "harness."];
+
+export const isVerdictScore = (name: string): boolean => VERDICT_SCORE_PREFIXES.some((p) => name.startsWith(p));
+
 /** Names that describe one turn rather than the whole call; everything else is call-level. */
 export const TURN_LEVEL_SCORE_NAMES: ReadonlySet<ScoreName> = new Set<ScoreName>([
   "latency.response_ms",

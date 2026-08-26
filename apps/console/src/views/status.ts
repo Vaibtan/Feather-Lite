@@ -3,7 +3,7 @@
  * (API base URL, bearer token) and the demo seed/reset controls.
  */
 import { api, apiBase, apiToken, setApiBase, setApiToken, type SystemStatus } from "../api.js";
-import { ago, clear, h, pre } from "../dom.js";
+import { ago, badge, clear, h, pre } from "../dom.js";
 import { renderLatencyAggregate } from "./latency.js";
 
 export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) => {
@@ -13,6 +13,8 @@ export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) 
   const ledger = h("div", { class: "grid3" });
   const agents = h("div", { class: "card" });
   const latency = h("div", { class: "card" });
+  const quality = h("div", { class: "card" });
+  const providers = h("div", { class: "card" });
   const seedOut = h("div", { class: "small muted", style: "margin-top:8px" });
 
   const baseInput = h("input", { value: apiBase(), placeholder: "https://api.example.com (empty = same origin)", style: "min-width:340px" }) as HTMLInputElement;
@@ -35,6 +37,10 @@ export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) 
     ledger,
     h("h2", {}, "Turn latency (recent calls)"),
     latency,
+    h("h2", {}, "Quality (recent calls)"),
+    quality,
+    h("h2", {}, "Vendor failures (most recent)"),
+    providers,
     h("h2", {}, "Process counters (since start)"),
     counters,
     h("h2", {}, "Demo data"),
@@ -42,6 +48,15 @@ export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) 
     h("h2", {}, "Console settings"),
     h("div", { class: "card" }, h("div", { class: "kv" }, h("dt", {}, "API base"), h("dd", {}, baseInput), h("dt", {}, "Token"), h("dd", {}, tokenInput)), h("div", { class: "row", style: "margin-top:10px" }, h("button", { class: "btn primary", onClick: save }, "Save & reconnect"), h("span", { class: "muted small" }, "Also settable via ?api=<url> and #token=<token> in the URL."))),
   );
+
+  /** One headline number with its unit spelled out, because a bare percentage is not a finding. */
+  const metric = (label: string, value: string, sub: string) =>
+    h("div", {}, h("div", { class: "muted small" }, label), h("div", { style: "font-size:22px;font-weight:600" }, value), h("div", { class: "muted small" }, sub));
+
+  const rateOf = (q: { scores: Array<{ name: string; pass_rate: number | null }> }, name: string): string => {
+    const row = q.scores.find((x) => x.name === name);
+    return row?.pass_rate === null || row === undefined ? "—" : `${(row.pass_rate * 100).toFixed(0)}%`;
+  };
 
   const card = (title: string, on: boolean | null, text: string) => h("div", { class: "card" }, h("h3", {}, title), h("div", { class: "row" }, h("span", { class: `dot ${on === null ? "" : on ? "on" : "off"}` }), text));
 
@@ -70,12 +85,70 @@ export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) 
         h("div", { class: "card" }, h("h3", {}, "Guardrails"), h("div", { style: "font-size:22px;font-weight:600;margin-bottom:6px" }, String(caught), h("span", { class: "muted small", style: "font-weight:400" }, " model suggestions rejected by the state machine")), kv({ TOOL_REJECTED: g["TOOL_REJECTED"] ?? 0, TURN_DECISION_REJECTED: g["TURN_DECISION_REJECTED"] ?? 0, TURN_SUPERSEDED: g["TURN_SUPERSEDED"] ?? 0 }, "")),
         h("div", { class: "card" }, h("h3", {}, "Volume"), kv({ USER_TURN_FINAL: g["USER_TURN_FINAL"] ?? 0, TOOL_CALLED: g["TOOL_CALLED"] ?? 0, STATE_TRANSITION: g["STATE_TRANSITION"] ?? 0 }, "")),
       );
+      clear(providers);
+      // The ring D6 asked for: counters say how much is failing, this says what the failure was.
+      // A count alone cannot distinguish a Deepgram socket that reconnected from one that did not.
+      providers.append(
+        s.provider_events.recent.length === 0
+          ? h("div", { class: "muted small" }, "No provider error, retry or timeout since this server started. These are live counts, not history — a restart empties this.")
+          : h(
+              "table",
+              {},
+              h("thead", {}, h("tr", {}, h("th", {}, "when"), h("th", {}, "provider"), h("th", {}, "stage"), h("th", {}, "kind"), h("th", {}, "message"))),
+              h(
+                "tbody",
+                {},
+                ...s.provider_events.recent.map((e) =>
+                  h(
+                    "tr",
+                    {},
+                    h("td", { class: "small muted" }, ago(e.at)),
+                    h("td", { class: "mono small" }, e.provider),
+                    h("td", { class: "small" }, e.stage),
+                    h("td", {}, badge(e.kind, e.kind === "error" ? "bad" : "warn")),
+                    h("td", { class: "small muted" }, e.message),
+                  ),
+                ),
+              ),
+            ),
+      );
       clear(counters);
       counters.append(pre(s.counters));
       clear(latency);
       // Its own request and its own failure mode: an empty ledger is not an unhealthy API.
       latency.append(
+        // The SLO verdict sits with the numbers it judges: an operator glancing at latency should
+        // not have to work out from five percentiles whether any of them missed their target.
+        h(
+          "div",
+          { class: "row", style: "align-items:center;gap:10px;margin-bottom:10px" },
+          badge(s.slo.pass ? "SLO MET" : "SLO BREACHED", s.slo.pass ? "good" : "bad"),
+          h("span", { class: "muted small" }, s.slo.breaches.length ? `over target: ${s.slo.breaches.join(", ")}` : `every measured component within target`),
+        ),
         await api.latencyAggregate(20).then(renderLatencyAggregate, (e: unknown) => h("div", { class: "err small" }, `latency unavailable: ${String(e)}`)),
+      );
+      clear(quality);
+      // A strip, not a second Quality page: enough to see whether anything wants looking at, with
+      // the link to the page that explains it. Its own request, so an empty score table cannot
+      // blank the health cards above.
+      quality.append(
+        await api.quality(20).then(
+          (q) =>
+            h(
+              "div",
+              {},
+              h(
+                "div",
+                { class: "row", style: "gap:22px;flex-wrap:wrap" },
+                metric("promise rate", q.funnel.rates.promise === null ? "—" : `${(q.funnel.rates.promise * 100).toFixed(0)}%`, "of right-party calls"),
+                metric("judge pass", rateOf(q, "judge.overall_pass"), "calls the judge passed"),
+                metric("compliance", rateOf(q, "compliance.mini_miranda_first"), "disclosure first"),
+                metric("judge vs human", q.judge_agreement.rate === null ? "—" : `${(q.judge_agreement.rate * 100).toFixed(0)}%`, q.judge_agreement.both === 0 ? "no human labels yet" : `over ${q.judge_agreement.both} labelled call(s)`),
+              ),
+              h("div", { style: "margin-top:10px" }, h("a", { href: "#/quality" }, "full quality report →")),
+            ),
+          (e: unknown) => h("div", { class: "err small" }, `quality unavailable: ${String(e)}`),
+        ),
       );
     } catch (e) {
       clear(health);

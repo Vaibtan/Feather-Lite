@@ -4,6 +4,7 @@ import { clear, h } from "./dom.js";
 import { callView } from "./views/call.js";
 import { conversationsView, detailView } from "./views/conversations.js";
 import { scenariosView } from "./views/scenarios.js";
+import { qualityView } from "./views/quality.js";
 import { simulateView } from "./views/simulate.js";
 import { statusView } from "./views/status.js";
 
@@ -14,6 +15,7 @@ const ROUTES: Array<{ pattern: RegExp; view: (m: RegExpMatchArray) => View; nav?
   { pattern: /^#\/conversations$/, view: () => conversationsView, nav: "#/conversations" },
   { pattern: /^#\/simulate$/, view: () => simulateView, nav: "#/simulate" },
   { pattern: /^#\/call$/, view: () => callView, nav: "#/call" },
+  { pattern: /^#\/quality$/, view: () => qualityView, nav: "#/quality" },
   { pattern: /^#\/scenarios$/, view: () => scenariosView, nav: "#/scenarios" },
   { pattern: /^#\/status$/, view: () => statusView, nav: "#/status" },
 ];
@@ -22,6 +24,7 @@ const NAV: Array<[string, string]> = [
   ["#/conversations", "Conversations"],
   ["#/simulate", "Simulate"],
   ["#/call", "Live call"],
+  ["#/quality", "Quality"],
   ["#/scenarios", "Scenarios"],
   ["#/status", "Status"],
 ];

@@ -92,6 +92,11 @@ export interface TurnLatencyRow {
   ttft_ms: number | null;
   tts_ttfb_ms: number | null;
   total_ms: number | null;
+  /** Speech shape, not part of the waterfall: see the API's TurnLatencyRow. */
+  tts_audio_ms: number | null;
+  tts_chars: number | null;
+  tts_chars_per_second: number | null;
+  tts_silent: boolean;
 }
 
 export interface Percentiles {
@@ -110,6 +115,65 @@ export interface LatencyAggregate {
   ttft_ms: Percentiles;
   tts_ttfb_ms: Percentiles;
   total_ms: Percentiles;
+}
+
+/** One quality measurement about a call or one of its turns; see the API's ScoreRow. */
+export interface ScoreRow {
+  conversation_id: string;
+  turn_id: string | null;
+  name: string;
+  value: number;
+  data_type: "NUMERIC" | "BOOLEAN" | "CATEGORICAL";
+  string_value: string | null;
+  source: "EVALUATOR" | "JUDGE" | "HARNESS" | "HUMAN" | "SCENARIO" | "SYSTEM";
+  comment: string | null;
+  evidence: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface SloReport {
+  pass: boolean;
+  targets: Record<string, number>;
+  measured: Record<string, number | null>;
+  breaches: string[];
+}
+
+/** A rate is null, never 0, when its denominator is 0 — see the API's Funnel. */
+export interface QualityReport {
+  window: { calls: number | null; from: string | null; to: string | null; conversations: number };
+  funnel: {
+    attempts: number;
+    connected: number;
+    voicemail: number;
+    right_party: number;
+    promise_to_pay: number;
+    callback_scheduled: number;
+    failed: number;
+    orphaned: number;
+    rates: { contact: number | null; right_party: number | null; promise: number | null; voicemail: number | null };
+  };
+  promises: Array<{ conversation_id: string; borrower_name: string; amount: string; date: string; status: "PENDING" | "DUE_TODAY" | "OVERDUE" }>;
+  slo: SloReport;
+  /** Heuristics, never a quality claim — the view says so on the card. */
+  tts: {
+    turns: number;
+    silent_playouts: number;
+    silent_playout_rate: number | null;
+    chars_per_second: { n: number; median: number | null; min: number | null; max: number | null };
+    ttfb_ms: { n: number; p50: number | null; p95: number | null };
+    outlier_band: number;
+    baseline_readings: number;
+    outlier_count: number;
+    outliers: Array<{ turn_id: string; chars_per_second: number; deviation: number }>;
+  };
+  reliability: {
+    counts: Record<string, number>;
+    orphan_detect_ms: { n: number; mean: number | null; p50: number | null; p95: number | null };
+    provider_counters: Record<string, number>;
+  };
+  scores: Array<{ name: string; source: string; n: number; mean: number | null; pass_rate: number | null }>;
+  stt_wer: { n: number; mean: number | null; p50: number | null; p95: number | null };
+  judge_agreement: { judged: number; human_labelled: number; both: number; agreed: number; rate: number | null };
 }
 
 export interface ConversationDetail {
@@ -147,7 +211,10 @@ export interface SystemStatus {
   database: "ok" | "down";
   agents: Array<{ agent_name: string; last_seen_at: string; online: boolean; meta: Record<string, unknown> }>;
   counters: Record<string, unknown>;
-  ledger: { conversations_total: number; outcomes: Record<string, number>; guardrails: Record<string, number> };
+  ledger: { conversations_total: number; outcomes: Record<string, number>; guardrails: Record<string, number>; reliability: Record<string, number> };
+  /** Live vendor failures; the durable rates are on /api/system/quality. */
+  provider_events: { counters: Record<string, number>; recent: Array<{ provider: string; kind: string; stage: string; message: string; at: string; conversation_id: string | null }> };
+  slo: SloReport;
   turn_decider: string;
   demo_mode: boolean;
 }
@@ -188,6 +255,11 @@ export const api = {
   conversation: (id: string) => req<ConversationDetail>(`/api/conversations/${id}`),
   turnLatencies: (id: string) => req<TurnLatencyRow[]>(`/api/conversations/${id}/latency`),
   latencyAggregate: (calls = 20) => req<LatencyAggregate>(`/api/system/latency?calls=${calls}`),
+  quality: (calls = 50) => req<QualityReport>(`/api/system/quality?calls=${calls}`),
+  scores: (id: string) => req<ScoreRow[]>(`/api/conversations/${id}/scores`),
+  /** Ingest path shared with the voice harnesses; the console only ever posts a HUMAN label. */
+  postScores: (id: string, scores: Array<{ name: string; value: number; source: string; comment?: string | null }>) =>
+    req<{ written: number }>(`/api/conversations/${id}/scores`, { method: "POST", body: JSON.stringify({ scores }) }),
   startCall: (borrower_id: string, contact_point_id: string) =>
     req<{ conversation_id: string; opening_text: string }>("/api/calls/start", { method: "POST", body: JSON.stringify({ borrower_id, contact_point_id, channel: "simulated" }) }),
   noInput: (id: string) => req<{ agent_text: string; new_state: string; end_call: boolean; outcome: string | null }>(`/api/conversations/${id}/no_input`, { method: "POST" }),

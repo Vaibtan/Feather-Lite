@@ -25,6 +25,18 @@ const COMPONENTS: ReadonlyArray<Component> = [
 
 const ms = (v: number | null) => (v === null ? "—" : `${Math.round(v)}ms`);
 
+/**
+ * What the turn's synthesis produced, for the bar's tooltip. Not a fifth segment: how long a reply
+ * took to *say* is not part of how long it took to arrive, and stacking it would inflate every bar
+ * by the length of the sentence (spec 2026-08-26, D5).
+ */
+const ttsNote = (t: TurnLatencyRow): string =>
+  t.tts_silent
+    ? "\nTTS produced no audio for this turn"
+    : t.tts_chars_per_second !== null
+      ? `\nspoke ${t.tts_chars} chars in ${ms(t.tts_audio_ms)} (${t.tts_chars_per_second} chars/s)`
+      : "";
+
 export const latencyLegend = () =>
   h(
     "div",
@@ -51,8 +63,10 @@ export const renderWaterfall = (turns: ReadonlyArray<TurnLatencyRow>) => {
         const title = segments.map((s) => `${s.c.label} ${ms(s.value)}`).join("\n");
         return h(
           "div",
-          { class: "wf-row", title: `turn ${i + 1}${t.state ? ` → ${t.state}` : ""}\n${title}` },
-          h("div", { class: "wf-label" }, `${i + 1}. ${t.state ?? t.status.toLowerCase()}`),
+          { class: "wf-row", title: `turn ${i + 1}${t.state ? ` → ${t.state}` : ""}\n${title}${ttsNote(t)}` },
+          // A turn whose voice produced nothing is marked on the row itself: its TTS-first-byte
+          // reading is meaningless, and the bar would otherwise look like a normal fast turn.
+          h("div", { class: "wf-label" }, `${i + 1}. ${t.state ?? t.status.toLowerCase()}`, t.tts_silent ? h("span", { class: "err", title: "TTS produced no audio" }, " ⌀") : null),
           h(
             "div",
             { class: "wf-bar" },
