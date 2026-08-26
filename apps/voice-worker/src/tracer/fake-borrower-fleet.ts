@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
 import { initializeLogger } from "@livekit/agents";
 import { checkEquivalence, loadScenarioReference, type EquivalenceResult } from "./equivalence.js";
+import { buildHarnessScores, postHarnessScores, summariseWer } from "./harness-scores.js";
 import { loadScriptedLines, runScriptedCall, type ScriptedCallResult } from "./scripted-call.js";
 
 loadEnv({ path: fileURLToPath(new URL("../../../../.env", import.meta.url)) });
@@ -29,6 +30,20 @@ const flag = (name: string, fallback: string): string => {
 };
 
 const CALLS = Number(flag("calls", "5"));
+/**
+ * STT regression gate (D4). A provider or model change that degrades transcription is otherwise
+ * invisible: the call still completes, the ledger still replays, and equivalence still passes,
+ * because the scripted borrower's words survive a surprising amount of mangling.
+ *
+ * 0.20, set from measurement rather than taste. Two of the three scripted lines transcribe at
+ * 0.000. The third is the barge-in, where the borrower deliberately talks over the agent and the
+ * STT loses a word to the overlap ("wait", 1 deletion of 9 reference words = 0.111). That loss is
+ * structural to the script rather than a provider defect, so the gate has to clear it: the spec's
+ * provisional 0.15 leaves almost no room above it, and a single extra clipped word on one line
+ * would fail an otherwise healthy run. 0.20 leaves ~80% headroom over the measured structural
+ * worst while still failing a run whose transcription genuinely degrades.
+ */
+const MAX_WER = Number(flag("max-wer", "0.20"));
 const CONTROL_PLANE_URL = (process.env["CONTROL_PLANE_URL"] ?? "http://127.0.0.1:8080").replace(/\/$/, "");
 const REPORT_DIR = fileURLToPath(new URL("../../../../docs/loadtest/", import.meta.url));
 
@@ -39,7 +54,7 @@ const authHeaders = (): Record<string, string> => {
   return { "content-type": "application/json", ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) };
 };
 
-log(`calls=${CALLS} livekit=${process.env["LIVEKIT_URL"] ?? "(unset)"} stt/tts=${process.env["STT_TTS_PROVIDER"] ?? "inference"}`);
+log(`calls=${CALLS} max-wer=${MAX_WER} livekit=${process.env["LIVEKIT_URL"] ?? "(unset)"} stt/tts=${process.env["STT_TTS_PROVIDER"] ?? "inference"}`);
 
 const lines = await loadScriptedLines();
 log(`borrower lines ready (${lines.cached ? "WAV cache" : "synthesised"}): ${lines.describe}`);
@@ -96,6 +111,20 @@ const turnMs = results.flatMap((r) => r.turnLatencies.map((t) => t.ms)).sort((a,
 const turnPct = (p: number) => percentile(turnMs, p);
 const unanswered = results.reduce((n, r) => n + r.unansweredTurns.length, 0);
 
+// Every borrower line across the fleet, so the gate is over the whole run rather than per call.
+const werValues = results
+  .flatMap((r) => r.werLines.map((l) => l.wer))
+  .filter((v): v is number => v !== null)
+  .sort((a, b) => a - b);
+const werPct = (p: number) => (werValues.length === 0 ? null : percentile(werValues, p));
+const worstLine = results.flatMap((r) => r.werLines).reduce<{ turn: string; wer: number; reference: string; hypothesis: string } | null>(
+  (worst, l) => (l.wer !== null && (worst === null || l.wer > worst.wer) ? { turn: l.turn, wer: l.wer, reference: l.reference, hypothesis: l.hypothesis } : worst),
+  null,
+);
+const unmatched = results.reduce((n, r) => n + r.unmatchedTranscripts.length, 0);
+const werP95 = werPct(95);
+const werBreached = werP95 !== null && werP95 > MAX_WER;
+
 console.log("");
 console.log(`  calls                 ${CALLS}`);
 console.log(`  agent hung up         ${hungUp}/${CALLS}`);
@@ -103,6 +132,13 @@ console.log(`  equivalence green     ${green}/${CALLS}`);
 console.log(`  call duration p50/p95 ${pct(50)}ms / ${pct(95)}ms`);
 console.log(`  turn latency  n       ${turnMs.length} (${unanswered} unanswered)`);
 console.log(`  turn latency p50/p95  ${turnPct(50)}ms / ${turnPct(95)}ms`);
+console.log(`  stt wer  n            ${werValues.length}${unmatched > 0 ? `  (${unmatched} unmatched transcript(s) — pairing may be off)` : ""}`);
+console.log(`  stt wer  p50/p95      ${werPct(50) === null ? "n/a" : werPct(50)!.toFixed(3)} / ${werP95 === null ? "n/a" : werP95.toFixed(3)}   (gate ${MAX_WER}${werBreached ? " — BREACHED" : ""})`);
+if (worstLine && worstLine.wer > 0) {
+  console.log(`  stt wer  worst line   ${worstLine.wer.toFixed(3)} (${worstLine.turn})`);
+  console.log(`      ref: ${JSON.stringify(worstLine.reference)}`);
+  console.log(`      stt: ${JSON.stringify(worstLine.hypothesis)}`);
+}
 console.log("");
 for (const { call, eq, eqError } of equivalences) {
   const verdict = eq?.equivalent ? "EQUIVALENT" : "MISMATCH";
@@ -121,6 +157,7 @@ const report = {
   equivalence_green: green,
   duration_ms: { p50: pct(50), p95: pct(95), max: durations.at(-1) ?? 0 },
   turn_latency_ms: { n: turnMs.length, unanswered, p50: turnPct(50), p95: turnPct(95), max: turnMs.at(-1) ?? 0 },
+  stt_wer: { n: werValues.length, unmatched_transcripts: unmatched, p50: werPct(50), p95: werP95, max: werValues.at(-1) ?? null, gate: MAX_WER, breached: werBreached, worst_line: worstLine },
   reference: { scenario_id: reference.scenarioId, state_path: reference.statePath, tools: reference.tools, final_outcome: reference.finalOutcome },
   results: equivalences.map(({ call, eq, eqError }) => ({
     label: call.label,
@@ -129,6 +166,7 @@ const report = {
     agent_audio_frames: call.agentAudioFrames,
     duration_ms: call.durationMs,
     turn_latencies: call.turnLatencies.map((t) => ({ turn: t.turn, ms: t.ms })),
+    wer_lines: call.werLines.map((l) => ({ turn: l.turn, wer: l.wer, substitutions: l.substitutions, insertions: l.insertions, deletions: l.deletions })),
     unanswered_turns: call.unansweredTurns,
     call_error: call.error,
     equivalent: eq?.equivalent ?? false,
@@ -143,4 +181,23 @@ const path = `${REPORT_DIR}${new Date().toISOString().slice(0, 10)}-tier2-n${CAL
 writeFileSync(path, `${JSON.stringify(report, null, 2)}\n`);
 log(`report written: ${path}`);
 
-process.exit(green === CALLS ? 0 : 1);
+// One score model for harness runs and production calls: the fleet's own measurements land in the
+// same table the evaluator and judge write to, per call, and show on the Quality page beside them.
+for (const { call, eq } of equivalences) {
+  if (!call.conversationId) continue;
+  await postHarnessScores(
+    CONTROL_PLANE_URL,
+    call.conversationId,
+    buildHarnessScores({
+      equivalent: eq?.equivalent === true,
+      equivalenceComment: eq?.equivalent ? `matches scenario ${reference.scenarioId}` : (eq?.failures[0] ?? "no equivalence result"),
+      werLines: call.werLines,
+      turnLatencies: call.turnLatencies,
+    }),
+  );
+}
+
+// The run fails on either gate. Equivalence is correctness and WER is transcription quality; a run
+// that stayed correct only because the words happened to survive is not a pass.
+if (werBreached) log(`stt wer p95 ${werP95!.toFixed(3)} exceeds the ${MAX_WER} gate: FAIL`);
+process.exit(green === CALLS && !werBreached ? 0 : 1);

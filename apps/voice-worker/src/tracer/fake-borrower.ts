@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
 import { initializeLogger } from "@livekit/agents";
 import { checkEquivalence, loadScenarioReference } from "./equivalence.js";
+import { buildHarnessScores, postHarnessScores, summariseWer } from "./harness-scores.js";
 import { loadScriptedLines, runScriptedCall } from "./scripted-call.js";
 
 loadEnv({ path: fileURLToPath(new URL("../../../../.env", import.meta.url)) });
@@ -57,6 +58,17 @@ if (result.turnLatencies.length === 0) {
   }
 }
 
+// STT accuracy per borrower line. The harness knows the exact words it spoke, which is the only
+// place WER has a ground truth; production calls have none, and the README says so.
+for (const l of result.werLines) {
+  log(`stt wer  ${l.turn}: ${l.wer === null ? "n/a" : l.wer.toFixed(3)}  S${l.substitutions} I${l.insertions} D${l.deletions}`);
+  if (l.wer !== null && l.wer > 0) log(`             ref: ${JSON.stringify(l.reference)}`);
+  if (l.wer !== null && l.wer > 0) log(`             stt: ${JSON.stringify(l.hypothesis)}`);
+}
+if (result.unmatchedTranscripts.length > 0) log(`stt wer: ${result.unmatchedTranscripts.length} unmatched transcript(s) — the WER pairing for this run may be off by one`);
+const wer = summariseWer(result.werLines);
+log(wer === null ? "stt wer: no borrower line was transcribed" : `stt wer  lines=${wer.n} mean=${wer.mean.toFixed(3)} worst=${wer.worst.wer.toFixed(3)} (${wer.worst.turn})`);
+
 if (!result.hungUp) {
   log("agent did not hang up: FAIL");
   process.exit(1);
@@ -77,4 +89,18 @@ if (!eq.equivalent) {
   process.exit(1);
 }
 log("voice/sim equivalence: PASS");
+
+// One score model for harness runs and production calls: these land in the same table the
+// evaluator and the judge write to, and show up on the Quality page beside them.
+await postHarnessScores(
+  CONTROL_PLANE_URL,
+  result.conversationId,
+  buildHarnessScores({
+    equivalent: true,
+    equivalenceComment: `state path + tools + outcome match scenario ${reference.scenarioId}`,
+    werLines: result.werLines,
+    turnLatencies: result.turnLatencies,
+  }),
+  log,
+);
 process.exit(0);

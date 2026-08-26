@@ -34,6 +34,7 @@ import {
   TrackSource,
 } from "@livekit/rtc-node";
 import { AccessToken, AgentDispatchClient, RoomServiceClient } from "livekit-server-sdk";
+import { wordErrorRate } from "@feather-lite/domain";
 import { buildSpeechStack, speechProvider } from "../speech.js";
 import { synthesizeCached } from "./line-cache.js";
 
@@ -52,12 +53,18 @@ const SPEECH_START_TIMEOUT_MS = 60_000;
 /** How long to wait for the promise read-back. */
 const READBACK_TIMEOUT_MS = 60_000;
 
+/** One borrower line: the audio, and the exact words it says — the WER ground truth (D4). */
+export interface ScriptedLine {
+  readonly frames: ReadonlyArray<AudioFrame>;
+  readonly text: string;
+}
+
 export interface ScriptedLines {
-  readonly yes: ReadonlyArray<AudioFrame>;
-  readonly pay: ReadonlyArray<AudioFrame>;
+  readonly yes: ScriptedLine;
+  readonly pay: ScriptedLine;
   /** Answer to an amount-clarifying question, if the agent asks one instead of proposing. */
-  readonly amount: ReadonlyArray<AudioFrame>;
-  readonly confirm: ReadonlyArray<AudioFrame>;
+  readonly amount: ScriptedLine;
+  readonly confirm: ScriptedLine;
   readonly sampleRate: number;
   readonly channels: number;
   readonly cached: boolean;
@@ -74,15 +81,19 @@ export const loadScriptedLines = async (): Promise<ScriptedLines> => {
   try {
     // Sequential on purpose: some TTS plugins (Cartesia was one) multiplex synthesis over a single
     // pooled WebSocket and silently drop a generation under concurrency; sequential costs nothing here.
-    const yes = await synthesizeCached(speech.tts, "Yes, this is Jordan.", key);
-    const pay = await synthesizeCached(speech.tts, "Actually, wait. I can pay 550 dollars on Friday.", key);
-    const amount = await synthesizeCached(speech.tts, "The full balance. 550 dollars.", key);
-    const confirm = await synthesizeCached(speech.tts, "Yes, that's correct.", key);
+    const YES = "Yes, this is Jordan.";
+    const PAY = "Actually, wait. I can pay 550 dollars on Friday.";
+    const AMOUNT = "The full balance. 550 dollars.";
+    const CONFIRM = "Yes, that's correct.";
+    const yes = await synthesizeCached(speech.tts, YES, key);
+    const pay = await synthesizeCached(speech.tts, PAY, key);
+    const amount = await synthesizeCached(speech.tts, AMOUNT, key);
+    const confirm = await synthesizeCached(speech.tts, CONFIRM, key);
     return {
-      yes: yes.frames,
-      pay: pay.frames,
-      amount: amount.frames,
-      confirm: confirm.frames,
+      yes: { frames: yes.frames, text: YES },
+      pay: { frames: pay.frames, text: PAY },
+      amount: { frames: amount.frames, text: AMOUNT },
+      confirm: { frames: confirm.frames, text: CONFIRM },
       sampleRate: yes.sampleRate,
       channels: yes.channels,
       cached: yes.cached && pay.cached && amount.cached && confirm.cached,
@@ -137,6 +148,18 @@ export interface TurnLatency {
   readonly audioMs: number | null;
 }
 
+/** One borrower line, what the STT made of it, and the error rate between them (D4). */
+export interface WerLine {
+  readonly turn: string;
+  readonly reference: string;
+  readonly hypothesis: string;
+  /** null when the reference was empty — nothing to be wrong about. */
+  readonly wer: number | null;
+  readonly substitutions: number;
+  readonly insertions: number;
+  readonly deletions: number;
+}
+
 export interface ScriptedCallResult {
   readonly label: string;
   readonly borrowerName: string;
@@ -149,6 +172,14 @@ export interface ScriptedCallResult {
   readonly durationMs: number;
   /** Per-turn response latency, in scripted order. See {@link TurnLatency}. */
   readonly turnLatencies: ReadonlyArray<TurnLatency>;
+  /** Per-line STT accuracy, in scripted order. See {@link WerLine}. */
+  readonly werLines: ReadonlyArray<WerLine>;
+  /**
+   * Borrower transcripts that arrived with no spoken line waiting for them. Non-empty means the
+   * reference/hypothesis pairing above may be off by one, so the WER is not to be trusted for that
+   * run — reported rather than hidden.
+   */
+  readonly unmatchedTranscripts: ReadonlyArray<string>;
   /**
    * Scripted turns that the borrower spoke but that no agent segment ever answered (the script moved
    * on first). Reported so a short `turnLatencies` list can never be mistaken for a clean run.
@@ -207,6 +238,21 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
   let agentSpeakingAt = 0;
   const room = new Room();
   const turnLatencies: Array<TurnLatency> = [];
+  const werLines: Array<WerLine> = [];
+  const unmatchedTranscripts: string[] = [];
+  /**
+   * The line currently being spoken (or most recently spoken), collecting every borrower-final
+   * transcript that belongs to it.
+   *
+   * A list, not a single transcript, because the STT splits one utterance across several finals:
+   * measured live, "Actually, wait. I can pay 550 dollars on Friday." came back as "Actually,
+   * wait." followed by "I can pay $550 on Friday.". Taking only the first final scored the missing
+   * half as two deleted words and reported 0.222 for a transcription that was in fact perfect.
+   *
+   * Opened *before* the audio is played, since the first final can arrive while the borrower is
+   * still speaking, and closed when the next line opens.
+   */
+  let currentLine: { turn: string; reference: string; parts: string[] } | null = null;
   const unansweredTurns: Array<string> = [];
   /** Set when the borrower falls silent; cleared by the first delta of the next agent segment. */
   const awaiting: { reply: { turn: string; at: number; audioAt: number | null } | null } = { reply: null };
@@ -278,6 +324,15 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
           log(`agent said: ${JSON.stringify(text.slice(0, 90))}`);
         } else if (attrs["lk.transcription_final"] === "true") {
           log(`stt heard me: ${JSON.stringify(text)}`);
+          if (currentLine) {
+            currentLine.parts.push(text);
+          } else {
+            // No line open at all: only possible before the first line is spoken. Counted and
+            // printed rather than dropped, because an unnoticed mis-pairing would move WER without
+            // moving anything that looks wrong.
+            unmatchedTranscripts.push(text);
+            log(`stt wer: unmatched borrower transcript (no line open): ${JSON.stringify(text.slice(0, 60))}`);
+          }
         }
       })();
     });
@@ -300,9 +355,24 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
     await room.localParticipant!.publishTrack(track, publishOpts);
     log("mic published");
 
-    const speak = async (label: string, frames: ReadonlyArray<AudioFrame>) => {
+    /** Score the line that just finished; its transcripts are complete once the next line starts. */
+    const closeCurrentLine = () => {
+      if (!currentLine) return;
+      const { turn, reference, parts } = currentLine;
+      currentLine = null;
+      const hypothesis = parts.join(" ");
+      const r = wordErrorRate(reference, hypothesis);
+      werLines.push({ turn, reference, hypothesis, wer: r.wer, substitutions: r.substitutions, insertions: r.insertions, deletions: r.deletions });
+      log(`stt wer (${turn}): ${r.wer === null ? "n/a" : r.wer.toFixed(3)} (S${r.substitutions} I${r.insertions} D${r.deletions} / N${r.referenceWords}, ${parts.length} final(s))`);
+    };
+
+    const speak = async (label: string, line: ScriptedLine) => {
+      closeCurrentLine();
+      // Opened before playout: the STT can emit a final for the first phrase while the rest is
+      // still being spoken, and that phrase is part of this line, not a stray.
+      currentLine = { turn: label, reference: line.text, parts: [] };
       log(`speaking: ${label}`);
-      for (const f of frames) await source.captureFrame(f);
+      for (const f of line.frames) await source.captureFrame(f);
       await source.waitForPlayout();
       log(`finished: ${label}`);
       abandonPendingReply("before the next line"); // the script waited, timed out, and moved on
@@ -345,6 +415,7 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       const replied = await waitAgentSpeaking(SPEECH_START_TIMEOUT_MS);
       if (!replied) log("agent never replied; abandoning anyway");
       opts.abandonAfterFirstReply();
+      closeCurrentLine();
       return {
         label: opts.label,
         borrowerName: opts.borrowerName,
@@ -355,6 +426,8 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
         agentAudioFrames: audioFrames,
         durationMs: Date.now() - t0,
         turnLatencies: [...turnLatencies],
+        werLines: [...werLines],
+        unmatchedTranscripts: [...unmatchedTranscripts],
         unansweredTurns: [...unansweredTurns],
         error: null,
       };
@@ -407,6 +480,8 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
     while (!agentGone && Date.now() - waitStart < 40_000) await sleep(200);
     log(agentGone ? "agent hung up" : "agent did not hang up within 40s");
     abandonPendingReply("before the call ended");
+    // The last line's transcripts have had the whole hangup wait to arrive.
+    closeCurrentLine();
 
     return {
       label: opts.label,
@@ -418,6 +493,8 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       agentAudioFrames: audioFrames,
       durationMs: Date.now() - t0,
       turnLatencies: [...turnLatencies],
+      werLines: [...werLines],
+      unmatchedTranscripts: [...unmatchedTranscripts],
       unansweredTurns: [...unansweredTurns],
       error: null,
     };
@@ -432,6 +509,8 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       agentAudioFrames: audioFrames,
       durationMs: Date.now() - t0,
       turnLatencies: [...turnLatencies],
+      werLines: [...werLines],
+      unmatchedTranscripts: [...unmatchedTranscripts],
       unansweredTurns: [...unansweredTurns],
       error: String(e),
     };
