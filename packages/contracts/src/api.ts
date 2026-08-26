@@ -171,6 +171,9 @@ export const SignalRequest = Schema.Union(
     eou_delay_ms: Schema.optional(Schema.Number),
     transcription_delay_ms: Schema.optional(Schema.Number),
     tts_ttfb_ms: Schema.optional(Schema.Number),
+    /** Played audio duration and the characters synthesised for it (D5, TTS heuristics). */
+    tts_audio_ms: Schema.optional(Schema.Number),
+    tts_chars: Schema.optional(Schema.Number),
   }),
 );
 export type SignalRequest = typeof SignalRequest.Type;
@@ -277,6 +280,38 @@ export const ScoreSummary = Schema.Struct({
   pass_rate: Rate,
 });
 
+/**
+ * Speech-synthesis heuristics (spec 2026-08-26, D5). **These are not a quality score.** There is no
+ * MOS model in this system — UTMOS and NISQA are Python-only and were ruled out of scope — so what
+ * is reported is what the runtime can honestly know: whether any audio was produced, and whether a
+ * turn's speaking rate was far enough from the window's median to be worth a human ear. A turn
+ * flagged here may sound perfectly fine; a turn not flagged here may not.
+ */
+export const TtsHeuristicsReport = Schema.Struct({
+  /** Turns that had a voice runtime at all — the denominator. Simulated turns are not counted. */
+  turns: Schema.Number,
+  silent_playouts: Schema.Number,
+  /** Null when no turn tried to speak: "the voice worked every time" and "we never checked" differ. */
+  silent_playout_rate: Rate,
+  chars_per_second: Schema.Struct({
+    n: Schema.Number,
+    /** The baseline the outlier band is measured against — the window's own median, not a constant. */
+    median: Schema.NullOr(Schema.Number),
+    min: Schema.NullOr(Schema.Number),
+    max: Schema.NullOr(Schema.Number),
+  }),
+  /** Time to the voice's first audio frame over the same turns — the SLO gates on this p95. */
+  ttfb_ms: Schema.Struct({ n: Schema.Number, p50: Schema.NullOr(Schema.Number), p95: Schema.NullOr(Schema.Number) }),
+  /** Deviation from the median beyond which a turn is flagged, as a share (0.4 = ±40 %). */
+  outlier_band: Schema.Number,
+  /** Readings needed before any turn can be flagged; below this the median is not a baseline. */
+  baseline_readings: Schema.Number,
+  outlier_count: Schema.Number,
+  /** The worst few, most deviant first. `deviation` is signed: +1 is double the median rate. */
+  outliers: Schema.Array(Schema.Struct({ turn_id: Schema.String, chars_per_second: Schema.Number, deviation: Schema.Number })),
+});
+export type TtsHeuristicsReport = typeof TtsHeuristicsReport.Type;
+
 export const QualityReport = Schema.Struct({
   window: Schema.Struct({
     calls: Schema.NullOr(Schema.Number),
@@ -287,6 +322,8 @@ export const QualityReport = Schema.Struct({
   funnel: Funnel,
   promises: Schema.Array(PromiseRow),
   slo: SloReport,
+  /** Heuristics, not a quality score — see `TtsHeuristicsReport`. */
+  tts: TtsHeuristicsReport,
   /** Durable counts from the ledger, plus how long orphan detection actually took. */
   reliability: Schema.Struct({
     counts: Schema.Record({ key: Schema.String, value: Schema.Number }),
@@ -422,6 +459,17 @@ export const TurnLatencyRow = Schema.Struct({
   tts_ttfb_ms: Schema.NullOr(Schema.Number),
   /** Sum of whichever components are present — the height of the stacked bar. */
   total_ms: Schema.NullOr(Schema.Number),
+  /**
+   * The turn's speech shape (spec 2026-08-26, D5): how much audio was produced for how many
+   * characters, and the rate that implies. Not part of the waterfall — a reply's speed does not
+   * depend on how long the reply then took to say — but the same row is where a turn's synthesis is
+   * described, and a `tts_ttfb_ms` reading means nothing on a turn that produced no audio at all.
+   */
+  tts_audio_ms: Schema.NullOr(Schema.Number),
+  tts_chars: Schema.NullOr(Schema.Number),
+  tts_chars_per_second: Schema.NullOr(Schema.Number),
+  /** The synthesis produced no audio: the ADR 0008 failure, and why a rate may be missing. */
+  tts_silent: Schema.Boolean,
 });
 
 /**

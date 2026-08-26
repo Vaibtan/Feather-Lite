@@ -160,7 +160,7 @@ export default defineAgent({
       if (m["type"] === "eou_metrics") {
         agent.onEouMetrics({ eouDelayMs: num(m["endOfUtteranceDelayMs"]), transcriptionDelayMs: num(m["transcriptionDelayMs"]) });
       } else if (m["type"] === "tts_metrics") {
-        void agent.onTtsMetrics({ ttfbMs: num(m["ttfbMs"]) });
+        void agent.onTtsMetrics({ ttfbMs: num(m["ttfbMs"]), audioDurationMs: num(m["audioDurationMs"]), charactersCount: num(m["charactersCount"]) });
       }
     });
     session.on(voice.AgentSessionEventTypes.Error, (ev) => {

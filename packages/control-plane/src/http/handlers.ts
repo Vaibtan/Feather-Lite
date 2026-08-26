@@ -62,7 +62,7 @@ const toSignal = (s: SignalRequest): Signal => {
     case "voicemail_drop":
       return { kind: "voicemail_drop", confidence: s.confidence, actionId: s.action_id };
     case "turn_metrics":
-      return { kind: "turn_metrics", turnId: s.turn_id, eouDelayMs: s.eou_delay_ms, transcriptionDelayMs: s.transcription_delay_ms, ttsTtfbMs: s.tts_ttfb_ms };
+      return { kind: "turn_metrics", turnId: s.turn_id, eouDelayMs: s.eou_delay_ms, transcriptionDelayMs: s.transcription_delay_ms, ttsTtfbMs: s.tts_ttfb_ms, ttsAudioMs: s.tts_audio_ms, ttsChars: s.tts_chars };
   }
 };
 

@@ -234,5 +234,42 @@ describe("quality report", () => {
     expect(out.funnel.rates.contact).toBeNull();
     expect(out.judge_agreement.rate).toBeNull();
     expect(out.stt_wer.p50).toBeNull();
+    // A window of no calls has no speech to describe. Reporting a silent-playout rate of 0 there
+    // would read as "the voice worked on every turn", which is not what "we never checked" means.
+    expect(out.tts.turns).toBe(0);
+    expect(out.tts.silent_playout_rate).toBeNull();
+    expect(out.tts.chars_per_second.median).toBeNull();
+  });
+
+  it("flags a speaking rate far from the window's own median, without claiming the speech was bad", async () => {
+    // Spec D5. The band is measured against the window's median rather than a configured constant,
+    // so this asserts the whole path: turn rows in, median out, one turn flagged.
+    const out = await rt.runPromise(
+      withFrozenClock(NOW)(
+        Effect.gen(function* () {
+          const sql = yield* PgClient.PgClient;
+          const id = yield* promiseCall("Spoken At Speed");
+          // Three turns at ~15 chars/s and one at 60: a truncated synthesis or a stream that
+          // played out at speed. Applied to the turn rows directly — what is under test is the
+          // aggregation, and the worker's signal path is already covered in evaluationJob.test.ts.
+          yield* sql`UPDATE conversation_turns SET result = COALESCE(result, '{}'::jsonb) ||
+                       '{"tts_audio_ms": 4000, "tts_chars": 60}'::jsonb
+                     WHERE conversation_id = ${id}`;
+          yield* sql`UPDATE conversation_turns SET result = COALESCE(result, '{}'::jsonb) ||
+                       '{"tts_audio_ms": 1000, "tts_chars": 60}'::jsonb
+                     WHERE conversation_id = ${id} AND turn_id = 't3'`;
+          return yield* (yield* Quality).report({ calls: 50 });
+        }),
+      ),
+    );
+    expect(out.tts.turns).toBe(3);
+    expect(out.tts.chars_per_second.median).toBe(15);
+    expect(out.tts.outlier_count).toBe(1);
+    expect(out.tts.outliers[0]?.turn_id).toBe("t3");
+    expect(out.tts.outliers[0]?.chars_per_second).toBe(60);
+    expect(out.tts.outliers[0]?.deviation).toBe(3);
+    // Every turn produced audio, so nothing is silent — and the rate is 0 rather than null,
+    // because here there genuinely was speech to check.
+    expect(out.tts.silent_playout_rate).toBe(0);
   });
 });

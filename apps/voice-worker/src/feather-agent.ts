@@ -122,7 +122,7 @@ export class FeatherAgent extends voice.Agent {
    * `tts_metrics` from the session: the last piece of the turn's waterfall. Reporting here means one
    * signal per turn carrying all three worker-side numbers, rather than a channel per metric.
    */
-  async onTtsMetrics(m: { ttfbMs?: number | undefined }): Promise<void> {
+  async onTtsMetrics(m: { ttfbMs?: number | undefined; audioDurationMs?: number | undefined; charactersCount?: number | undefined }): Promise<void> {
     const turnId = this.currentTurnId;
     if (!turnId) return; // the opening and other say()s are not control-plane turns
     this.ttsProducedAudio.add(turnId);
@@ -135,6 +135,11 @@ export class FeatherAgent extends voice.Agent {
         ...(eou?.eouDelayMs !== undefined ? { eou_delay_ms: eou.eouDelayMs } : {}),
         ...(eou?.transcriptionDelayMs !== undefined ? { transcription_delay_ms: eou.transcriptionDelayMs } : {}),
         ...(m.ttfbMs !== undefined ? { tts_ttfb_ms: m.ttfbMs } : {}),
+        // D5: how much audio was produced for how many characters. Together these give a
+        // chars-per-second reading, which is a *heuristic* for "did the voice sound broken" — a
+        // wildly slow or fast turn shows up as an outlier — and deliberately not a quality claim.
+        ...(m.audioDurationMs !== undefined ? { tts_audio_ms: m.audioDurationMs } : {}),
+        ...(m.charactersCount !== undefined ? { tts_chars: m.charactersCount } : {}),
       })
       .catch((e) => this.deps.log("turn_metrics signal failed", { error: String(e) }));
   }

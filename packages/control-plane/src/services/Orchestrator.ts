@@ -102,6 +102,8 @@ export type Signal =
       readonly eouDelayMs?: number | undefined;
       readonly transcriptionDelayMs?: number | undefined;
       readonly ttsTtfbMs?: number | undefined;
+      readonly ttsAudioMs?: number | undefined;
+      readonly ttsChars?: number | undefined;
     };
 
 export type Emit = (frame: TurnFrame) => Effect.Effect<void>;
@@ -844,7 +846,13 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
               transcription_delay_ms: signal.transcriptionDelayMs ?? null,
               tts_ttfb_ms: signal.ttsTtfbMs ?? null,
             };
-            yield* conv.mergeTurnResult({ conversationId: row.id, turnId: signal.turnId, patch: latency });
+            // TTS shape lands in the same row but is not part of the latency waterfall: it is the
+            // input to the chars-per-second heuristic (D5), not a component of reply time.
+            const ttsShape = {
+              ...(signal.ttsAudioMs !== undefined ? { tts_audio_ms: signal.ttsAudioMs } : {}),
+              ...(signal.ttsChars !== undefined ? { tts_chars: signal.ttsChars } : {}),
+            };
+            yield* conv.mergeTurnResult({ conversationId: row.id, turnId: signal.turnId, patch: { ...latency, ...ttsShape } });
             yield* tracing.turnLatency(row.id, signal.turnId, {
               eouDelayMs: latency.eou_delay_ms,
               transcriptionDelayMs: latency.transcription_delay_ms,

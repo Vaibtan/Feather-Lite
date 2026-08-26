@@ -5,8 +5,8 @@
 import { DateTime, Effect, Option } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import type { LatencyAggregate, TurnLatencyRow } from "@feather-lite/contracts";
-import type { EventRecord, ReplaySnapshot, TimelineEntry, TranscriptEntry } from "@feather-lite/domain";
-import { buildTimeline, buildTranscript, isWithinContactWindow, replay } from "@feather-lite/domain";
+import type { EventRecord, ReplaySnapshot, TimelineEntry, TranscriptEntry, TurnTtsReading } from "@feather-lite/domain";
+import { buildTimeline, buildTranscript, charsPerSecond, isWithinContactWindow, replay } from "@feather-lite/domain";
 import { NotFound } from "../errors.js";
 import { ConversationRepo } from "../repos/conversation.js";
 import { CrmRepo } from "../repos/crm.js";
@@ -165,18 +165,33 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
           transcriptionDelayMs: number | null;
           ttftMs: number | null;
           ttsTtfbMs: number | null;
+          ttsAudioMs: number | null;
+          ttsChars: number | null;
+          ttsSilent: boolean;
         }>`
-          SELECT turn_id,
-                 started_at,
-                 status,
-                 result->>'newState'                             AS state,
-                 (result->>'eou_delay_ms')::float8               AS eou_delay_ms,
-                 (result->>'transcription_delay_ms')::float8     AS transcription_delay_ms,
-                 (result->>'ttftMs')::float8                     AS ttft_ms,
-                 (result->>'tts_ttfb_ms')::float8                AS tts_ttfb_ms
-          FROM conversation_turns
-          WHERE conversation_id = ${conversationId}
-          ORDER BY started_at ASC`.pipe(Effect.orDie);
+          SELECT t.turn_id,
+                 t.started_at,
+                 t.status,
+                 t.result->>'newState'                             AS state,
+                 (t.result->>'eou_delay_ms')::float8               AS eou_delay_ms,
+                 (t.result->>'transcription_delay_ms')::float8     AS transcription_delay_ms,
+                 (t.result->>'ttftMs')::float8                     AS ttft_ms,
+                 (t.result->>'tts_ttfb_ms')::float8                AS tts_ttfb_ms,
+                 (t.result->>'tts_audio_ms')::float8               AS tts_audio_ms,
+                 (t.result->>'tts_chars')::float8                  AS tts_chars,
+                 -- The SQL twin of the domain's isSilentPlayout: nothing heard *and* cut short, which is
+                 -- how the worker reports a zero-audio turn (ADR 0008). Change one, change both.
+                 EXISTS (
+                   SELECT 1 FROM conversation_events e
+                   WHERE e.conversation_id = t.conversation_id
+                     AND e.type = 'AGENT_TURN_PLAYOUT'
+                     AND e.payload->>'turn_id' = t.turn_id
+                     AND e.payload->>'interrupted' = 'true'
+                     AND e.payload->>'heard_text' = ''
+                 )                                                 AS tts_silent
+          FROM conversation_turns t
+          WHERE t.conversation_id = ${conversationId}
+          ORDER BY t.started_at ASC`.pipe(Effect.orDie);
         // `::float8` can still surface as a string depending on the driver's type parsing, so each
         // component is coerced once here rather than trusted.
         //
@@ -186,12 +201,20 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
         // makes every percentile meaningless. Five minutes is not a turn component either way.
         const MAX_PLAUSIBLE_MS = 300_000;
         let dropped = 0;
+        /** A latency component: absent stays absent, anything impossible is dropped and counted. */
         const num = (v: unknown): number | null => {
           if (v === null || v === undefined) return null;
-          const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
-          if (Number.isFinite(n) && n >= 0 && n <= MAX_PLAUSIBLE_MS) return n;
+          const n = coerce(v);
+          if (n !== null && n >= 0 && n <= MAX_PLAUSIBLE_MS) return n;
           dropped += 1;
           return null;
+        };
+        // Counts and played durations are not latency components: they are not summed into
+        // `total_ms`, and a long read-back or a big character count is not an implausible *latency*
+        // to be reported as dropped data. Same coercion, no range guard, no drop count.
+        const plain = (v: unknown): number | null => {
+          const n = coerce(v);
+          return n !== null && n >= 0 ? n : null;
         };
         const mapped = rows.map((r) => {
           const eou = num(r.eouDelayMs);
@@ -199,6 +222,8 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
           const ttft = num(r.ttftMs);
           const tts = num(r.ttsTtfbMs);
           const parts = [eou, stt, ttft, tts].filter((v): v is number => v !== null);
+          const audioMs = plain(r.ttsAudioMs);
+          const chars = plain(r.ttsChars);
           return {
             turn_id: r.turnId,
             started_at: r.startedAt.toISOString(),
@@ -209,6 +234,12 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
             ttft_ms: ttft,
             tts_ttfb_ms: tts,
             total_ms: parts.length > 0 ? Math.round(parts.reduce((a, b) => a + b, 0)) : null,
+            tts_audio_ms: audioMs,
+            tts_chars: chars,
+            // One definition of the rate, in the domain, so the console's per-turn figure and the
+            // fleet's median cannot be computed two different ways.
+            tts_chars_per_second: charsPerSecond({ turnId: r.turnId, audioMs, chars, silent: r.ttsSilent }),
+            tts_silent: r.ttsSilent === true,
           };
         });
         return { rows: mapped, dropped };
@@ -224,36 +255,20 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
      * an SLO computed over a different window than the funnel beside it is a number that cannot be
      * reconciled with anything on the page.
      */
-    const latencyAggregateFor = (conversationIds: ReadonlyArray<string>): Effect.Effect<LatencyAggregate, never, PgClient.PgClient> =>
+    const turnRowsFor = (conversationIds: ReadonlyArray<string>): Effect.Effect<{ rows: ReadonlyArray<TurnLatencyRow>; dropped: number }, never, PgClient.PgClient> =>
       Effect.gen(function* () {
-        const ids = conversationIds.map((id) => ({ id }));
         const all: TurnLatencyRow[] = [];
         let dropped = 0;
-        for (const { id } of ids) {
+        for (const id of conversationIds) {
           const r = yield* turnLatenciesWithDropped(id);
           all.push(...r.rows);
           dropped += r.dropped;
         }
-        const pct = (values: ReadonlyArray<number | null>) => {
-          const xs = values.filter((v): v is number => v !== null).sort((a, b) => a - b);
-          const at = (p: number) => (xs.length === 0 ? null : Math.round(xs[Math.min(xs.length - 1, Math.floor((p / 100) * xs.length))] ?? 0));
-          return { n: xs.length, p50: at(50), p95: at(95) };
-        };
-        // The total is taken only over turns that have all four components. A simulated turn
-        // records the decide TTFT alone, and letting those into the total would report a p50 of
-        // ~20ms for something that means "how long a reply takes end to end".
-        const complete = all.filter((t) => t.eou_delay_ms !== null && t.transcription_delay_ms !== null && t.ttft_ms !== null && t.tts_ttfb_ms !== null);
-        return {
-          conversations: ids.length,
-          turns: all.length,
-          implausible_dropped: dropped,
-          eou_delay_ms: pct(all.map((t) => t.eou_delay_ms)),
-          transcription_delay_ms: pct(all.map((t) => t.transcription_delay_ms)),
-          ttft_ms: pct(all.map((t) => t.ttft_ms)),
-          tts_ttfb_ms: pct(all.map((t) => t.tts_ttfb_ms)),
-          total_ms: pct(complete.map((t) => t.total_ms)),
-        };
+        return { rows: all, dropped };
       });
+
+    const latencyAggregateFor = (conversationIds: ReadonlyArray<string>): Effect.Effect<LatencyAggregate, never, PgClient.PgClient> =>
+      turnRowsFor(conversationIds).pipe(Effect.map(({ rows, dropped }) => aggregateTurnRows(conversationIds.length, rows, dropped)));
 
     /** The same components across the most recent N conversations, as p50/p95. */
     const latencyAggregate = (calls: number): Effect.Effect<LatencyAggregate, never, PgClient.PgClient> =>
@@ -266,7 +281,56 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
     const scheduledActionsFor = (workflowExecutionId: string) => sched.listForWorkflow(workflowExecutionId);
     const outboxJobsFor = (conversationId: string) => sched.listJobsForConversation(conversationId);
 
-    return { listConversations, conversationDetail, borrowerDirectory, heartbeats, ledgerCounts, turnLatencies, latencyAggregate, latencyAggregateFor, scheduledActionsFor, outboxJobsFor } as const;
+    return {
+      listConversations,
+      conversationDetail,
+      borrowerDirectory,
+      heartbeats,
+      ledgerCounts,
+      turnLatencies,
+      turnRowsFor,
+      latencyAggregate,
+      latencyAggregateFor,
+      scheduledActionsFor,
+      outboxJobsFor,
+    } as const;
   }),
   dependencies: [ConversationRepo.Default, CrmRepo.Default, SchedulingRepo.Default],
 }) {}
+
+/** `::float8` can surface as a string depending on the driver's type parsing; coerce once. */
+const coerce = (v: unknown): number | null => {
+  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : null;
+};
+
+/**
+ * Percentiles per waterfall component over a set of turn rows. Separated from the query so the
+ * Quality report can read the window's rows once and derive both this and the TTS heuristics from
+ * them, rather than asking the database for the same turns twice.
+ */
+export const aggregateTurnRows = (conversations: number, all: ReadonlyArray<TurnLatencyRow>, dropped: number): LatencyAggregate => {
+  const pct = (values: ReadonlyArray<number | null>) => {
+    const xs = values.filter((v): v is number => v !== null).sort((a, b) => a - b);
+    const at = (p: number) => (xs.length === 0 ? null : Math.round(xs[Math.min(xs.length - 1, Math.floor((p / 100) * xs.length))] ?? 0));
+    return { n: xs.length, p50: at(50), p95: at(95) };
+  };
+  // The total is taken only over turns that have all four components. A simulated turn records the
+  // decide TTFT alone, and letting those into the total would report a p50 of ~20ms for something
+  // that means "how long a reply takes end to end".
+  const complete = all.filter((t) => t.eou_delay_ms !== null && t.transcription_delay_ms !== null && t.ttft_ms !== null && t.tts_ttfb_ms !== null);
+  return {
+    conversations,
+    turns: all.length,
+    implausible_dropped: dropped,
+    eou_delay_ms: pct(all.map((t) => t.eou_delay_ms)),
+    transcription_delay_ms: pct(all.map((t) => t.transcription_delay_ms)),
+    ttft_ms: pct(all.map((t) => t.ttft_ms)),
+    tts_ttfb_ms: pct(all.map((t) => t.tts_ttfb_ms)),
+    total_ms: pct(complete.map((t) => t.total_ms)),
+  };
+};
+
+/** The TTS readings of a window's turns, in the shape the domain heuristics take. */
+export const ttsReadingsOf = (rows: ReadonlyArray<TurnLatencyRow>): ReadonlyArray<TurnTtsReading> =>
+  rows.map((r) => ({ turnId: r.turn_id, audioMs: r.tts_audio_ms, chars: r.tts_chars, silent: r.tts_silent, ttfbMs: r.tts_ttfb_ms }));

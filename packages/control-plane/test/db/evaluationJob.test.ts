@@ -123,6 +123,46 @@ describe("EVALUATION outbox job", () => {
     expect(out.afterSecond).toHaveLength(out.afterFirst.length);
   });
 
+  it("scores the speech shape the voice worker reported, per turn, beside the ledger's facts", async () => {
+    // Spec D5. The path under test is the real one end to end: the worker's `turn_metrics` signal
+    // carries the TTS shape, the orchestrator merges it into the turn row, and the EVALUATION job
+    // reads it back — none of which the pure `ttsScores` tests can prove.
+    const out = await rt.runPromise(
+      withFrozenClock(NOW)(Effect.gen(function* () {
+        const { borrowerId, cpId } = yield* seedBorrower("Spoken To", "+15550003003");
+        const wf = yield* WorkflowService;
+        const orch = yield* Orchestrator;
+        const outbox = yield* OutboxService;
+        const scores = yield* Scores;
+        const now = NOW;
+        const started = yield* wf.startCall({ borrowerId, contactPointId: cpId, channel: "voice", now });
+        yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t1", userText: "yes this is jordan" }, () => Effect.void);
+        yield* orch.processSignal(started.conversationId, { kind: "turn_metrics", turnId: "t1", ttsTtfbMs: 420, ttsAudioMs: 4000, ttsChars: 60 });
+        // A second turn whose synthesis produced nothing: the ADR 0008 failure, reported by the
+        // worker as a playout that heard nothing and was cut short.
+        yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t2", userText: "please stop calling me" }, () => Effect.void);
+        yield* orch.processSignal(started.conversationId, { kind: "playout", turnId: "t2", heardText: "", interrupted: true });
+        yield* orch.processSignal(started.conversationId, { kind: "turn_metrics", turnId: "t2", ttsTtfbMs: 390, ttsAudioMs: 0, ttsChars: 45 });
+        yield* outbox.runOnce(20, now);
+        return yield* scores.listForConversation(started.conversationId);
+      })),
+    );
+
+    // Sorted by turn then name: the read path chooses its own order, and which one it picks is not
+    // what this test is about.
+    const tts = out.filter((r) => r.name.startsWith("tts.")).sort((a, b) => `${a.turnId}${a.name}`.localeCompare(`${b.turnId}${b.name}`));
+    expect(tts.every((r) => r.source === "SYSTEM")).toBe(true);
+    expect(tts.map((r) => [r.name, r.turnId, r.value])).toEqual([
+      // 60 characters over 4 s of audio.
+      ["tts.chars_per_second", "t1", 15],
+      ["tts.silent_playout", "t1", 0],
+      // No rate for turn 2: it never played, which is what its silent_playout already says.
+      ["tts.silent_playout", "t2", 1],
+    ]);
+    // The evaluator's own scores are unaffected and still call-level.
+    expect(out.filter((r) => r.source === "EVALUATOR").every((r) => r.turnId === null)).toBe(true);
+  });
+
   it("flags a call whose first line skipped the Mini-Miranda", async () => {
     const out = await rt.runPromise(
       withFrozenClock(NOW)(Effect.gen(function* () {

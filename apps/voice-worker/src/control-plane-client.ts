@@ -25,7 +25,7 @@ export type SignalBody =
   | { kind: "playout"; turn_id: string; heard_text: string; interrupted: boolean }
   | { kind: "opening_played"; text: string }
   | { kind: "voicemail_drop"; confidence?: number; action_id?: string }
-  | { kind: "turn_metrics"; turn_id: string; eou_delay_ms?: number; transcription_delay_ms?: number; tts_ttfb_ms?: number };
+  | { kind: "turn_metrics"; turn_id: string; eou_delay_ms?: number; transcription_delay_ms?: number; tts_ttfb_ms?: number; tts_audio_ms?: number; tts_chars?: number };
 
 export interface ProviderEventBody {
   readonly provider: string;

@@ -15,11 +15,11 @@
  */
 import { DateTime, Effect, Option } from "effect";
 import { PgClient } from "@effect/sql-pg";
-import type { LatencyAggregate, QualityReport, SloReport } from "@feather-lite/contracts";
-import { localIsoDate, ORPHANED_REASON, SCORE_DATA_TYPE_BY_NAME, type ScoreName, type ScoreSource } from "@feather-lite/domain";
+import type { LatencyAggregate, QualityReport, SloReport, TtsHeuristicsReport } from "@feather-lite/contracts";
+import { localIsoDate, ORPHANED_REASON, SCORE_DATA_TYPE_BY_NAME, ttsAggregate, type ScoreName, type ScoreSource, type TtsHeuristics } from "@feather-lite/domain";
 import { AppConfig } from "../config.js";
 import { Metrics } from "./Metrics.js";
-import { Queries } from "./Queries.js";
+import { aggregateTurnRows, Queries, ttsReadingsOf } from "./Queries.js";
 
 export interface QualityWindow {
   /** Most recent N conversations. Ignored when `from`/`to` are given. */
@@ -58,6 +58,27 @@ const EMPTY_FUNNEL = {
   rates: { contact: null, right_party: null, promise: null, voicemail: null },
 };
 const EMPTY_AGREEMENT = { judged: 0, human_labelled: 0, both: 0, agreed: 0, rate: null };
+
+/**
+ * The domain's TTS heuristics in the API's shape. Only the worst few outliers travel: the point of
+ * the flag is "listen to this turn", and a list of forty is not something anyone listens to.
+ */
+const TTS_OUTLIERS_SHOWN = 5;
+const ttsReport = (h: TtsHeuristics): TtsHeuristicsReport => ({
+  turns: h.turns,
+  silent_playouts: h.silentPlayouts,
+  silent_playout_rate: h.silentPlayoutRate === null ? null : Math.round(h.silentPlayoutRate * 1000) / 1000,
+  chars_per_second: h.charsPerSecond,
+  ttfb_ms: h.ttfbMs,
+  outlier_band: h.outlierBand,
+  baseline_readings: h.baselineReadings,
+  outlier_count: h.outliers.length,
+  outliers: h.outliers.slice(0, TTS_OUTLIERS_SHOWN).map((o) => ({
+    turn_id: o.turnId,
+    chars_per_second: o.charsPerSecond,
+    deviation: Math.round(o.deviation * 1000) / 1000,
+  })),
+});
 
 export class Quality extends Effect.Service<Quality>()("@feather-lite/Quality", {
   effect: Effect.gen(function* () {
@@ -275,12 +296,16 @@ export class Quality extends Effect.Service<Quality>()("@feather-lite/Quality", 
         const empty = w.ids.length === 0;
         const ledger = yield* queries.ledgerCounts().pipe(Effect.orDie);
         const providerEvents = yield* metrics.providerEvents();
+        // The window's turns, read once. The SLO and the TTS heuristics are two readings of the
+        // same rows, and fetching them twice would double the query count for no new information.
+        const turns = yield* queries.turnRowsFor(w.ids).pipe(Effect.orDie);
 
         return {
           window: { calls: w.ranged ? null : w.limit, from: w.from, to: w.to, conversations: w.ids.length },
           funnel: empty ? EMPTY_FUNNEL : yield* funnel(w.ids),
           promises: empty ? [] : yield* promises(w.ids),
-          slo: sloFrom(yield* queries.latencyAggregateFor(w.ids).pipe(Effect.orDie)),
+          slo: sloFrom(aggregateTurnRows(w.ids.length, turns.rows, turns.dropped)),
+          tts: ttsReport(ttsAggregate(ttsReadingsOf(turns.rows))),
           reliability: {
             counts: ledger.reliability,
             orphan_detect_ms: percentiles(empty ? [] : yield* numericScores(w.ids, "system.orphan_detect_ms"), 0),

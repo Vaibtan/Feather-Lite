@@ -17,6 +17,8 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
 import { initializeLogger } from "@livekit/agents";
+import type { TurnLatencyRow } from "@feather-lite/contracts";
+import { ttsAggregate } from "@feather-lite/domain";
 import { checkEquivalence, loadScenarioReference, type EquivalenceResult } from "./equivalence.js";
 import { buildHarnessScores, postHarnessScores, summariseWer } from "./harness-scores.js";
 import { loadScriptedLines, runScriptedCall, type ScriptedCallResult } from "./scripted-call.js";
@@ -125,6 +127,28 @@ const unmatched = results.reduce((n, r) => n + r.unmatchedTranscripts.length, 0)
 const werP95 = werPct(95);
 const werBreached = werP95 !== null && werP95 > MAX_WER;
 
+/**
+ * TTS heuristics over the fleet (D5). Read from the ledger's turn rows rather than measured here:
+ * the worker is what knows how much audio it produced for how many characters, and it already
+ * reports both on the `turn_metrics` signal. The harness only knows that *some* audio arrived.
+ *
+ * Scoped to this run's own conversations, not "the last N calls" — the fleet runs a reference
+ * simulation scenario of its own before starting, and a window that swept that in would be
+ * describing a different set of calls than every other number in this report.
+ */
+const turnRows: TurnLatencyRow[] = [];
+for (const { call } of equivalences) {
+  if (!call.conversationId) continue;
+  try {
+    const res = await fetch(`${CONTROL_PLANE_URL}/api/conversations/${call.conversationId}/latency`, { headers: authHeaders() });
+    if (res.ok) turnRows.push(...((await res.json()) as TurnLatencyRow[]));
+    else log(`latency fetch for ${call.label} failed: ${res.status}`);
+  } catch (e) {
+    log(`latency fetch for ${call.label} failed: ${String(e)}`);
+  }
+}
+const tts = ttsAggregate(turnRows.map((r) => ({ turnId: r.turn_id, audioMs: r.tts_audio_ms, chars: r.tts_chars, silent: r.tts_silent, ttfbMs: r.tts_ttfb_ms })));
+
 console.log("");
 console.log(`  calls                 ${CALLS}`);
 console.log(`  agent hung up         ${hungUp}/${CALLS}`);
@@ -138,6 +162,17 @@ if (worstLine && worstLine.wer > 0) {
   console.log(`  stt wer  worst line   ${worstLine.wer.toFixed(3)} (${worstLine.turn})`);
   console.log(`      ref: ${JSON.stringify(worstLine.reference)}`);
   console.log(`      stt: ${JSON.stringify(worstLine.hypothesis)}`);
+}
+// Labelled "heuristic" on the line itself, not only in the docs: this is an outlier flag, not a
+// measure of how the speech sounded, and the console is the wrong place to learn that distinction.
+console.log(`  tts silent playouts   ${tts.silentPlayouts}/${tts.turns}${tts.silentPlayoutRate === null ? "" : `  (${(tts.silentPlayoutRate * 100).toFixed(1)}%)`}`);
+console.log(`  tts ttfb p50/p95      ${tts.ttfbMs.p50 ?? "n/a"}ms / ${tts.ttfbMs.p95 ?? "n/a"}ms   over ${tts.ttfbMs.n} turn(s)`);
+console.log(
+  `  tts chars/s (heur.)   median ${tts.charsPerSecond.median === null ? "n/a" : tts.charsPerSecond.median.toFixed(1)}` +
+    ` over ${tts.charsPerSecond.n} turn(s), ${tts.outliers.length} beyond ±${(tts.outlierBand * 100).toFixed(0)}%`,
+);
+for (const o of tts.outliers.slice(0, 3)) {
+  console.log(`      outlier ${o.turnId} ${o.charsPerSecond.toFixed(1)} chars/s (${o.deviation > 0 ? "+" : ""}${(o.deviation * 100).toFixed(0)}%)`);
 }
 console.log("");
 for (const { call, eq, eqError } of equivalences) {
@@ -158,6 +193,21 @@ const report = {
   duration_ms: { p50: pct(50), p95: pct(95), max: durations.at(-1) ?? 0 },
   turn_latency_ms: { n: turnMs.length, unanswered, p50: turnPct(50), p95: turnPct(95), max: turnMs.at(-1) ?? 0 },
   stt_wer: { n: werValues.length, unmatched_transcripts: unmatched, p50: werPct(50), p95: werP95, max: werValues.at(-1) ?? null, gate: MAX_WER, breached: werBreached, worst_line: worstLine },
+  /**
+   * Heuristics, not a quality score, and not gated: a chars-per-second outlier is a turn worth
+   * listening to, not a failure. Silent playouts are a real defect but already fail the run through
+   * equivalence — a read-back nobody heard cannot record a promise (ADR 0008).
+   */
+  tts_heuristics: {
+    turns: tts.turns,
+    silent_playouts: tts.silentPlayouts,
+    silent_playout_rate: tts.silentPlayoutRate,
+    chars_per_second: tts.charsPerSecond,
+    ttfb_ms: tts.ttfbMs,
+    outlier_band: tts.outlierBand,
+    baseline_readings: tts.baselineReadings,
+    outliers: tts.outliers,
+  },
   reference: { scenario_id: reference.scenarioId, state_path: reference.statePath, tools: reference.tools, final_outcome: reference.finalOutcome },
   results: equivalences.map(({ call, eq, eqError }) => ({
     label: call.label,

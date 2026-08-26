@@ -364,6 +364,24 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
           WHERE conversation_id = ${params.conversationId} AND turn_id = ${params.turnId}`.pipe(Effect.asVoid);
 
     /**
+     * The TTS shape the voice worker reported per turn (D5). Read back post-call by the EVALUATION
+     * job, which otherwise only sees events — these numbers arrive on the `turn_metrics` signal and
+     * live in the turn row, not in the ledger, because they are telemetry rather than something
+     * that happened on the call.
+     */
+    const turnTtsFacts = SqlSchema.findAll({
+      Request: Schema.String,
+      Result: Schema.Struct({ turnId: Schema.String, ttsAudioMs: Schema.NullOr(Schema.Number), ttsChars: Schema.NullOr(Schema.Number) }),
+      execute: (conversationId) => sql`
+        SELECT turn_id,
+               (result->>'tts_audio_ms')::float8 AS tts_audio_ms,
+               (result->>'tts_chars')::float8    AS tts_chars
+        FROM conversation_turns
+        WHERE conversation_id = ${conversationId} AND result IS NOT NULL
+        ORDER BY started_at ASC`,
+    });
+
+    /**
      * Merge extra keys into a finished turn's `result` without disturbing what is already there.
      * Used for the voice worker's latency numbers, which arrive after the turn has been written.
      * `||` is jsonb concatenation, so this is a single statement and needs no read-modify-write.
@@ -374,6 +392,7 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
 
     return {
       mergeTurnResult,
+      turnTtsFacts,
       findOpenWorkflow,
       findWorkflow,
       lockWorkflow,

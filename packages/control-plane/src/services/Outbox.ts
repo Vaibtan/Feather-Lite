@@ -5,7 +5,7 @@
 import { DateTime, Effect, Option } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import type { OutboxJobType } from "@feather-lite/domain";
-import { buildTranscript, evaluateCall, evaluationScores, replay } from "@feather-lite/domain";
+import { buildTranscript, evaluateCall, evaluationScores, isSilentPlayout, replay, ttsScores } from "@feather-lite/domain";
 import type { OutboxJobRow } from "../db/rows.js";
 import { ConversationRepo } from "../repos/conversation.js";
 import { SchedulingRepo } from "../repos/scheduling.js";
@@ -88,7 +88,17 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
               // job result keeps its long-standing `issues` / `compliance_ok` shape so the console's
               // outbox panel and anything reading old rows are unaffected.
               const evaluation = evaluateCall(events);
-              const written = yield* scores.recordMany(evaluationScores(job.conversationId, evaluation));
+              // TTS facts live in the turn rows rather than the ledger, so they are read back here
+              // and scored alongside the ledger-derived ones — one job, one set of post-call scores.
+              const ttsRows = yield* conv.turnTtsFacts(job.conversationId);
+              const silentTurns = new Set(events.filter(isSilentPlayout).map((e) => e.payload.turn_id));
+              const written = yield* scores.recordMany([
+                ...evaluationScores(job.conversationId, evaluation),
+                ...ttsScores(
+                  job.conversationId,
+                  ttsRows.map((r) => ({ turnId: r.turnId, audioMs: r.ttsAudioMs, chars: r.ttsChars, silent: silentTurns.has(r.turnId) })),
+                ),
+              ]);
               result = {
                 issues: evaluation.issues,
                 compliance_ok: evaluation.complianceOk,
