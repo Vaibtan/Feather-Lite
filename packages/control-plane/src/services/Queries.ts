@@ -216,12 +216,17 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
 
     const turnLatencies = (conversationId: string) => turnLatenciesWithDropped(conversationId).pipe(Effect.map((r) => r.rows as ReadonlyArray<TurnLatencyRow>));
 
-    /** The same components across the most recent N conversations, as p50/p95. */
-    const latencyAggregate = (calls: number): Effect.Effect<LatencyAggregate, never, PgClient.PgClient> =>
+    /**
+     * The same components across an explicit set of conversations.
+     *
+     * Taking the ids rather than a count is what lets the Quality report measure the SLO over
+     * *its own* window: a `from`/`to` range and "the most recent N" are different sets of calls, and
+     * an SLO computed over a different window than the funnel beside it is a number that cannot be
+     * reconciled with anything on the page.
+     */
+    const latencyAggregateFor = (conversationIds: ReadonlyArray<string>): Effect.Effect<LatencyAggregate, never, PgClient.PgClient> =>
       Effect.gen(function* () {
-        const sql = yield* PgClient.PgClient;
-        const ids = yield* sql<{ id: string }>`
-          SELECT id FROM conversations ORDER BY started_at DESC LIMIT ${calls}`.pipe(Effect.orDie);
+        const ids = conversationIds.map((id) => ({ id }));
         const all: TurnLatencyRow[] = [];
         let dropped = 0;
         for (const { id } of ids) {
@@ -250,10 +255,18 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
         };
       });
 
+    /** The same components across the most recent N conversations, as p50/p95. */
+    const latencyAggregate = (calls: number): Effect.Effect<LatencyAggregate, never, PgClient.PgClient> =>
+      Effect.gen(function* () {
+        const sql = yield* PgClient.PgClient;
+        const ids = yield* sql<{ id: string }>`SELECT id FROM conversations ORDER BY started_at DESC, id DESC LIMIT ${calls}`.pipe(Effect.orDie);
+        return yield* latencyAggregateFor(ids.map((r) => r.id));
+      });
+
     const scheduledActionsFor = (workflowExecutionId: string) => sched.listForWorkflow(workflowExecutionId);
     const outboxJobsFor = (conversationId: string) => sched.listJobsForConversation(conversationId);
 
-    return { listConversations, conversationDetail, borrowerDirectory, heartbeats, ledgerCounts, turnLatencies, latencyAggregate, scheduledActionsFor, outboxJobsFor } as const;
+    return { listConversations, conversationDetail, borrowerDirectory, heartbeats, ledgerCounts, turnLatencies, latencyAggregate, latencyAggregateFor, scheduledActionsFor, outboxJobsFor } as const;
   }),
   dependencies: [ConversationRepo.Default, CrmRepo.Default, SchedulingRepo.Default],
 }) {}

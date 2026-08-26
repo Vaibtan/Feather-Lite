@@ -42,6 +42,19 @@ export interface AppConfigShape {
   readonly orphanMissedHeartbeats: number;
   readonly orphanHeartbeatIntervalMs: number;
   readonly orphanUnconfirmedMs: number;
+  /**
+   * Latency SLO targets (spec 2026-08-26, D6). These are what this stack actually achieves plus
+   * headroom, not the 800 ms-1.5 s "natural conversation" band vendor literature quotes: the
+   * measured local p50 is 1.5-2.1 s, and a target the system has never met is decoration.
+   * The per-stage targets exist so a regression names its own cause instead of moving one number.
+   */
+  readonly slo: {
+    readonly turnP95Ms: number;
+    readonly eouP95Ms: number;
+    readonly transcriptionP95Ms: number;
+    readonly ttftP95Ms: number;
+    readonly ttsTtfbP95Ms: number;
+  };
 }
 
 export class AppConfig extends Context.Tag("@feather-lite/AppConfig")<AppConfig, AppConfigShape>() {}
@@ -94,6 +107,11 @@ export const appConfig: Config.Config<AppConfigShape> = Config.all({
   orphanMissedHeartbeats: Config.integer("ORPHAN_MISSED_HEARTBEATS").pipe(Config.withDefault(3)),
   orphanHeartbeatIntervalMs: Config.integer("ORPHAN_HEARTBEAT_INTERVAL_MS").pipe(Config.withDefault(10_000)),
   orphanUnconfirmedMs: Config.integer("ORPHAN_UNCONFIRMED_MS").pipe(Config.withDefault(300_000)),
+  sloTurnP95Ms: Config.integer("SLO_TURN_P95_MS").pipe(Config.withDefault(2500)),
+  sloEouP95Ms: Config.integer("SLO_EOU_P95_MS").pipe(Config.withDefault(700)),
+  sloTranscriptionP95Ms: Config.integer("SLO_TRANSCRIPTION_P95_MS").pipe(Config.withDefault(600)),
+  sloTtftP95Ms: Config.integer("SLO_TTFT_P95_MS").pipe(Config.withDefault(1500)),
+  sloTtsTtfbP95Ms: Config.integer("SLO_TTS_TTFB_P95_MS").pipe(Config.withDefault(600)),
 }).pipe(
   Config.map((c): AppConfigShape => {
     const models = { ...DEFAULT_MODELS };
@@ -127,6 +145,13 @@ export const appConfig: Config.Config<AppConfigShape> = Config.all({
       orphanMissedHeartbeats: c.orphanMissedHeartbeats,
       orphanHeartbeatIntervalMs: c.orphanHeartbeatIntervalMs,
       orphanUnconfirmedMs: c.orphanUnconfirmedMs,
+      slo: {
+        turnP95Ms: c.sloTurnP95Ms,
+        eouP95Ms: c.sloEouP95Ms,
+        transcriptionP95Ms: c.sloTranscriptionP95Ms,
+        ttftP95Ms: c.sloTtftP95Ms,
+        ttsTtfbP95Ms: c.sloTtsTtfbP95Ms,
+      },
     };
   }),
 );

@@ -22,6 +22,7 @@ import { AppConfig } from "../config.js";
 import { ConversationCompleted, NotFound, PreCallRejected, TelephonyError, TurnInProgress, UnknownScenario } from "../errors.js";
 import { SchedulingRepo } from "../repos/scheduling.js";
 import { Orchestrator, type Signal } from "../services/Orchestrator.js";
+import { Quality } from "../services/Quality.js";
 import { Queries } from "../services/Queries.js";
 import { Scores } from "../services/Scores.js";
 import { ScenarioRunner } from "../services/Scenarios.js";
@@ -79,6 +80,7 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
     const cfg = yield* AppConfig;
     const sql = yield* PgClient.PgClient;
     const queries = yield* Queries;
+    const quality = yield* Quality;
     const sched = yield* SchedulingRepo;
     const metrics = yield* Metrics;
     return handlers
@@ -103,6 +105,10 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
             ledger,
             // The counters are already wire-shaped; the ring is internal camelCase, so it is
             // mapped here rather than snake-casing the service's own type.
+            // D6 puts the SLO verdict on status, not only on the quality report: an operator
+            // glancing at health should see whether latency is meeting its target without opening
+            // a second page. Over the most recent 50 calls, which is what "right now" means here.
+            slo: yield* quality.sloStatus(50),
             provider_events: yield* metrics
               .providerEvents()
               .pipe(Effect.map((p) => ({ counters: p.counters, recent: p.recent.map((e) => ({ provider: e.provider, kind: e.kind, stage: e.stage, message: e.message, conversation_id: e.conversationId, at: e.at })) }))),
@@ -122,6 +128,7 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
           return { ok: true as const };
         }),
       )
+      .handle("quality", ({ urlParams }) => quality.report({ calls: urlParams.calls, from: urlParams.from, to: urlParams.to }))
       .handle("providerEvents", ({ payload }) =>
         Effect.gen(function* () {
           for (const e of payload.events) {

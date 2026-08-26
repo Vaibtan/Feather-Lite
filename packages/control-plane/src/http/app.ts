@@ -13,6 +13,7 @@ import { Orchestrator } from "../services/Orchestrator.js";
 import { OutboxService } from "../services/Outbox.js";
 import { SchedulingService } from "../services/Scheduling.js";
 import { Queries } from "../services/Queries.js";
+import { Quality } from "../services/Quality.js";
 import { Scores } from "../services/Scores.js";
 import { Sweeper } from "../services/Sweeper.js";
 import { ScenarioRunner } from "../services/Scenarios.js";
@@ -33,6 +34,7 @@ export const ServicesLive = Layer.mergeAll(
   OutboxService.Default,
   TurnRunner.Default,
   Queries.Default,
+  Quality.Default,
   Scores.Default,
   Sweeper.Default,
   ScenarioRunner.Default,

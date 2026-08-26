@@ -16,6 +16,7 @@
  *   GET  /api/borrowers                            demo directory
  *   POST /api/agents/heartbeat ; GET /api/system/status
  *   POST /api/system/provider-events               vendor failures the voice worker saw
+ *   GET  /api/system/quality                       funnel + rates + SLO + agreement
  *   POST /api/voice/sessions                       LiveKit room + dispatch + browser token
  *   POST /api/demo/seed ; POST /api/demo/reset     (demo mode)
  *   GET  /healthz ; GET /readyz
@@ -212,6 +213,105 @@ export const BorrowerDirectoryEntry = Schema.Struct({
   loan: Schema.NullOr(Schema.Struct({ balance_due: Schema.String, due_date: Schema.String, status: Schema.String, delinquency_days: Schema.Number })),
 });
 
+/* --------------------------- quality report --------------------------- */
+
+const Rate = Schema.NullOr(Schema.Number);
+
+/**
+ * The collections funnel (spec 2026-08-26, D7). Counts are conversations, not events, so a call
+ * that verified twice still counts once. Rates are ratios of the *previous* stage, which is how the
+ * industry reads them: contact rate is of attempts, right-party of connected, promise of
+ * right-party. A rate is null rather than 0 when its denominator is 0 — "no calls reached a person"
+ * and "every call that reached a person failed" are different findings.
+ */
+export const Funnel = Schema.Struct({
+  attempts: Schema.Number,
+  connected: Schema.Number,
+  voicemail: Schema.Number,
+  right_party: Schema.Number,
+  promise_to_pay: Schema.Number,
+  callback_scheduled: Schema.Number,
+  failed: Schema.Number,
+  orphaned: Schema.Number,
+  rates: Schema.Struct({
+    contact: Rate,
+    /** SPEC §17.2's "right-party verification success rate". */
+    right_party: Rate,
+    promise: Rate,
+    /** SPEC §17.2's "voicemail rate", of attempts. */
+    voicemail: Rate,
+  }),
+});
+
+/**
+ * A promise the agent recorded, and whether it has come due. Promise-*kept* needs payment data this
+ * system does not have — a `record_payment` tool is the missing input, named here rather than
+ * silently approximated — so this reports only what the ledger can honestly say.
+ */
+export const PromiseRow = Schema.Struct({
+  conversation_id: Schema.String,
+  borrower_name: Schema.String,
+  amount: Schema.String,
+  date: Schema.String,
+  status: Schema.Literal("PENDING", "DUE_TODAY", "OVERDUE"),
+});
+
+export const SloReport = Schema.Struct({
+  pass: Schema.Boolean,
+  targets: Schema.Record({ key: Schema.String, value: Schema.Number }),
+  /** p95 per component, over the same window. Null where the window had no voice turns. */
+  measured: Schema.Record({ key: Schema.String, value: Schema.NullOr(Schema.Number) }),
+  /** Which components missed their target; empty when `pass`. */
+  breaches: Schema.Array(Schema.String),
+});
+export type SloReport = typeof SloReport.Type;
+
+const Aggregate = Schema.Struct({ n: Schema.Number, mean: Schema.NullOr(Schema.Number), p50: Schema.NullOr(Schema.Number), p95: Schema.NullOr(Schema.Number) });
+
+export const ScoreSummary = Schema.Struct({
+  name: ScoreName,
+  source: ScoreSource,
+  n: Schema.Number,
+  mean: Schema.NullOr(Schema.Number),
+  /** For BOOLEAN scores, the share that passed. Null for numeric ones. */
+  pass_rate: Rate,
+});
+
+export const QualityReport = Schema.Struct({
+  window: Schema.Struct({
+    calls: Schema.NullOr(Schema.Number),
+    from: Schema.NullOr(Schema.String),
+    to: Schema.NullOr(Schema.String),
+    conversations: Schema.Number,
+  }),
+  funnel: Funnel,
+  promises: Schema.Array(PromiseRow),
+  slo: SloReport,
+  /** Durable counts from the ledger, plus how long orphan detection actually took. */
+  reliability: Schema.Struct({
+    counts: Schema.Record({ key: Schema.String, value: Schema.Number }),
+    orphan_detect_ms: Aggregate,
+    /** Live, process-local provider failures — labelled separately because they reset on restart. */
+    provider_counters: Schema.Record({ key: Schema.String, value: Schema.Number }),
+  }),
+  scores: Schema.Array(ScoreSummary),
+  /** STT word error rate, harness-only: production calls have no ground truth to compare against. */
+  stt_wer: Aggregate,
+  /**
+   * How often the judge and a human agreed, over calls that have both labels. `rate` is null until
+   * at least one call has been labelled by hand — an agreement number with no human input is not a
+   * calibration, and reporting 1.0 for an empty set would be a lie.
+   */
+  judge_agreement: Schema.Struct({
+    judged: Schema.Number,
+    human_labelled: Schema.Number,
+    both: Schema.Number,
+    agreed: Schema.Number,
+    rate: Rate,
+  }),
+});
+export type QualityReport = typeof QualityReport.Type;
+
 /**
  * A vendor failure the voice worker saw and handled (spec 2026-08-26, D6). Reported out of band
  * rather than as a conversation signal: a retried Deepgram socket is not something that happened
@@ -274,6 +374,8 @@ export const SystemStatus = Schema.Struct({
     counters: Schema.Record({ key: Schema.String, value: Schema.Number }),
     recent: Schema.Array(RecordedProviderEvent),
   }),
+  /** Latency measured against its target over the most recent calls (D6). */
+  slo: SloReport,
   turn_decider: Schema.String,
   demo_mode: Schema.Boolean,
 });
@@ -396,6 +498,11 @@ export const SystemGroup = HttpApiGroup.make("system")
     HttpApiEndpoint.post("providerEvents", "/api/system/provider-events")
       .setPayload(ProviderEventsRequest)
       .addSuccess(Schema.Struct({ recorded: Schema.Number })),
+  )
+  .add(
+    HttpApiEndpoint.get("quality", "/api/system/quality")
+      .setUrlParams(Schema.Struct({ calls: Schema.optional(Schema.NumberFromString), from: Schema.optional(Schema.String), to: Schema.optional(Schema.String) }))
+      .addSuccess(QualityReport),
   );
 
 export const CallsGroup = HttpApiGroup.make("calls")
