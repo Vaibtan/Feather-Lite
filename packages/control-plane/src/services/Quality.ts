@@ -50,6 +50,8 @@ const percentiles = (values: ReadonlyArray<number>, decimals: number) => {
 
 const EMPTY_FUNNEL = {
   attempts: 0,
+  finished: 0,
+  in_progress: 0,
   connected: 0,
   voicemail: 0,
   right_party: 0,
@@ -127,7 +129,12 @@ export class Quality extends Effect.Service<Quality>()("@feather-lite/Quality", 
           )
           SELECT
             count(*)::text AS attempts,
-            count(*) FILTER (WHERE final_outcome IS DISTINCT FROM 'NO_ANSWER' AND NOT voicemail)::text AS connected,
+            count(*) FILTER (WHERE final_outcome IS NOT NULL)::text AS finished,
+            count(*) FILTER (WHERE final_outcome IS NULL)::text AS in_progress,
+            -- Requiring a final outcome is the fix (O3): IS DISTINCT FROM 'NO_ANSWER' is true of a
+            -- null, so every in-flight and abandoned call counted as a person answering. Measured,
+            -- 13 unfinished simulations put the contact rate at 95.9%.
+            count(*) FILTER (WHERE final_outcome IS NOT NULL AND final_outcome IS DISTINCT FROM 'NO_ANSWER' AND NOT voicemail)::text AS connected,
             count(*) FILTER (WHERE voicemail OR final_outcome = 'VOICEMAIL_LEFT')::text AS voicemail,
             count(*) FILTER (WHERE right_party)::text AS right_party,
             count(*) FILTER (WHERE promise)::text AS promise_to_pay,
@@ -137,15 +144,19 @@ export class Quality extends Effect.Service<Quality>()("@feather-lite/Quality", 
           FROM flags`.pipe(Effect.orDie);
         const n = (k: string) => Number(rows[0]?.[k] ?? 0);
         const attempts = n("attempts");
-        // "Connected" is a human picking up: not a no-answer, not a machine. Voicemail is counted
-        // separately rather than folded in, because leaving a compliant voicemail is a different
-        // outcome from talking to someone, not a lesser version of it.
+        const finished = n("finished");
+        // "Connected" is a human picking up on a call that *finished*: not a no-answer, not a
+        // machine, not still ringing. Voicemail is counted separately rather than folded in,
+        // because leaving a compliant voicemail is a different outcome from talking to someone,
+        // not a lesser version of it.
         const connected = n("connected");
         const rightParty = n("rightParty");
         const promiseToPay = n("promiseToPay");
         const voicemail = n("voicemail");
         return {
           attempts,
+          finished,
+          in_progress: n("inProgress"),
           connected,
           voicemail,
           right_party: rightParty,
@@ -153,9 +164,12 @@ export class Quality extends Effect.Service<Quality>()("@feather-lite/Quality", 
           callback_scheduled: n("callbackScheduled"),
           failed: n("failed"),
           orphaned: n("orphaned"),
-          // Each rate is of the previous stage, which is how a collections funnel is read.
+          // Each rate is of the previous stage, which is how a collections funnel is read. Contact
+          // rate is of *finished* attempts: a call still ringing has not failed to connect, it has
+          // not done anything yet, and leaving it in the denominator understates every run in
+          // progress while overstating none.
           rates: {
-            contact: ratio(connected, attempts),
+            contact: ratio(connected, finished),
             right_party: ratio(rightParty, connected),
             promise: ratio(promiseToPay, rightParty),
             voicemail: ratio(voicemail, attempts),

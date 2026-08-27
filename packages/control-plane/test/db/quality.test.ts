@@ -122,7 +122,44 @@ describe("quality report", () => {
     expect(f.rates.right_party).toBe(1);
     expect(f.rates.promise).toBe(1);
     expect(f.rates.voicemail).toBe(0.25);
+    expect(f.finished).toBe(4);
+    expect(f.in_progress).toBe(0);
     expect(out.report.window.conversations).toBe(4);
+  });
+
+  it("does not count a call that is still running as one a person answered (O3)", async () => {
+    // The measured defect: `final_outcome IS DISTINCT FROM 'NO_ANSWER'` is true of a null, so every
+    // in-flight and abandoned call counted as a contact. Thirteen unfinished simulations put the
+    // contact rate at 95.9%. A call still ringing has not connected and has not failed; it has not
+    // done anything yet, and it belongs in neither numerator nor denominator.
+    const out = await rt.runPromise(
+      withFrozenClock(NOW)(
+        Effect.gen(function* () {
+          const sql = yield* PgClient.PgClient;
+          yield* promiseCall("Finished And Answered");
+          yield* noAnswerCall("Finished And Not Answered");
+          const before = yield* (yield* Quality).report({ calls: 50 });
+          // Three calls left mid-flight, exactly as an abandoned simulation leaves them.
+          for (const name of ["Still Ringing One", "Still Ringing Two", "Still Ringing Three"]) {
+            const id = yield* promiseCall(name);
+            yield* sql`UPDATE conversations SET final_outcome = NULL, ended_at = NULL WHERE id = ${id}`;
+          }
+          const after = yield* (yield* Quality).report({ calls: 50 });
+          return { before, after };
+        }),
+      ),
+    );
+    // Deltas, not absolutes: this suite shares one database and earlier tests have left calls in
+    // the window. The claim is about what three unfinished calls do to the numbers, not what the
+    // numbers are.
+    expect(out.after.funnel.attempts).toBe(out.before.funnel.attempts + 3);
+    expect(out.after.funnel.in_progress).toBe(out.before.funnel.in_progress + 3);
+    // None of them finished, so neither the numerator nor the denominator of contact rate moves.
+    expect(out.after.funnel.finished).toBe(out.before.funnel.finished);
+    expect(out.after.funnel.connected).toBe(out.before.funnel.connected);
+    expect(out.after.funnel.rates.contact).toBe(out.before.funnel.rates.contact);
+    // And the buckets no longer have to sum to attempts, which is why in_progress is reported.
+    expect(out.after.funnel.finished + out.after.funnel.in_progress).toBe(out.after.funnel.attempts);
   });
 
   it("ages each promise against the clock and names the missing input", async () => {

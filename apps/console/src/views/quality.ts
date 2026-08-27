@@ -25,7 +25,7 @@ const renderFunnel = (q: QualityReport) => {
   const f = q.funnel;
   const stages: Array<{ label: string; n: number; of: string; rate: number | null }> = [
     { label: "attempts", n: f.attempts, of: "", rate: null },
-    { label: "connected (a person answered)", n: f.connected, of: "of attempts", rate: f.rates.contact },
+    { label: "connected (a person answered)", n: f.connected, of: "of finished", rate: f.rates.contact },
     { label: "right party verified", n: f.right_party, of: "of connected", rate: f.rates.right_party },
     { label: "promise to pay", n: f.promise_to_pay, of: "of right party", rate: f.rates.promise },
   ];
@@ -54,8 +54,12 @@ const renderFunnel = (q: QualityReport) => {
       // different outcome from talking to someone, not a lesser version of one.
       h("span", {}, `voicemail ${f.voicemail} (${pct(f.rates.voicemail)} of attempts)`),
       h("span", {}, `callback ${f.callback_scheduled}`),
-      h("span", {}, `failed ${f.failed}`),
-      h("span", {}, `orphaned ${f.orphaned}`),
+      // Orphaned calls ARE failed calls - a sweeper finalizes them FAILED/ORPHANED. Listed side by
+      // side they read as additive, so three bad calls looked like six (O5). Nested instead.
+      h("span", {}, f.orphaned > 0 ? `failed ${f.failed} (of which orphaned ${f.orphaned})` : `failed ${f.failed}`),
+      // In-flight calls are in `attempts` but in no outcome bucket, so the buckets do not sum to
+      // attempts and the page should say why rather than leave it to be noticed.
+      f.in_progress > 0 ? h("span", {}, `still running ${f.in_progress}`) : null,
     ),
   );
 };

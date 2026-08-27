@@ -229,6 +229,14 @@ const Rate = Schema.NullOr(Schema.Number);
  */
 export const Funnel = Schema.Struct({
   attempts: Schema.Number,
+  /** Calls that have reached a final outcome. `attempts - finished` are still in flight. */
+  finished: Schema.Number,
+  /** Still running. Counted, never folded into a rate: an unfinished call has not failed either. */
+  in_progress: Schema.Number,
+  /**
+   * A person answered: a *finished* call whose outcome is neither no-answer nor a machine.
+   * An in-flight call is not connected — it may yet turn out to be either (O3).
+   */
   connected: Schema.Number,
   voicemail: Schema.Number,
   right_party: Schema.Number,

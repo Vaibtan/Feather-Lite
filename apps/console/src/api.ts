@@ -164,6 +164,9 @@ export interface QualityReport {
   window: { calls: number | null; from: string | null; to: string | null; conversations: number };
   funnel: {
     attempts: number;
+    /** Calls that have reached a final outcome; `attempts - finished` are still in flight. */
+    finished: number;
+    in_progress: number;
     connected: number;
     voicemail: number;
     right_party: number;
