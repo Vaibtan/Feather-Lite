@@ -60,34 +60,59 @@ const renderFunnel = (q: QualityReport) => {
   );
 };
 
+/**
+ * The SLO card. Three things are on it that were not before, and each one exists because the
+ * verdict alone was misreadable (O2): which population it was computed over, how many observations
+ * each component's p95 rests on, and whether a component had too few to judge at all.
+ *
+ * "MEETING TARGET" with three components at `insufficient_sample` is not the same claim as
+ * "MEETING TARGET" with all five judged, and the badge cannot tell them apart on its own.
+ */
 const renderSlo = (q: QualityReport) => {
   const rows = Object.entries(q.slo.targets);
+  const seg = q.slo.segment;
+  const facets = [seg.channel === null ? null : `channel ${seg.channel}`, seg.decider === null ? null : `decider ${seg.decider}`].filter((v): v is string => v !== null);
+  const shortfall = q.slo.insufficient.length;
   return h(
     "div",
     {},
-    h("div", { class: "row", style: "align-items:center;gap:10px" }, badge(q.slo.pass ? "MEETING TARGET" : "BREACHED", q.slo.pass ? "good" : "bad"), h("span", { class: "muted small" }, `p95 over ${q.window.conversations} call(s)`)),
+    h(
+      "div",
+      { class: "row", style: "align-items:center;gap:10px" },
+      badge(q.slo.pass ? "MEETING TARGET" : "BREACHED", q.slo.pass ? "good" : "bad"),
+      // A green badge over a window nobody could judge is the failure mode this line prevents.
+      shortfall > 0 ? badge(`${shortfall} UNJUDGED`, "warn") : null,
+      h("span", { class: "muted small" }, `${facets.length > 0 ? facets.join(", ") : "all calls"} — ${q.window.conversations} call(s) in window`),
+    ),
     h(
       "table",
       { style: "margin-top:10px" },
-      h("thead", {}, h("tr", {}, h("th", {}, "component"), h("th", {}, "p95"), h("th", {}, "target"))),
+      h("thead", {}, h("tr", {}, h("th", {}, "component"), h("th", {}, "p95"), h("th", {}, "target"), h("th", {}, "n"))),
       h(
         "tbody",
         {},
         ...rows.map(([k, target]) => {
-          const measured = q.slo.measured[k] ?? null;
-          const breached = q.slo.breaches.includes(k);
+          const c = q.slo.components[k];
+          const measured = c?.measured_ms ?? null;
+          const status = c?.status ?? "not_measured";
+          // A component with no reading cannot breach — a window of simulated calls has no
+          // end-of-utterance delay, and painting that red would train people to ignore the page.
+          // Too few readings is a third state: the number exists but must not be read as a tail.
+          const shown = status === "insufficient_sample" ? `n<${String(q.slo.min_sample)}` : status === "not_measured" ? "—" : num(measured, "ms");
           return h(
             "tr",
             {},
             h("td", { class: "mono small" }, k),
-            // A component with no reading cannot breach — a window of simulated calls has no
-            // end-of-utterance delay, and painting that red would train people to ignore the page.
-            h("td", { class: `mono small ${breached ? "err" : ""}` }, num(measured, "ms")),
+            h("td", { class: `mono small ${status === "breach" ? "err" : status === "pass" ? "" : "muted"}` }, shown),
             h("td", { class: "mono small muted" }, `${target}ms`),
+            h("td", { class: "mono small muted" }, String(c?.n ?? 0)),
           );
         }),
       ),
     ),
+    shortfall > 0
+      ? h("p", { class: "muted small", style: "margin-top:8px" }, `${String(shortfall)} component(s) had fewer than ${String(q.slo.min_sample)} turns carrying them. Below that a p95 is close to the maximum, so no verdict is offered rather than a flattering one.`)
+      : null,
   );
 };
 

@@ -72,7 +72,7 @@ describe("persistence layer against real Postgres", () => {
         const { currentAttemptNo } = yield* conv.incrementAttemptNo(wfId);
         const now = new Date("2026-08-16T10:00:00Z");
         yield* conv.insertAttempt({ id: attemptId, workflowExecutionId: wfId, contactPointId: cpId, direction: "OUTBOUND", startedAt: now });
-        yield* conv.insertConversation({ id: convId, callAttemptId: attemptId, borrowerId, agentVersionId: version.id, startedAt: now, channel: "simulated" });
+        yield* conv.insertConversation({ id: convId, callAttemptId: attemptId, borrowerId, agentVersionId: version.id, startedAt: now, channel: "simulated", decider: "scripted" });
 
         // 20 concurrent appends, each in its own transaction holding the row lock -> 1..20 with no gaps.
         yield* Effect.all(
@@ -128,7 +128,7 @@ describe("persistence layer against real Postgres", () => {
         const attemptId = uuid();
         const convId = uuid();
         yield* conv.insertAttempt({ id: attemptId, workflowExecutionId: wfId, contactPointId: cpId, direction: "OUTBOUND", startedAt: new Date() });
-        yield* conv.insertConversation({ id: convId, callAttemptId: attemptId, borrowerId, agentVersionId: version.id, startedAt: new Date(), channel: "simulated" });
+        yield* conv.insertConversation({ id: convId, callAttemptId: attemptId, borrowerId, agentVersionId: version.id, startedAt: new Date(), channel: "simulated", decider: "scripted" });
 
         const past = new Date(Date.now() - 60_000);
         const future = new Date(Date.now() + 3_600_000);

@@ -288,6 +288,32 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
         return yield* latencyAggregateFor(ids.map((r) => r.id));
       });
 
+    /**
+     * The same, over the most recent N conversations **in a segment** (O2).
+     *
+     * "The last 50 calls" and "the last 50 voice calls served by the real decider" are different
+     * windows, and an SLO computed over the first is diluted by whatever else ran recently — a
+     * tier-1 load run moved `ttft_ms` 3 228 -> 1 252 ms without anything getting faster. A null
+     * facet means "do not filter on this", so the unsegmented window is still expressible.
+     *
+     * `found` is returned alongside because "the window asked for 50 and found 3" is the fact that
+     * makes a green verdict readable.
+     */
+    const latencyAggregateForSegment = (
+      segment: { readonly channel: string | null; readonly decider: string | null },
+      calls: number,
+    ): Effect.Effect<{ aggregate: LatencyAggregate; found: number }, never, PgClient.PgClient> =>
+      Effect.gen(function* () {
+        const sql = yield* PgClient.PgClient;
+        const ids = yield* sql<{ id: string }>`
+          SELECT id FROM conversations
+          WHERE (${segment.channel}::text IS NULL OR channel = ${segment.channel}::text)
+            AND (${segment.decider}::text IS NULL OR decider = ${segment.decider}::text)
+          ORDER BY started_at DESC, id DESC LIMIT ${calls}`.pipe(Effect.orDie);
+        const aggregate = yield* latencyAggregateFor(ids.map((r) => r.id));
+        return { aggregate, found: ids.length };
+      });
+
     const scheduledActionsFor = (workflowExecutionId: string) => sched.listForWorkflow(workflowExecutionId);
     const outboxJobsFor = (conversationId: string) => sched.listJobsForConversation(conversationId);
 
@@ -298,6 +324,7 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
       heartbeats,
       ledgerCounts,
       turnLatencies,
+      latencyAggregateForSegment,
       turnRowsFor,
       latencyAggregate,
       latencyAggregateFor,

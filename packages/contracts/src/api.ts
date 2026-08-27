@@ -259,13 +259,44 @@ export const PromiseRow = Schema.Struct({
   status: Schema.Literal("PENDING", "DUE_TODAY", "OVERDUE"),
 });
 
+/**
+ * Which population the SLO was computed over (O2). An SLO across every call this system has ever
+ * placed is not a claim about anything: a window of scripted load-test turns and a window of real
+ * voice calls have nothing to say about each other.
+ */
+export const SloSegment = Schema.Struct({
+  channel: Schema.NullOr(Schema.String),
+  decider: Schema.NullOr(Schema.String),
+  /** How many calls in the segment the window asked for, and how many it actually found. */
+  calls_requested: Schema.Number,
+  calls_found: Schema.Number,
+});
+export type SloSegment = typeof SloSegment.Type;
+
+/** One latency component's verdict. `insufficient_sample` is not a pass and not a failure. */
+export const SloComponent = Schema.Struct({
+  target_ms: Schema.Number,
+  /** p95 over turns that carry this component. Null when none did, or when below the minimum. */
+  measured_ms: Schema.NullOr(Schema.Number),
+  /** Turns carrying this component in the window — the denominator the verdict rests on. */
+  n: Schema.Number,
+  status: Schema.Literal("pass", "breach", "insufficient_sample", "not_measured"),
+});
+export type SloComponent = typeof SloComponent.Type;
+
 export const SloReport = Schema.Struct({
   pass: Schema.Boolean,
+  segment: SloSegment,
+  /** Below this many observations a component reports `insufficient_sample` rather than a verdict. */
+  min_sample: Schema.Number,
+  components: Schema.Record({ key: Schema.String, value: SloComponent }),
   targets: Schema.Record({ key: Schema.String, value: Schema.Number }),
-  /** p95 per component, over the same window. Null where the window had no voice turns. */
+  /** p95 per component, over the same window. Null where the window had no turns carrying it. */
   measured: Schema.Record({ key: Schema.String, value: Schema.NullOr(Schema.Number) }),
   /** Which components missed their target; empty when `pass`. */
   breaches: Schema.Array(Schema.String),
+  /** Components with too few observations to judge. A verdict of `pass` with these is not a clean bill. */
+  insufficient: Schema.Array(Schema.String),
 });
 export type SloReport = typeof SloReport.Type;
 

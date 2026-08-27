@@ -116,6 +116,10 @@ export class WorkflowService extends Effect.Service<WorkflowService>()("@feather
             agentVersionId: agentVersion.id,
             startedAt: nowDate,
             channel: input.channel,
+            // Recorded now, from the config that will actually serve it, rather than inferred later:
+            // the SLO window has to be able to exclude scripted turns, and by the time the report is
+            // built nothing on the row says which decider ran (O2).
+            decider: cfg.turnDecider,
           });
           yield* conv.lockConversation(conversationId);
           yield* conv.appendEvent({

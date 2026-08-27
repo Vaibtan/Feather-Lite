@@ -127,6 +127,8 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
       agentVersionId: string;
       startedAt: Date;
       channel: string;
+      /** Which conversationalist will serve this call, for the SLO segment (O2). */
+      decider: string;
     }) => sql`INSERT INTO conversations ${sql.insert({ ...row, finalOutcomeMetadata: sql.json({}), currentState: "GREETING" })}`.pipe(Effect.asVoid);
 
     const findConversation = SqlSchema.findOne({

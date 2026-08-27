@@ -123,7 +123,22 @@ export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) 
           "div",
           { class: "row", style: "align-items:center;gap:10px;margin-bottom:10px" },
           badge(s.slo.pass ? "SLO MET" : "SLO BREACHED", s.slo.pass ? "good" : "bad"),
-          h("span", { class: "muted small" }, s.slo.breaches.length ? `over target: ${s.slo.breaches.join(", ")}` : `every measured component within target`),
+          // The segment and its size, because "SLO MET over 0 calls" and "SLO MET over 50" are the
+          // same badge and very different claims (O2).
+          h(
+            "span",
+            { class: "muted small" },
+            s.slo.breaches.length
+              ? `over target: ${s.slo.breaches.join(", ")}`
+              : s.slo.insufficient.length
+                ? `too few turns to judge: ${s.slo.insufficient.join(", ")}`
+                : `every measured component within target`,
+          ),
+          h(
+            "span",
+            { class: "muted small" },
+            `${[s.slo.segment.channel, s.slo.segment.decider].filter((v) => v !== null).join(" / ") || "all calls"} — ${String(s.slo.segment.calls_found)}/${String(s.slo.segment.calls_requested)} call(s)`,
+          ),
         ),
         await api.latencyAggregate(20).then(renderLatencyAggregate, (e: unknown) => h("div", { class: "err small" }, `latency unavailable: ${String(e)}`)),
       );

@@ -27,11 +27,20 @@ import { makeInfraLayer, makeRuntime, truncateAll } from "./harness.js";
 
 const NOW = DateTime.unsafeMake("2026-08-16T14:00:00Z");
 
-const layer = Layer.mergeAll(Quality.Default, Queries.Default, Orchestrator.Default, WorkflowService.Default, Scores.Default, ScoresRepo.Default, ConversationRepo.Default, SchedulingRepo.Default, IdGen.Default).pipe(
-  Layer.provide(ScriptedTurnDeciderLive),
-  Layer.provideMerge(makeInfraLayer()),
-);
+const services = Layer.mergeAll(Quality.Default, Queries.Default, Orchestrator.Default, WorkflowService.Default, Scores.Default, ScoresRepo.Default, ConversationRepo.Default, SchedulingRepo.Default, IdGen.Default);
+const layer = services.pipe(Layer.provide(ScriptedTurnDeciderLive), Layer.provideMerge(makeInfraLayer()));
 const rt = makeRuntime(layer);
+
+/**
+ * A second runtime with the SLO minimum sample lowered to 1 (O2). The fixtures here are a handful
+ * of calls, so at the production default of 20 every component would report `insufficient_sample`
+ * and a breach could not be asserted at all. Lowering the threshold tests the verdict; the default
+ * is tested separately, by asserting that it withholds one.
+ */
+const SLO_TARGETS = { turnP95Ms: 2500, eouP95Ms: 700, transcriptionP95Ms: 600, ttftP95Ms: 1500, ttsTtfbP95Ms: 600 };
+const smallSampleRt = makeRuntime(
+  services.pipe(Layer.provide(ScriptedTurnDeciderLive), Layer.provideMerge(makeInfraLayer({ slo: { ...SLO_TARGETS, minSample: 1 } }))),
+);
 
 let phone = 6000;
 const seedBorrower = (name: string) =>
@@ -139,7 +148,9 @@ describe("quality report", () => {
   });
 
   it("passes the SLO when a window has no voice turns to measure, and names the breach when it does", async () => {
-    const out = await rt.runPromise(
+    // On `smallSampleRt`: a breach is only assertable where the sample clears the minimum, and
+    // these fixtures are a handful of calls. The default threshold's behaviour is the next test.
+    const out = await smallSampleRt.runPromise(
       withFrozenClock(NOW)(
         Effect.gen(function* () {
           const sql = yield* PgClient.PgClient;
@@ -158,10 +169,65 @@ describe("quality report", () => {
     );
     expect(out.clean.slo.pass).toBe(true);
     expect(out.clean.slo.measured["eou_delay_ms"]).toBeNull();
+    expect(out.clean.slo.components["eou_delay_ms"]?.status).toBe("not_measured");
     // The per-stage targets exist so a regression names its own cause instead of moving one number.
     expect(out.breached.slo.pass).toBe(false);
     expect(out.breached.slo.breaches).toContain("eou_delay_ms");
     expect(out.breached.slo.measured["eou_delay_ms"]).toBe(9000);
+    expect(out.breached.slo.components["eou_delay_ms"]?.status).toBe("breach");
+  });
+
+  it("withholds a verdict, and the p95, below the minimum sample (O2)", async () => {
+    // The same one slow turn, judged at the production default of 20 observations. A p95 over a
+    // single turn is that turn; presenting it as a tail is what trains an operator to ignore the
+    // page, so the component reports `insufficient_sample` and shows no number at all.
+    const out = await rt.runPromise(
+      withFrozenClock(NOW)(
+        Effect.gen(function* () {
+          const sql = yield* PgClient.PgClient;
+          const quality = yield* Quality;
+          const id = yield* promiseCall("Barely Sampled");
+          yield* sql`UPDATE conversation_turns SET result = COALESCE(result, '{}'::jsonb) ||
+                       '{"eou_delay_ms": 9000}'::jsonb WHERE conversation_id = ${id}`;
+          return yield* quality.report({ calls: 50 });
+        }),
+      ),
+    );
+    const eou = out.slo.components["eou_delay_ms"];
+    expect(out.slo.min_sample).toBe(20);
+    expect(eou?.n).toBeGreaterThan(0);
+    expect(eou?.n).toBeLessThan(20);
+    expect(eou?.status).toBe("insufficient_sample");
+    expect(eou?.measured_ms).toBeNull();
+    expect(out.slo.insufficient).toContain("eou_delay_ms");
+    // Not a breach, and therefore `pass` - which is exactly why `insufficient` is reported beside
+    // it: a green verdict with a non-empty `insufficient` list is not a clean bill of health.
+    expect(out.slo.breaches).not.toContain("eou_delay_ms");
+  });
+
+  it("keeps a scripted load run out of the voice segment's SLO window (O2)", async () => {
+    // The defect this segmentation exists for: a tier-1 run added 36 scripted turns to the "last 50
+    // calls" window and `ttft_ms` fell 3228 -> 1252 ms, dropping off the breach list. Nothing got
+    // faster. Every fixture here is a `simulated` call served by the `scripted` decider, so the
+    // voice/openai segment must find none of them rather than average them in.
+    const out = await smallSampleRt.runPromise(
+      withFrozenClock(NOW)(
+        Effect.gen(function* () {
+          const quality = yield* Quality;
+          yield* promiseCall("Scripted Noise");
+          const voice = yield* quality.sloStatus(50);
+          const unsegmented = yield* quality.sloStatus(50, { channel: null, decider: null });
+          return { voice, unsegmented };
+        }),
+      ),
+    );
+    expect(out.voice.segment).toMatchObject({ channel: "voice", decider: "openai", calls_requested: 50 });
+    expect(out.voice.segment.calls_found).toBe(0);
+    expect(out.voice.components["ttft_ms"]?.status).toBe("not_measured");
+    // The same calls, unsegmented, are found - so the zero above is the filter working, not an
+    // empty database.
+    expect(out.unsegmented.segment.calls_found).toBeGreaterThan(0);
+    expect(out.unsegmented.components["ttft_ms"]?.n).toBeGreaterThan(0);
   });
 
   it("reports judge/human agreement only over calls that have both labels", async () => {

@@ -23,3 +23,23 @@ export const percentile = (values: ReadonlyArray<number>, p: number): number | n
   return xs[index] ?? null;
 };
 
+
+/** One latency component's verdict against its target. `insufficient_sample` is neither (O2). */
+export type SloStatus = "pass" | "breach" | "insufficient_sample" | "not_measured";
+
+/**
+ * Judge one component, given what was observed of it.
+ *
+ * Pure and here rather than inside the Quality service because the interesting part is a boundary,
+ * and a boundary deserves a table test: at exactly `minSample` observations the component *is*
+ * judged, and one below it is not. The rule reads `n < minSample`, which is easy to write as `<=`
+ * by accident and impossible to notice from a dashboard afterwards.
+ *
+ * `not_measured` and `insufficient_sample` are kept apart deliberately. A window of simulated calls
+ * has no end-of-utterance delay at all, which is a different statement from having three of them.
+ */
+export const sloComponentStatus = (observed: { readonly p95: number | null; readonly n: number }, targetMs: number, minSample: number): SloStatus => {
+  if (observed.n === 0 || observed.p95 === null) return "not_measured";
+  if (observed.n < minSample) return "insufficient_sample";
+  return observed.p95 > targetMs ? "breach" : "pass";
+};

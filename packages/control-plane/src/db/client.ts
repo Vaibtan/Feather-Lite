@@ -11,6 +11,7 @@ import { AppConfig } from "../config.js";
 import { migration0001 } from "./migrations/0001_initial.js";
 import { migration0002 } from "./migrations/0002_scores.js";
 import { migration0003 } from "./migrations/0003_conversation_liveness.js";
+import { migration0004 } from "./migrations/0004_conversation_decider.js";
 
 export const PgLive: Layer.Layer<SqlClient.SqlClient | PgClient.PgClient, unknown, AppConfig> = Layer.unwrapEffect(
   Effect.gen(function* () {
@@ -32,6 +33,7 @@ export const MigrationsLive = PgMigrator.layer({
     "0001_initial": migration0001,
     "0002_scores": migration0002,
     "0003_conversation_liveness": migration0003,
+    "0004_conversation_decider": migration0004,
   }),
 }).pipe(Layer.provide(NodeContext.layer));
 

@@ -131,11 +131,32 @@ export interface ScoreRow {
   created_at: string;
 }
 
+/** Which population the verdict was computed over, and how much of it there was (O2). */
+export interface SloSegment {
+  channel: string | null;
+  decider: string | null;
+  calls_requested: number;
+  calls_found: number;
+}
+
+/** One component's verdict. `insufficient_sample` is neither a pass nor a failure. */
+export interface SloComponent {
+  target_ms: number;
+  measured_ms: number | null;
+  n: number;
+  status: "pass" | "breach" | "insufficient_sample" | "not_measured";
+}
+
 export interface SloReport {
   pass: boolean;
+  segment: SloSegment;
+  min_sample: number;
+  components: Record<string, SloComponent>;
   targets: Record<string, number>;
   measured: Record<string, number | null>;
   breaches: string[];
+  /** Components with too few observations to judge; a `pass` alongside these is not a clean bill. */
+  insufficient: string[];
 }
 
 /** A rate is null, never 0, when its denominator is 0 — see the API's Funnel. */

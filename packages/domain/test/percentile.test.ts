@@ -8,7 +8,7 @@
  * observation instead of the first.
  */
 import { describe, expect, it } from "vitest";
-import { percentile } from "../src/percentile.js";
+import { percentile, sloComponentStatus } from "../src/percentile.js";
 
 describe("percentile", () => {
   it("has nothing to say about no observations", () => {
@@ -59,5 +59,31 @@ describe("percentile", () => {
     const six = [1, 2, 3, 4, 5, 6];
     expect(percentile(six, 95)).toBe(6);
     expect(percentile(six, 95)).toBe(Math.max(...six));
+  });
+});
+
+describe("sloComponentStatus", () => {
+  const target = 700;
+  const min = 20;
+
+  it("judges a component at exactly the minimum sample, and not one below it", () => {
+    // The boundary the rule is easiest to get wrong at, and impossible to spot from a dashboard.
+    expect(sloComponentStatus({ p95: 100, n: min }, target, min)).toBe("pass");
+    expect(sloComponentStatus({ p95: 100, n: min - 1 }, target, min)).toBe("insufficient_sample");
+    expect(sloComponentStatus({ p95: 9000, n: min }, target, min)).toBe("breach");
+    expect(sloComponentStatus({ p95: 9000, n: min - 1 }, target, min)).toBe("insufficient_sample");
+  });
+
+  it("keeps 'nothing to measure' apart from 'too little to judge'", () => {
+    // A window of simulated calls has no end-of-utterance delay at all; that is a different
+    // statement from having three of them, and the page must not render them the same way.
+    expect(sloComponentStatus({ p95: null, n: 0 }, target, min)).toBe("not_measured");
+    expect(sloComponentStatus({ p95: null, n: 5 }, target, min)).toBe("not_measured");
+    expect(sloComponentStatus({ p95: 100, n: 1 }, target, min)).toBe("insufficient_sample");
+  });
+
+  it("treats the target as a ceiling, not a range — equal to target passes", () => {
+    expect(sloComponentStatus({ p95: target, n: min }, target, min)).toBe("pass");
+    expect(sloComponentStatus({ p95: target + 1, n: min }, target, min)).toBe("breach");
   });
 });

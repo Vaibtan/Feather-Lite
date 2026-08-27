@@ -15,8 +15,8 @@
  */
 import { DateTime, Effect, Option } from "effect";
 import { PgClient } from "@effect/sql-pg";
-import type { LatencyAggregate, QualityReport, SloReport, TtsHeuristicsReport } from "@feather-lite/contracts";
-import { localIsoDate, ORPHANED_REASON, percentile, SCORE_DATA_TYPE_BY_NAME, ttsAggregate, type ScoreName, type ScoreSource, type TtsHeuristics } from "@feather-lite/domain";
+import type { LatencyAggregate, QualityReport, SloComponent, SloReport, SloSegment, TtsHeuristicsReport } from "@feather-lite/contracts";
+import { localIsoDate, ORPHANED_REASON, percentile, SCORE_DATA_TYPE_BY_NAME, sloComponentStatus, ttsAggregate, type ScoreName, type ScoreSource, type TtsHeuristics } from "@feather-lite/domain";
 import { AppConfig } from "../config.js";
 import { Metrics } from "./Metrics.js";
 import { aggregateTurnRows, Queries, ttsReadingsOf } from "./Queries.js";
@@ -198,7 +198,22 @@ export class Quality extends Effect.Service<Quality>()("@feather-lite/Quality", 
      * `/api/system/status`, so the two can never disagree about whether the SLO is met — which they
      * would within a release of each other if the comparison were written twice.
      */
-    const sloFrom = (latency: LatencyAggregate): SloReport => {
+    /**
+     * The SLO verdict over one segment's window (O2).
+     *
+     * Two things were wrong with the previous version, and both made the page say "pass" when it
+     * should not have. It read every component's p95 off a window of *all* recent calls, so a
+     * tier-1 load run's 36 scripted turns diluted it — measured, `ttft_ms` went 3 228 -> 1 252 ms
+     * and left the breach list without anything changing but the population. And it judged a
+     * component off however few observations it had, so a p95 over six turns is the maximum
+     * presented as a tail.
+     *
+     * Each component is now judged only over turns that actually carry it (`n` from the aggregate,
+     * not the window's call count), and below `min_sample` it reports `insufficient_sample` — which
+     * is neither a pass nor a breach, and is listed separately so a green verdict with an empty
+     * `insufficient` list can be told from a green verdict that simply had nothing to look at.
+     */
+    const sloFrom = (latency: LatencyAggregate, segment: SloSegment): SloReport => {
       const targets = {
         total_ms: cfg.slo.turnP95Ms,
         eou_delay_ms: cfg.slo.eouP95Ms,
@@ -206,26 +221,46 @@ export class Quality extends Effect.Service<Quality>()("@feather-lite/Quality", 
         ttft_ms: cfg.slo.ttftP95Ms,
         tts_ttfb_ms: cfg.slo.ttsTtfbP95Ms,
       };
-      const measured: Record<string, number | null> = {
-        total_ms: latency.total_ms.p95,
-        eou_delay_ms: latency.eou_delay_ms.p95,
-        transcription_delay_ms: latency.transcription_delay_ms.p95,
-        ttft_ms: latency.ttft_ms.p95,
-        tts_ttfb_ms: latency.tts_ttfb_ms.p95,
+      const observed: Record<string, { p95: number | null; n: number }> = {
+        total_ms: { p95: latency.total_ms.p95, n: latency.total_ms.n },
+        eou_delay_ms: { p95: latency.eou_delay_ms.p95, n: latency.eou_delay_ms.n },
+        transcription_delay_ms: { p95: latency.transcription_delay_ms.p95, n: latency.transcription_delay_ms.n },
+        ttft_ms: { p95: latency.ttft_ms.p95, n: latency.ttft_ms.n },
+        tts_ttfb_ms: { p95: latency.tts_ttfb_ms.p95, n: latency.tts_ttfb_ms.n },
       };
-      // A component with no measurements cannot breach: a window of simulated calls has no
-      // end-of-utterance delay, and reporting that as an SLO failure would be noise, not a signal.
-      const breaches = Object.entries(targets)
-        .filter(([k, target]) => {
-          const v = measured[k];
-          return v !== null && v !== undefined && v > target;
-        })
-        .map(([k]) => k);
-      return { pass: breaches.length === 0, targets, measured, breaches };
+      const minSample = cfg.slo.minSample;
+      const components: Record<string, SloComponent> = {};
+      const breaches: string[] = [];
+      const insufficient: string[] = [];
+      const measured: Record<string, number | null> = {};
+      for (const [name, target] of Object.entries(targets)) {
+        const { p95, n } = observed[name] ?? { p95: null, n: 0 };
+        // A component with no measurements cannot breach: a window of simulated calls has no
+        // end-of-utterance delay, and reporting that as a failure would be noise, not a signal.
+        const status = sloComponentStatus({ p95, n }, target, minSample);
+        // p95 is withheld below the minimum rather than shown: the number is real, but reading it
+        // as a tail is the mistake this guard exists to prevent.
+        const shown = status === "insufficient_sample" || status === "not_measured" ? null : p95;
+        components[name] = { target_ms: target, measured_ms: shown, n, status };
+        measured[name] = shown;
+        if (status === "breach") breaches.push(name);
+        if (status === "insufficient_sample") insufficient.push(name);
+      }
+      return { pass: breaches.length === 0, segment, min_sample: minSample, components, targets, measured, breaches, insufficient };
     };
 
-    /** The SLO over the most recent N calls, for the status page. */
-    const sloStatus = (calls: number) => queries.latencyAggregate(calls).pipe(Effect.orDie, Effect.map(sloFrom));
+    /**
+     * The SLO over the most recent N calls in a segment, for the status page. Voice calls served by
+     * the real decider by default: that is the population the targets were set from, and the one an
+     * operator means when they ask whether the agent is fast enough.
+     */
+    const sloStatus = (calls: number, segment: { channel?: string | null; decider?: string | null } = { channel: "voice", decider: "openai" }) =>
+      queries.latencyAggregateForSegment({ channel: segment.channel ?? null, decider: segment.decider ?? null }, calls).pipe(
+        Effect.orDie,
+        Effect.map(({ aggregate, found }) =>
+          sloFrom(aggregate, { channel: segment.channel ?? null, decider: segment.decider ?? null, calls_requested: calls, calls_found: found }),
+        ),
+      );
 
     /** Call-level score aggregates. Turn-level rows are excluded: they aggregate per turn, not per call. */
     const scoreSummaries = (ids: ReadonlyArray<string>) =>
@@ -306,7 +341,15 @@ export class Quality extends Effect.Service<Quality>()("@feather-lite/Quality", 
           window: { calls: w.ranged ? null : w.limit, from: w.from, to: w.to, conversations: w.ids.length },
           funnel: empty ? EMPTY_FUNNEL : yield* funnel(w.ids),
           promises: empty ? [] : yield* promises(w.ids),
-          slo: sloFrom(aggregateTurnRows(w.ids.length, turns.rows, turns.dropped)),
+          // The Quality report's SLO is over *this page's* window, whatever the operator selected,
+          // so its segment is whatever that window contained rather than the status page's default.
+          // Reporting it as segment `null/null` is the honest description: unfiltered.
+          slo: sloFrom(aggregateTurnRows(w.ids.length, turns.rows, turns.dropped), {
+            channel: null,
+            decider: null,
+            calls_requested: w.ranged ? w.ids.length : w.limit,
+            calls_found: w.ids.length,
+          }),
           tts: ttsReport(ttsAggregate(ttsReadingsOf(turns.rows))),
           reliability: {
             counts: ledger.reliability,

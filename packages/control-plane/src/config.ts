@@ -78,6 +78,12 @@ export interface AppConfigShape {
     readonly transcriptionP95Ms: number;
     readonly ttftP95Ms: number;
     readonly ttsTtfbP95Ms: number;
+    /**
+     * Below this many observations a component reports `insufficient_sample` rather than pass or
+     * fail (O2). At n=6 a p95 is simply the maximum, and a verdict computed from it trains an
+     * operator to ignore the page.
+     */
+    readonly minSample: number;
   };
 }
 
@@ -141,6 +147,7 @@ export const appConfig: Config.Config<AppConfigShape> = Config.all({
   sloTranscriptionP95Ms: Config.integer("SLO_TRANSCRIPTION_P95_MS").pipe(Config.withDefault(600)),
   sloTtftP95Ms: Config.integer("SLO_TTFT_P95_MS").pipe(Config.withDefault(1500)),
   sloTtsTtfbP95Ms: Config.integer("SLO_TTS_TTFB_P95_MS").pipe(Config.withDefault(600)),
+  sloMinSample: Config.integer("SLO_MIN_SAMPLE").pipe(Config.withDefault(20)),
 }).pipe(
   Config.map((c): AppConfigShape => {
     const models = { ...DEFAULT_MODELS };
@@ -186,6 +193,7 @@ export const appConfig: Config.Config<AppConfigShape> = Config.all({
         transcriptionP95Ms: c.sloTranscriptionP95Ms,
         ttftP95Ms: c.sloTtftP95Ms,
         ttsTtfbP95Ms: c.sloTtsTtfbP95Ms,
+        minSample: c.sloMinSample,
       },
     };
   }),
