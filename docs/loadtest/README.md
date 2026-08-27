@@ -189,7 +189,7 @@ efficiency spec. (Local time had just gone past midnight; the report files are U
 | N | equivalence | WER p50/p95 | silent | TTS TTFB p50/p95 | turn latency p50/p95 | worker CPU s | MB/call (rss / private) | CPU s per call-minute |
 |---:|---|---|---:|---|---|---:|---|---:|
 | 1 | **1/1** | 0.000 / 0.111 | 0/3 | 394 / 401 ms | 2987 / 5675 ms | 14.3 | 318 / 309 | 10.2 |
-| 2 | **2/2** | 0.000 / 0.000 | 0/6 | 426 / 453 ms | 3172 / 4440 ms | 32.4 | 305 / 290 | 11.0 |
+| 2 | **2/2** | 0.000 / 0.000 | 0/6 | 426 / 453 ms | 3142 / 4440 ms | 32.4 | 305 / 290 | 11.0 |
 | 5 | **5/5** | 0.000 / 0.111 | 0/15 | 381 / 419 ms | 2984 / 5045 ms | 90.9 | 312 / 298 | 9.3 |
 
 **`cores_used` and `calls_per_vcpu` are deliberately absent from that table, and the artefacts'
@@ -244,6 +244,16 @@ single-process shape for a quick one-off.
 **Postgres is no longer a footnote.** 164 % of a core at peak during the N=5 run, on five concurrent
 calls. It was not the constraint at C=50 in August and it is not the constraint now, but D5b's
 `pg_stat_statements` work has something real to measure.
+
+### One number in this table was recomputed, not re-run
+
+The N=2 turn-latency p50 above reads 3142 ms; the artefact's own summary field says 3172. The fleet
+harness had its own copy of the percentile rule with the same off-by-one the SLO gate had (O1), and
+the two rules differ only where `p × n / 100` lands on an exact integer — which for these samples is
+n=6 at p50 and nothing else. N=1 and N=5 are identical under both rules, as is every WER figure.
+The corrected value was computed from the per-turn data the artefact already carries
+(`results[].turn_latencies[].ms`), so it is a re-reading of the same run rather than a claim about a
+run nobody can check.
 
 ### A caveat on the RSS slope in a fleet report
 

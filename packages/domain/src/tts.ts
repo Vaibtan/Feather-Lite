@@ -21,6 +21,7 @@
  * Neither says the speech sounded good. Both are computed from numbers the voice worker already
  * reports, so they cost nothing on the turn path.
  */
+import { percentile } from "./percentile.js";
 import type { EventRecord } from "./events.js";
 import { booleanScore, numericScore, type ScoreRecord } from "./scores.js";
 
@@ -190,11 +191,13 @@ export const ttsAggregate = (turns: ReadonlyArray<TurnTtsReading>): TtsHeuristic
   };
 };
 
-/** Index-based percentiles, matching how every other latency figure in this system is reported. */
+/** Percentiles by the one nearest-rank rule, matching every other latency figure in this system. */
 const percentilesOf = (values: ReadonlyArray<number>): { n: number; p50: number | null; p95: number | null } => {
-  const xs = [...values].sort((a, b) => a - b);
-  const at = (p: number) => (xs.length === 0 ? null : Math.round(xs[Math.min(xs.length - 1, Math.floor((p / 100) * xs.length))] ?? 0));
-  return { n: xs.length, p50: at(50), p95: at(95) };
+  const at = (p: number) => {
+    const v = percentile(values, p);
+    return v === null ? null : Math.round(v);
+  };
+  return { n: values.length, p50: at(50), p95: at(95) };
 };
 
 /** True median, including the mean of the middle pair on an even count — this is a baseline, not a percentile. */

@@ -22,7 +22,7 @@ import { existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
 import type { TurnLatencyRow } from "@feather-lite/contracts";
-import { ttsAggregate } from "@feather-lite/domain";
+import { percentile, ttsAggregate } from "@feather-lite/domain";
 import { formatResourceReport, perCoreBudget, startResourceSampler, validateReport, WORKER_ROLES, type Role } from "@feather-lite/load-test/resources";
 import { checkEquivalence, loadScenarioReference, type EquivalenceResult } from "./equivalence.js";
 import { buildHarnessScores, postHarnessScores, summariseWer } from "./harness-scores.js";
@@ -163,14 +163,15 @@ for (const call of results) {
 const green = equivalences.filter((r) => r.eq?.equivalent === true).length;
 const hungUp = results.filter((r) => r.hungUp).length;
 const durations = results.map((r) => r.durationMs).sort((a, b) => a - b);
-const percentile = (sorted: ReadonlyArray<number>, p: number) =>
-  sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))] ?? 0;
-const pct = (p: number) => percentile(durations, p);
+// The domain's nearest-rank rule, not a fourth local copy of it: this harness had the same
+// off-by-one the SLO gate had (O1), so a fleet report's p50 could be the larger of two readings.
+// `?? 0` keeps the report's numeric shape for an empty sample, which the schema has always had.
+const pct = (p: number) => percentile(durations, p) ?? 0;
 
 // Per-turn response latency across every call in the fleet. This — not call durationMs, which is
 // dominated by the scripted sleeps — is the number a latency A/B compares.
 const turnMs = results.flatMap((r) => r.turnLatencies.map((t) => t.ms)).sort((a, b) => a - b);
-const turnPct = (p: number) => percentile(turnMs, p);
+const turnPct = (p: number) => percentile(turnMs, p) ?? 0;
 const unanswered = results.reduce((n, r) => n + r.unansweredTurns.length, 0);
 
 // Every borrower line across the fleet, so the gate is over the whole run rather than per call.
@@ -178,7 +179,7 @@ const werValues = results
   .flatMap((r) => r.werLines.map((l) => l.wer))
   .filter((v): v is number => v !== null)
   .sort((a, b) => a - b);
-const werPct = (p: number) => (werValues.length === 0 ? null : percentile(werValues, p));
+const werPct = (p: number) => percentile(werValues, p);
 const worstLine = results.flatMap((r) => r.werLines).reduce<{ turn: string; wer: number; reference: string; hypothesis: string } | null>(
   (worst, l) => (l.wer !== null && (worst === null || l.wer > worst.wer) ? { turn: l.turn, wer: l.wer, reference: l.reference, hypothesis: l.hypothesis } : worst),
   null,

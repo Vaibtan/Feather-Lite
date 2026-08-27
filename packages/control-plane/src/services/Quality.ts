@@ -16,7 +16,7 @@
 import { DateTime, Effect, Option } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import type { LatencyAggregate, QualityReport, SloReport, TtsHeuristicsReport } from "@feather-lite/contracts";
-import { localIsoDate, ORPHANED_REASON, SCORE_DATA_TYPE_BY_NAME, ttsAggregate, type ScoreName, type ScoreSource, type TtsHeuristics } from "@feather-lite/domain";
+import { localIsoDate, ORPHANED_REASON, percentile, SCORE_DATA_TYPE_BY_NAME, ttsAggregate, type ScoreName, type ScoreSource, type TtsHeuristics } from "@feather-lite/domain";
 import { AppConfig } from "../config.js";
 import { Metrics } from "./Metrics.js";
 import { aggregateTurnRows, Queries, ttsReadingsOf } from "./Queries.js";
@@ -41,9 +41,11 @@ const ratio = (numerator: number, denominator: number): number | null => (denomi
 const percentiles = (values: ReadonlyArray<number>, decimals: number) => {
   const factor = 10 ** decimals;
   const round = (n: number) => Math.round(n * factor) / factor;
-  const xs = [...values].sort((a, b) => a - b);
-  const at = (p: number) => (xs.length === 0 ? null : round(xs[Math.min(xs.length - 1, Math.floor((p / 100) * xs.length))] ?? 0));
-  return { n: xs.length, mean: xs.length === 0 ? null : round(xs.reduce((a, b) => a + b, 0) / xs.length), p50: at(50), p95: at(95) };
+  const at = (p: number) => {
+    const v = percentile(values, p);
+    return v === null ? null : round(v);
+  };
+  return { n: values.length, mean: values.length === 0 ? null : round(values.reduce((a, b) => a + b, 0) / values.length), p50: at(50), p95: at(95) };
 };
 
 const EMPTY_FUNNEL = {

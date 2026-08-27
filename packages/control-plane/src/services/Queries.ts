@@ -6,7 +6,7 @@ import { DateTime, Effect, Option } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import type { LatencyAggregate, TurnLatencyRow } from "@feather-lite/contracts";
 import type { EventRecord, ReplaySnapshot, TimelineEntry, TranscriptEntry, TurnTtsReading } from "@feather-lite/domain";
-import { buildTimeline, buildTranscript, charsPerSecond, isWithinContactWindow, replay } from "@feather-lite/domain";
+import { buildTimeline, buildTranscript, charsPerSecond, isWithinContactWindow, percentile, replay } from "@feather-lite/domain";
 import { NotFound } from "../errors.js";
 import { ConversationRepo } from "../repos/conversation.js";
 import { CrmRepo } from "../repos/crm.js";
@@ -321,8 +321,11 @@ const coerce = (v: unknown): number | null => {
  */
 export const aggregateTurnRows = (conversations: number, all: ReadonlyArray<TurnLatencyRow>, dropped: number): LatencyAggregate => {
   const pct = (values: ReadonlyArray<number | null>) => {
-    const xs = values.filter((v): v is number => v !== null).sort((a, b) => a - b);
-    const at = (p: number) => (xs.length === 0 ? null : Math.round(xs[Math.min(xs.length - 1, Math.floor((p / 100) * xs.length))] ?? 0));
+    const xs = values.filter((v): v is number => v !== null);
+    const at = (p: number) => {
+      const v = percentile(xs, p);
+      return v === null ? null : Math.round(v);
+    };
     return { n: xs.length, p50: at(50), p95: at(95) };
   };
   // The total is taken only over turns that have all four components. A simulated turn records the
