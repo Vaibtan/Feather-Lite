@@ -240,6 +240,16 @@ export interface SystemStatus {
   provider_events: { counters: Record<string, number>; recent: Array<{ provider: string; kind: string; stage: string; message: string; at: string; conversation_id: string | null }> };
   slo: SloReport;
   turn_decider: string;
+  judge: { enabled: boolean; model: string };
+  /** Load this server shed rather than served (O9). A 429 is configuration, not a vendor failure. */
+  rate_limiting: {
+    per_minute: number;
+    daily_turn_cap: number;
+    rejected_start: number;
+    rejected_turn: number;
+    rejected_daily_cap: number;
+    buckets: number;
+  };
   demo_mode: boolean;
 }
 export interface ScenarioSummary {

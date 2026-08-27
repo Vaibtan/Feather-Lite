@@ -20,6 +20,7 @@ import {
 import { scoreRecordProblem } from "@feather-lite/domain";
 import { AppConfig } from "../config.js";
 import { ConversationCompleted, NotFound, PreCallRejected, TelephonyError, TurnInProgress, UnknownScenario } from "../errors.js";
+import { rateLimitBucketCount } from "./rateLimit.js";
 import { SchedulingRepo } from "../repos/scheduling.js";
 import { Orchestrator, type Signal } from "../services/Orchestrator.js";
 import { Quality } from "../services/Quality.js";
@@ -97,11 +98,24 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
           const beats = yield* queries.heartbeats().pipe(Effect.catchAll(() => Effect.succeed([])));
           const now = Date.now();
           const ledger = yield* queries.ledgerCounts().pipe(Effect.catchAll(() => Effect.succeed({ conversations_total: 0, outcomes: {}, guardrails: {}, reliability: {} })));
+          // Read once and reused below: the rate-limit block reports three of these by name, and
+          // taking a second snapshot could disagree with the first.
+          const counters = yield* metrics.snapshot();
+          /**
+           * The snapshot is `{uptime_seconds, counters: {...}, histograms: {...}}`, so a named
+           * counter lives one level down. Read as `unknown` and coerced rather than cast: a missing
+           * counter is 0 requests, which is the truth before the first one is shed.
+           */
+          const counted = (name: string): number => {
+            const inner = (counters as { counters?: Record<string, unknown> }).counters ?? {};
+            const v = inner[name];
+            return typeof v === "number" ? v : 0;
+          };
           return {
             ok: dbOk,
             database: dbOk ? ("ok" as const) : ("down" as const),
             agents: beats.map((b) => ({ ...b, online: now - Date.parse(b.last_seen_at) < 30_000 })),
-            counters: yield* metrics.snapshot(),
+            counters,
             ledger,
             // The counters are already wire-shaped; the ring is internal camelCase, so it is
             // mapped here rather than snake-casing the service's own type.
@@ -114,6 +128,15 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
               .pipe(Effect.map((p) => ({ counters: p.counters, recent: p.recent.map((e) => ({ provider: e.provider, kind: e.kind, stage: e.stage, message: e.message, conversation_id: e.conversationId, at: e.at })) }))),
             turn_decider: cfg.turnDecider,
             demo_mode: cfg.demoMode,
+            judge: { enabled: cfg.judge.enabled, model: cfg.judge.model },
+            rate_limiting: {
+              per_minute: cfg.rateLimitPerMinute,
+              daily_turn_cap: cfg.dailyTurnCap,
+              rejected_start: counted("rate_limited_start"),
+              rejected_turn: counted("rate_limited_turn"),
+              rejected_daily_cap: counted("rate_limited_daily_cap"),
+              buckets: rateLimitBucketCount(),
+            },
           };
         }),
       )

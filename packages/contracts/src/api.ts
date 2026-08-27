@@ -454,6 +454,25 @@ export const SystemStatus = Schema.Struct({
   slo: SloReport,
   turn_decider: Schema.String,
   demo_mode: Schema.Boolean,
+  /**
+   * Whether the post-call LLM judge is on. Exposed so a load harness can refuse to start against a
+   * server that would bill a reasoning-model call per conversation (O13) — cost discipline the
+   * docs asserted and nothing enforced.
+   */
+  judge: Schema.Struct({ enabled: Schema.Boolean, model: Schema.String }),
+  /**
+   * Load this server shed rather than served (O9). Counted apart from provider failures because
+   * they answer opposite questions: a 429 is this process working as configured, not a vendor
+   * failing. `buckets` is the size of the per-IP map, published so an unbounded one is visible.
+   */
+  rate_limiting: Schema.Struct({
+    per_minute: Schema.Number,
+    daily_turn_cap: Schema.Number,
+    rejected_start: Schema.Number,
+    rejected_turn: Schema.Number,
+    rejected_daily_cap: Schema.Number,
+    buckets: Schema.Number,
+  }),
 });
 
 export const VoiceSessionRequest = Schema.Struct({

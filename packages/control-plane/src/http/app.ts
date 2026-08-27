@@ -12,6 +12,8 @@ import { TurnRunner } from "./TurnRunner.js";
 import { Orchestrator } from "../services/Orchestrator.js";
 import { OutboxService } from "../services/Outbox.js";
 import { SchedulingService } from "../services/Scheduling.js";
+import { Metrics } from "../services/Metrics.js";
+import { limiter } from "./rateLimit.js";
 import { Queries } from "../services/Queries.js";
 import { Quality } from "../services/Quality.js";
 import { Scores } from "../services/Scores.js";
@@ -67,31 +69,35 @@ export const securityMiddleware = HttpMiddleware.make((app) =>
       }
     }
     if (!open && RATE_LIMITED_PREFIXES.some((p) => url.startsWith(p))) {
+      const metrics = yield* Metrics;
+      /**
+       * A shed request is counted before it is refused (O9). A tier-1 run from one IP was 429ed 92
+       * times, reported "23/50 correct", and moved no counter anywhere - so the status page could
+       * not tell "the agent is broken" from "my own middleware is shedding load". The two prefixes
+       * are counted apart because they mean different things: a refused start is a call that never
+       * happened, a refused turn is a call that broke midway.
+       */
+      const bucketName = url.includes("/turn") || url.includes("/simulate_turn") ? "rate_limited_turn" : "rate_limited_start";
       const ip = (req.headers["cf-connecting-ip"] ?? req.headers["x-forwarded-for"] ?? req.remoteAddress.pipe((o) => (o._tag === "Some" ? o.value : "local"))).split(",")[0]!.trim();
       const ok = yield* rateLimit(ip, cfg.rateLimitPerMinute);
-      if (!ok) return HttpServerResponse.unsafeJson({ _tag: "ApiRateLimited", message: "too many requests" }, { status: 429 });
+      if (!ok) {
+        yield* metrics.increment(bucketName);
+        return HttpServerResponse.unsafeJson({ _tag: "ApiRateLimited", message: "too many requests" }, { status: 429 });
+      }
       if (url.includes("/turn") || url.includes("/simulate_turn")) {
         const under = yield* dailyTurnBudget(cfg.dailyTurnCap);
-        if (!under) return HttpServerResponse.unsafeJson({ _tag: "ApiRateLimited", message: "daily turn budget exhausted" }, { status: 429 });
+        if (!under) {
+          yield* metrics.increment("rate_limited_daily_cap");
+          return HttpServerResponse.unsafeJson({ _tag: "ApiRateLimited", message: "daily turn budget exhausted" }, { status: 429 });
+        }
       }
     }
     return yield* app;
   }),
 );
 
-// Process-local buckets (fine for a single Node process; the edge port would use KV/DO).
-const buckets = new Map<string, { count: number; windowStart: number }>();
-const rateLimit = (ip: string, perMinute: number) =>
-  Effect.sync(() => {
-    const now = Date.now();
-    const b = buckets.get(ip);
-    if (!b || now - b.windowStart > 60_000) {
-      buckets.set(ip, { count: 1, windowStart: now });
-      return true;
-    }
-    b.count += 1;
-    return b.count <= perMinute;
-  });
+/** The per-IP budget; see `rateLimit.ts` for why it is a unit rather than six lines inline (O9). */
+const rateLimit = (ip: string, perMinute: number) => Effect.sync(() => limiter.check(ip, perMinute));
 const dailyRef = { day: "", count: 0 };
 const dailyTurnBudget = (cap: number) =>
   Effect.sync(() => {

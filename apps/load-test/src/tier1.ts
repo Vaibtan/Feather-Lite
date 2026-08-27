@@ -57,6 +57,9 @@ const REPORT_DIR = fileURLToPath(new URL("../../../docs/loadtest/", import.meta.
 /** The scripted conversation every virtual borrower drives to its natural outcome. */
 const SCRIPT = ["yes this is Jordan", "I can pay 550 on Friday", "yes"] as const;
 
+/** How many conversations this run will drive, in either mode. */
+const CONVERSATIONS = MODE === "soak" ? Math.ceil((RATE / SCRIPT.length) * DURATION_SECONDS) : CONCURRENCY;
+
 const authHeaders = (): Record<string, string> => {
   const bearer = process.env["API_BEARER_TOKEN"];
   return { "content-type": "application/json", ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) };
@@ -198,9 +201,23 @@ console.log(
 const sampler = startResourceSampler();
 await sampler.awaitFirstSample();
 
-const status = (await (await fetch(`${BASE}/api/system/status`)).json()) as { turn_decider: string };
+const status = (await (await fetch(`${BASE}/api/system/status`)).json()) as { turn_decider: string; judge?: { enabled: boolean; model: string } };
 if (status.turn_decider !== "scripted") {
   console.warn(`[tier1] WARNING: turn_decider=${status.turn_decider}. Latency will be dominated by the LLM and the run will cost money. Set TURN_DECIDER=scripted.`);
+}
+/**
+ * Refuses to run against a server that would judge every conversation (O13).
+ *
+ * Cost discipline was documented and nothing enforced it: a C=50 run against a server with
+ * `JUDGE_ENABLED=true` enqueues fifty reasoning-model calls, and the only sign is the bill. A
+ * warning is not enough here, because the run is unattended by design and the money is spent by
+ * the time anyone reads the log. `--allow-judge` is the deliberate override.
+ */
+if (status.judge?.enabled === true && !process.argv.includes("--allow-judge")) {
+  console.error(`[tier1] refusing to start: the server has the judge enabled (${status.judge.model}).`);
+  console.error(`[tier1] a run of ${String(CONVERSATIONS)} conversations would enqueue that many reasoning-model calls.`);
+  console.error(`[tier1] set JUDGE_ENABLED=false in the SERVER process env, or pass --allow-judge if you mean it.`);
+  process.exit(2);
 }
 
 // The reference outcome comes from the scenario suite, not from a constant in this file.
@@ -216,7 +233,6 @@ console.log(`[tier1] reference outcome=${String(reference.final_outcome)} states
  * path. Minted in batches because a soak needs thousands and one request for all of them is a
  * minutes-long transaction the server is not being asked to survive here.
  */
-const CONVERSATIONS = MODE === "soak" ? Math.ceil((RATE / SCRIPT.length) * DURATION_SECONDS) : CONCURRENCY;
 const prefix = `t1-${Date.now().toString(36)}`;
 const fixtures: Array<{ borrower_id: string; contact_point_id: string }> = [];
 for (let minted = 0; minted < CONVERSATIONS; ) {

@@ -84,6 +84,30 @@ export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) 
         h("div", { class: "card" }, h("h3", {}, `Outcomes · ${s.ledger.conversations_total} conversations`), kv(s.ledger.outcomes, "no conversations yet")),
         h("div", { class: "card" }, h("h3", {}, "Guardrails"), h("div", { style: "font-size:22px;font-weight:600;margin-bottom:6px" }, String(caught), h("span", { class: "muted small", style: "font-weight:400" }, " model suggestions rejected by the state machine")), kv({ TOOL_REJECTED: g["TOOL_REJECTED"] ?? 0, TURN_DECISION_REJECTED: g["TURN_DECISION_REJECTED"] ?? 0, TURN_SUPERSEDED: g["TURN_SUPERSEDED"] ?? 0 }, "")),
         h("div", { class: "card" }, h("h3", {}, "Volume"), kv({ USER_TURN_FINAL: g["USER_TURN_FINAL"] ?? 0, TOOL_CALLED: g["TOOL_CALLED"] ?? 0, STATE_TRANSITION: g["STATE_TRANSITION"] ?? 0 }, "")),
+        // Load this server shed, apart from load that failed (O9). A tier-1 run 429ed 92 times
+        // reported "23/50 correct" and moved nothing on this page, so a self-inflicted refusal was
+        // indistinguishable from a broken agent. Zeroes here are the answer to "is it me?".
+        h(
+          "div",
+          { class: "card" },
+          h("h3", {}, "Shed by rate limiting"),
+          h(
+            "div",
+            { style: "font-size:22px;font-weight:600;margin-bottom:6px" },
+            String(s.rate_limiting.rejected_start + s.rate_limiting.rejected_turn + s.rate_limiting.rejected_daily_cap),
+            h("span", { class: "muted small", style: "font-weight:400" }, ` requests refused by this process, not by a vendor`),
+          ),
+          kv(
+            {
+              starts: s.rate_limiting.rejected_start,
+              turns: s.rate_limiting.rejected_turn,
+              "daily cap": s.rate_limiting.rejected_daily_cap,
+              "limit/min": s.rate_limiting.per_minute,
+              "ip buckets": s.rate_limiting.buckets,
+            },
+            "",
+          ),
+        ),
       );
       clear(providers);
       // The ring D6 asked for: counters say how much is failing, this says what the failure was.
