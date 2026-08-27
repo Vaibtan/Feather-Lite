@@ -1,0 +1,174 @@
+{
+  "kind": "idle-tree",
+  "label": "start-mode-baseline",
+  "seconds": 90,
+  "taken_at": "2026-08-27T19:26:25.676Z",
+  "resources": {
+    "platform": "win32",
+    "vcpus": 12,
+    "interval_ms": 1000,
+    "samples": 89,
+    "wall_ms": 91043,
+    "load_wall_ms": 90095,
+    "marked": false,
+    "roles": [
+      {
+        "role": "server",
+        "pids": [
+          29120
+        ],
+        "samples": 89,
+        "peak_rss_bytes": 156905472,
+        "peak_private_bytes": 193552384,
+        "cpu_seconds": 2.031,
+        "idle_rss_bytes": 155488256,
+        "last_rss_bytes": 154722304
+      },
+      {
+        "role": "server-launcher",
+        "pids": [
+          13116,
+          23124,
+          29724
+        ],
+        "samples": 89,
+        "peak_rss_bytes": 170364928,
+        "peak_private_bytes": 277327872,
+        "cpu_seconds": 0,
+        "idle_rss_bytes": 170364928,
+        "last_rss_bytes": 170364928
+      },
+      {
+        "role": "worker-main",
+        "pids": [
+          17160
+        ],
+        "samples": 89,
+        "peak_rss_bytes": 193892352,
+        "peak_private_bytes": 1023156224,
+        "cpu_seconds": 0.109,
+        "idle_rss_bytes": 193613824,
+        "last_rss_bytes": 193077248
+      },
+      {
+        "role": "worker-inference",
+        "pids": [
+          22352
+        ],
+        "samples": 89,
+        "peak_rss_bytes": 265166848,
+        "peak_private_bytes": 1013133312,
+        "cpu_seconds": 0,
+        "idle_rss_bytes": 265166848,
+        "last_rss_bytes": 265166848
+      },
+      {
+        "role": "worker-job",
+        "pids": [
+          29628
+        ],
+        "samples": 89,
+        "peak_rss_bytes": 206053376,
+        "peak_private_bytes": 197763072,
+        "cpu_seconds": 0,
+        "idle_rss_bytes": 205684736,
+        "last_rss_bytes": 206053376
+      },
+      {
+        "role": "worker-launcher",
+        "pids": [
+          14192,
+          20888,
+          24256
+        ],
+        "samples": 89,
+        "peak_rss_bytes": 206966784,
+        "peak_private_bytes": 279703552,
+        "cpu_seconds": 0,
+        "idle_rss_bytes": 206966784,
+        "last_rss_bytes": 206966784
+      },
+      {
+        "role": "harness",
+        "pids": [
+          5872,
+          9204,
+          9896
+        ],
+        "samples": 89,
+        "peak_rss_bytes": 277086208,
+        "peak_private_bytes": 282083328,
+        "cpu_seconds": 0.25,
+        "idle_rss_bytes": 276484096,
+        "last_rss_bytes": 250613760
+      }
+    ],
+    "totals": {
+      "peak_rss_bytes": 1474600960,
+      "peak_private_bytes": 3265368064,
+      "cpu_seconds": 2.39,
+      "idle_rss_bytes": 1473769472
+    },
+    "subsets": {
+      "worker": {
+        "peak": 871817216,
+        "idle": 871432192,
+        "peak_private": 2513756160,
+        "idle_private": 2513477632,
+        "roles": [
+          "worker-main",
+          "worker-inference",
+          "worker-job",
+          "worker-launcher"
+        ]
+      },
+      "server": {
+        "peak": 327270400,
+        "idle": 325853184,
+        "peak_private": 470880256,
+        "idle_private": 469520384,
+        "roles": [
+          "server",
+          "server-launcher"
+        ]
+      }
+    },
+    "steady_state": {
+      "target_ms": 60000,
+      "full_window": false,
+      "worker": {
+        "cpu_seconds": 0.094,
+        "wall_ms": 60711
+      },
+      "server": {
+        "cpu_seconds": 1.531,
+        "wall_ms": 60708
+      }
+    },
+    "rss_slope_mb_per_min": 0.02,
+    "private_slope_mb_per_min": 0.43,
+    "containers": [
+      {
+        "name": "feather-lite-livekit",
+        "samples": 18,
+        "peak_mem_bytes": 52481229,
+        "peak_cpu_percent": 0.2,
+        "mean_cpu_percent": 0.1
+      },
+      {
+        "name": "feather-lite-postgres",
+        "samples": 18,
+        "peak_mem_bytes": 356306125,
+        "peak_cpu_percent": 10.1,
+        "mean_cpu_percent": 2.8
+      }
+    ],
+    "host": {
+      "total_mem_bytes": 16477151232,
+      "free_mem_bytes_start": 4335661056,
+      "free_mem_bytes_end": 4332847104
+    },
+    "unclassified_pids": 1,
+    "notes": []
+  }
+}

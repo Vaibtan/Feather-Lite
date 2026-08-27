@@ -1,0 +1,207 @@
+{
+  "tier": "1-control-plane",
+  "api": "http://127.0.0.1:8080",
+  "label": "run2",
+  "mode": "closed",
+  "concurrency": 100,
+  "ramp_seconds": 2,
+  "soak": null,
+  "turn_decider": "scripted",
+  "script": [
+    "yes this is Jordan",
+    "I can pay 550 on Friday",
+    "yes"
+  ],
+  "wall_ms": 3781,
+  "conversations": {
+    "total": 100,
+    "correct": 100,
+    "incorrect": 0
+  },
+  "turns": {
+    "attempted": 300,
+    "ok": 300,
+    "throughput_per_second": 79.34
+  },
+  "latency_ms": {
+    "start": {
+      "n": 100,
+      "p50": 227,
+      "p95": 383,
+      "p99": 395,
+      "max": 407,
+      "mean": 223
+    },
+    "ttft": {
+      "n": 300,
+      "p50": 246,
+      "p95": 370,
+      "p99": 383,
+      "max": 387,
+      "mean": 237
+    },
+    "turn_wall": {
+      "n": 300,
+      "p50": 527,
+      "p95": 724,
+      "p99": 758,
+      "max": 768,
+      "mean": 497
+    }
+  },
+  "errors": {
+    "by_status": {},
+    "start_errors": [],
+    "rate_limited": 0
+  },
+  "pg_at_peak": {
+    "backends": 11,
+    "active": 4,
+    "idleInTransaction": 6,
+    "waiting": 0,
+    "samples": 18
+  },
+  "resources": {
+    "platform": "win32",
+    "vcpus": 12,
+    "interval_ms": 1000,
+    "samples": 6,
+    "wall_ms": 6220,
+    "load_wall_ms": 5541,
+    "marked": true,
+    "roles": [
+      {
+        "role": "server",
+        "pids": [
+          20916
+        ],
+        "samples": 6,
+        "peak_rss_bytes": 358481920,
+        "peak_private_bytes": 371187712,
+        "cpu_seconds": 4.438,
+        "idle_rss_bytes": 275996672,
+        "last_rss_bytes": 358481920
+      },
+      {
+        "role": "server-launcher",
+        "pids": [
+          2484,
+          19404,
+          24160
+        ],
+        "samples": 6,
+        "peak_rss_bytes": 252604416,
+        "peak_private_bytes": 277766144,
+        "cpu_seconds": 0,
+        "idle_rss_bytes": 252604416,
+        "last_rss_bytes": 252604416
+      },
+      {
+        "role": "harness",
+        "pids": [
+          4344,
+          21216,
+          22336,
+          24360
+        ],
+        "samples": 6,
+        "peak_rss_bytes": 385441792,
+        "peak_private_bytes": 453398528,
+        "cpu_seconds": 1.078,
+        "idle_rss_bytes": 361852928,
+        "last_rss_bytes": 385441792
+      }
+    ],
+    "totals": {
+      "peak_rss_bytes": 996528128,
+      "peak_private_bytes": 1102352384,
+      "cpu_seconds": 5.516,
+      "idle_rss_bytes": 890454016
+    },
+    "subsets": {
+      "worker": {
+        "peak": 0,
+        "idle": 0,
+        "roles": [
+          "worker-main",
+          "worker-inference",
+          "worker-job",
+          "worker-launcher"
+        ]
+      },
+      "server": {
+        "peak": 611086336,
+        "idle": 528601088,
+        "roles": [
+          "server",
+          "server-launcher"
+        ]
+      }
+    },
+    "steady_state": {
+      "target_ms": 60000,
+      "full_window": true,
+      "worker": {
+        "cpu_seconds": 0,
+        "wall_ms": 5541
+      },
+      "server": {
+        "cpu_seconds": 4.438,
+        "wall_ms": 5541
+      }
+    },
+    "rss_slope_mb_per_min": null,
+    "private_slope_mb_per_min": null,
+    "containers": [
+      {
+        "name": "feather-lite-livekit",
+        "samples": 2,
+        "peak_mem_bytes": 25805455,
+        "peak_cpu_percent": 0.1,
+        "mean_cpu_percent": 0.1
+      },
+      {
+        "name": "feather-lite-postgres",
+        "samples": 2,
+        "peak_mem_bytes": 380633088,
+        "peak_cpu_percent": 44.7,
+        "mean_cpu_percent": 33.4
+      }
+    ],
+    "host": {
+      "total_mem_bytes": 16477151232,
+      "free_mem_bytes_start": 5504950272,
+      "free_mem_bytes_end": 5482233856
+    },
+    "unclassified_pids": 0,
+    "notes": []
+  },
+  "per_core": {
+    "cores_used": 0.801,
+    "cores_over_full_window": true,
+    "calls_per_vcpu": null,
+    "mb_per_call": null,
+    "turns_per_s_per_core": 99.05,
+    "cpu_seconds_per_turn": 0.0148,
+    "cpu_seconds_per_call_minute": null,
+    "vcpus": 12,
+    "basis": "server+server-launcher"
+  },
+  "reference": {
+    "state_path": [
+      "GREETING",
+      "VERIFYING_IDENTITY",
+      "DISCUSSING_PAYMENT",
+      "CONFIRMING_OUTCOME",
+      "ENDING",
+      "COMPLETED"
+    ],
+    "tools": [
+      "confirm_right_party",
+      "propose_promise_to_pay",
+      "record_promise_to_pay"
+    ],
+    "final_outcome": "PROMISE_TO_PAY"
+  },
+  "incorrect": []
+}
