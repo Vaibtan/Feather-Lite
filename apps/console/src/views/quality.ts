@@ -230,8 +230,11 @@ const renderReliability = (q: QualityReport) => {
   return h(
     "div",
     {},
-    h("h3", {}, "From the ledger (durable)"),
-    kv(durable, "nothing counted yet"),
+    // Scoped to this page's window since O10; it used to be all-time under a "last N calls" header,
+    // which is a number that cannot be reconciled with the funnel beside it. The all-time view is
+    // still on the Status page, labelled there as all time.
+    h("h3", {}, `From the ledger (durable, ${q.window.calls === null ? "selected range" : `last ${String(q.window.calls)} calls`})`),
+    kv(durable, "nothing counted in this window"),
     h("h3", { style: "margin-top:12px" }, "Vendor failures (this process, since restart)"),
     // Labelled separately because these reset on restart: an empty list here is not a healthy week.
     kv(live, "no provider errors or retries since this server started"),

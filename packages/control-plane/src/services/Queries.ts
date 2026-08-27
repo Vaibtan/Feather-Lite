@@ -45,6 +45,14 @@ export interface ConversationDetail {
   readonly events: ReadonlyArray<EventRecord>;
 }
 
+/** The durable, all-time ledger view. Named at module scope so the service's type can refer to it. */
+export interface LedgerCountsValue {
+  readonly conversations_total: number;
+  readonly outcomes: Record<string, number>;
+  readonly guardrails: Record<string, number>;
+  readonly reliability: Record<string, number>;
+}
+
 export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", {
   effect: Effect.gen(function* () {
     const conv = yield* ConversationRepo;
@@ -126,13 +134,27 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
     const heartbeats = () => sched.listHeartbeats().pipe(Effect.map((rows) => rows.map((r) => ({ agent_name: r.agentName, last_seen_at: r.lastSeenAt.toISOString(), meta: r.meta }))));
 
     /** Durable counts for /api/system/status ("the state machine caught the model N times"). */
+    /**
+     * The durable, all-time ledger view, memoised for 5 seconds (O10/O11).
+     *
+     * Four aggregate scans of `conversation_events`, one of them with a correlated NOT EXISTS, run
+     * on every `/status` poll — and the console polls every 5 s, per open tab. Measured on a
+     * 13 982-conversation database this is what `/status` spends its ~0.29 s on; the O11 work on
+     * the turn window could not move that number at all until this was cached.
+     *
+     * All-time counts over an append-only ledger cannot meaningfully change inside five seconds,
+     * and the page labels them "all time" precisely because they are not a live reading.
+     */
+    const LEDGER_TTL_MS = 5_000;
+    let ledgerCache: { at: number; value: LedgerCountsValue } | null = null;
+
     const ledgerCounts = () =>
       Effect.gen(function* () {
         const total = yield* conv.countConversations();
         const outcomes = yield* conv.outcomeCounts();
         const guardrails = yield* conv.guardrailCounts();
         const reliability = yield* conv.reliabilityCounts();
-        return {
+        const value = {
           conversations_total: total.count,
           outcomes: Object.fromEntries(outcomes.map((o) => [o.outcome, o.count])),
           guardrails: Object.fromEntries(guardrails.map((g) => [g.type, g.count])),
@@ -145,6 +167,24 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
             calls_orphaned: reliability.callsOrphaned,
           },
         };
+        return value;
+      });
+
+    /**
+     * The same counts for the status page, memoised for 5 seconds.
+     *
+     * The cache is here rather than inside `ledgerCounts` deliberately. That function is what the
+     * DB tests read as a source of truth immediately after writing events, and a five-second-stale
+     * answer broke four of them — correctly, because a stale read *is* wrong for that caller. It is
+     * right only for a dashboard that polls every five seconds, so only that caller opts in.
+     */
+    const ledgerCountsForStatus = () =>
+      Effect.gen(function* () {
+        const now = Date.now();
+        if (ledgerCache !== null && now - ledgerCache.at < LEDGER_TTL_MS) return ledgerCache.value;
+        const value = yield* ledgerCounts();
+        ledgerCache = { at: now, value };
+        return value;
       });
 
     /**
@@ -322,6 +362,18 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
       borrowerDirectory,
       heartbeats,
       ledgerCounts,
+      ledgerCountsForStatus,
+      reliabilityCountsFor: (ids: ReadonlyArray<string>) =>
+        conv.reliabilityCountsFor(ids).pipe(
+          Effect.map((r) => ({
+            turns_superseded: r.turnsSuperseded,
+            no_input_closes: r.noInputCloses,
+            decider_unavailable: r.deciderUnavailable,
+            tts_silent_playouts: r.ttsSilentPlayouts,
+            readbacks_repeated_unheard: r.readbacksRepeatedUnheard,
+            calls_orphaned: r.callsOrphaned,
+          })),
+        ),
       turnLatencies,
       latencyAggregateForSegment,
       turnRowsFor,

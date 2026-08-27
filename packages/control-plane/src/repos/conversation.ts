@@ -207,6 +207,59 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
      * the borrower did not hear, and the model asking to record a promise that was never proposed.
      * Only the first is a read-back repeated unheard.
      */
+    /**
+     * The same six counts over an explicit set of conversations (O10).
+     *
+     * The all-time variant below is what the Quality page was showing under a "last N calls"
+     * header: a report whose funnel, SLO and promises all describe one window, with one card
+     * silently describing every call ever made. It is also a full scan of `conversation_events`
+     * with a correlated NOT EXISTS, which is why `/status` costs ~0.29 s on a 14 000-conversation
+     * database regardless of what else is optimised.
+     *
+     * Same predicates, same SQL twins of the domain's rules — only the scope differs.
+     */
+    const reliabilityCountsFor = (conversationIds: ReadonlyArray<string>) =>
+      conversationIds.length === 0
+        ? Effect.succeed({ turnsSuperseded: 0, noInputCloses: 0, deciderUnavailable: 0, ttsSilentPlayouts: 0, readbacksRepeatedUnheard: 0, callsOrphaned: 0 })
+        : sql<{
+            turnsSuperseded: string;
+            noInputCloses: string;
+            deciderUnavailable: string;
+            ttsSilentPlayouts: string;
+            readbacksRepeatedUnheard: string;
+            callsOrphaned: string;
+          }>`
+        SELECT
+          count(*) FILTER (WHERE type = 'TURN_SUPERSEDED')::text AS turns_superseded,
+          count(*) FILTER (WHERE type = 'CALL_CONTROL' AND payload->>'action' = 'NO_INPUT_CLOSE')::text AS no_input_closes,
+          count(*) FILTER (WHERE type = 'TURN_DECISION_REJECTED' AND payload->>'reason' = 'DECIDER_UNAVAILABLE')::text AS decider_unavailable,
+          count(*) FILTER (
+            WHERE type = 'AGENT_TURN_PLAYOUT' AND payload->>'interrupted' = 'true' AND payload->>'heard_text' = ''
+              AND NOT EXISTS (
+                SELECT 1 FROM conversation_events s
+                WHERE s.conversation_id = conversation_events.conversation_id
+                  AND s.type = 'TURN_SUPERSEDED' AND s.payload->>'turn_id' = conversation_events.payload->>'turn_id'
+              )
+          )::text AS tts_silent_playouts,
+          count(*) FILTER (WHERE type = 'TOOL_REJECTED' AND payload->>'name' = 'record_promise_to_pay'
+                             AND payload->>'reason' = 'INVALID_ARGS' AND payload->>'detail' = ${READBACK_INTERRUPTED_DETAIL})::text AS readbacks_repeated_unheard,
+          count(*) FILTER (WHERE type = 'CALL_CONTROL' AND payload->>'action' = 'HANGUP' AND payload->>'reason' = ${ORPHANED_REASON})::text AS calls_orphaned
+        FROM conversation_events
+        WHERE conversation_id IN ${sql.in(conversationIds)}`.pipe(
+            Effect.map((rows) => {
+              const r = rows[0];
+              const n = (v: string | undefined) => Number(v ?? 0);
+              return {
+                turnsSuperseded: n(r?.turnsSuperseded),
+                noInputCloses: n(r?.noInputCloses),
+                deciderUnavailable: n(r?.deciderUnavailable),
+                ttsSilentPlayouts: n(r?.ttsSilentPlayouts),
+                readbacksRepeatedUnheard: n(r?.readbacksRepeatedUnheard),
+                callsOrphaned: n(r?.callsOrphaned),
+              };
+            }),
+          );
+
     const reliabilityCounts = SqlSchema.single({
       Request: Schema.Void,
       Result: Schema.Struct({
@@ -417,6 +470,7 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
       setAttemptProviderCallId,
       countRecentAttempts,
       insertConversation,
+      reliabilityCountsFor,
       findConversation,
       lockConversation,
       hasActiveConversation,

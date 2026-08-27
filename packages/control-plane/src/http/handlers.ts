@@ -97,7 +97,7 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
           const dbOk = yield* sql`SELECT 1`.pipe(Effect.as(true), Effect.catchAll(() => Effect.succeed(false)));
           const beats = yield* queries.heartbeats().pipe(Effect.catchAll(() => Effect.succeed([])));
           const now = Date.now();
-          const ledger = yield* queries.ledgerCounts().pipe(Effect.catchAll(() => Effect.succeed({ conversations_total: 0, outcomes: {}, guardrails: {}, reliability: {} })));
+          const ledger = yield* queries.ledgerCountsForStatus().pipe(Effect.catchAll(() => Effect.succeed({ conversations_total: 0, outcomes: {}, guardrails: {}, reliability: {} })));
           // Read once and reused below: the rate-limit block reports three of these by name, and
           // taking a second snapshot could disagree with the first.
           const counters = yield* metrics.snapshot();

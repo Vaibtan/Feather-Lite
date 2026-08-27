@@ -62,6 +62,7 @@ const EMPTY_FUNNEL = {
   rates: { contact: null, right_party: null, promise: null, voicemail: null },
 };
 const EMPTY_AGREEMENT = { judged: 0, human_labelled: 0, both: 0, agreed: 0, rate: null };
+const EMPTY_RELIABILITY = { turns_superseded: 0, no_input_closes: 0, decider_unavailable: 0, tts_silent_playouts: 0, readbacks_repeated_unheard: 0, calls_orphaned: 0 };
 
 /**
  * The domain's TTS heuristics in the API's shape. Only the worst few outliers travel: the point of
@@ -388,7 +389,11 @@ export class Quality extends Effect.Service<Quality>()("@feather-lite/Quality", 
           }),
           tts: ttsReport(ttsAggregate(ttsReadingsOf(turns.rows))),
           reliability: {
-            counts: ledger.reliability,
+            // Over this report's own window, not all time (O10). The page's header says "last N
+            // calls"; a card underneath it describing every call ever made is a number that cannot
+            // be reconciled with the funnel beside it. The durable all-time view stays on /status,
+            // where it is labelled as such.
+            counts: empty ? EMPTY_RELIABILITY : yield* queries.reliabilityCountsFor(w.ids).pipe(Effect.orDie),
             orphan_detect_ms: percentiles(empty ? [] : yield* numericScores(w.ids, "system.orphan_detect_ms"), 0),
             // Live, process-local: labelled separately on the page because these reset on restart.
             provider_counters: providerEvents.counters,

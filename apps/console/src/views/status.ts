@@ -81,9 +81,11 @@ export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) 
       const kv = (o: Record<string, number>, empty: string) =>
         Object.keys(o).length ? h("dl", { class: "kv" }, ...Object.entries(o).flatMap(([k, v]) => [h("dt", { class: "mono" }, k), h("dd", {}, String(v))])) : h("div", { class: "muted small" }, empty);
       ledger.append(
-        h("div", { class: "card" }, h("h3", {}, `Outcomes · ${s.ledger.conversations_total} conversations`), kv(s.ledger.outcomes, "no conversations yet")),
-        h("div", { class: "card" }, h("h3", {}, "Guardrails"), h("div", { style: "font-size:22px;font-weight:600;margin-bottom:6px" }, String(caught), h("span", { class: "muted small", style: "font-weight:400" }, " model suggestions rejected by the state machine")), kv({ TOOL_REJECTED: g["TOOL_REJECTED"] ?? 0, TURN_DECISION_REJECTED: g["TURN_DECISION_REJECTED"] ?? 0, TURN_SUPERSEDED: g["TURN_SUPERSEDED"] ?? 0 }, "")),
-        h("div", { class: "card" }, h("h3", {}, "Volume"), kv({ USER_TURN_FINAL: g["USER_TURN_FINAL"] ?? 0, TOOL_CALLED: g["TOOL_CALLED"] ?? 0, STATE_TRANSITION: g["STATE_TRANSITION"] ?? 0 }, "")),
+        // "All time" said out loud (O10): these are every call ever made, unlike the Quality page's
+        // counts, which describe whatever window is selected there.
+        h("div", { class: "card" }, h("h3", {}, `Outcomes · all time · ${s.ledger.conversations_total} conversations`), kv(s.ledger.outcomes, "no conversations yet")),
+        h("div", { class: "card" }, h("h3", {}, "Guardrails (all time)"), h("div", { style: "font-size:22px;font-weight:600;margin-bottom:6px" }, String(caught), h("span", { class: "muted small", style: "font-weight:400" }, " model suggestions rejected by the state machine")), kv({ TOOL_REJECTED: g["TOOL_REJECTED"] ?? 0, TURN_DECISION_REJECTED: g["TURN_DECISION_REJECTED"] ?? 0, TURN_SUPERSEDED: g["TURN_SUPERSEDED"] ?? 0 }, "")),
+        h("div", { class: "card" }, h("h3", {}, "Volume (all time)"), kv({ USER_TURN_FINAL: g["USER_TURN_FINAL"] ?? 0, TOOL_CALLED: g["TOOL_CALLED"] ?? 0, STATE_TRANSITION: g["STATE_TRANSITION"] ?? 0 }, "")),
         // Load this server shed, apart from load that failed (O9). A tier-1 run 429ed 92 times
         // reported "23/50 correct" and moved nothing on this page, so a self-inflicted refusal was
         // indistinguishable from a broken agent. Zeroes here are the answer to "is it me?".
