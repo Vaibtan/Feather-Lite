@@ -61,6 +61,9 @@ importers:
       typescript:
         specifier: ^5.9.2
         version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@22.20.1)(lightningcss@1.33.0)(tsx@4.23.12)
 
   apps/server:
     dependencies:
@@ -135,6 +138,9 @@ importers:
         specifier: ^3.25.0
         version: 3.25.76
     devDependencies:
+      '@feather-lite/load-test':
+        specifier: workspace:*
+        version: link:../load-test
       '@types/node':
         specifier: ^22.17.0
         version: 22.20.1

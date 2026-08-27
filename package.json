@@ -22,6 +22,7 @@
     "lf:down": "docker compose -f deploy/langfuse/docker-compose.yml -p feather-lite-langfuse stop",
     "loadtest:tier1": "pnpm --filter @feather-lite/load-test tier1",
     "loadtest:tier2": "pnpm --filter @feather-lite/voice-worker fake-borrower-fleet",
+    "loadtest:idle": "pnpm --filter @feather-lite/load-test idle",
     "dev": "pnpm --parallel --filter @feather-lite/server --filter @feather-lite/voice-worker --filter @feather-lite/console dev",
     "dev:server": "pnpm --filter @feather-lite/server dev",
     "dev:worker": "pnpm --filter @feather-lite/voice-worker dev",
