@@ -69,15 +69,35 @@ export const DEMO_BORROWERS: ReadonlyArray<SeedBorrower> = [
 ];
 
 /**
- * A unique, syntactically plausible NANP number for a load fixture. `contact_points.value` is
- * unique, so this must not collide across a 1000-row run: it takes 48 bits of the fixture's UUID
- * rather than the digits-only surgery that a hex id makes unreliable (a UUID with few decimal
- * digits would pad out to the same number as its neighbours).
+ * A syntactically plausible NANP number for a load fixture, allocated from a sequence.
+ *
+ * This used to hash 48 bits of the fixture's UUID into the seven subscriber digits, which is a
+ * random draw from ten million values — and `contact_points.value` is UNIQUE. That is the birthday
+ * problem: at 3 000 fixtures a collision is ~20 % likely, at 4 000 already better than even, and a
+ * collision fails the whole all-or-nothing batch with `Failed to execute statement`. It duly did,
+ * on the first attempt at a 3 000-borrower soak run, against a dev database that had accumulated
+ * 4 109 fixtures from earlier runs.
+ *
+ * The batch now takes the lowest free numbers in the exchange instead. Not `MAX(value) + 1`: the
+ * numbers already in a dev database were drawn at random, so the highest of four thousand of them
+ * sits within a few thousand of the ceiling, and counting up from there would wrap into the low
+ * range and collide again after a couple of thousand rows. Reading the occupied set costs one
+ * small query, is exact, and leaves the UNIQUE index as the guard rather than the discovery
+ * mechanism. An exhausted exchange fails by name instead of by SQL error.
  */
-const fixturePhone = (borrowerId: string): string => {
-  const bits = BigInt(`0x${borrowerId.replace(/-/g, "").slice(0, 12)}`);
-  // 555-01xx is the reserved fictional exchange; keep the last 7 digits inside it.
-  return `+1555${(bits % 10_000_000n).toString().padStart(7, "0")}`;
+const FIXTURE_PHONE_PREFIX = "+1555";
+const FIXTURE_PHONE_CAPACITY = 10_000_000;
+const fixturePhone = (subscriber: number): string => `${FIXTURE_PHONE_PREFIX}${subscriber.toString().padStart(7, "0")}`;
+
+/**
+ * The lowest `count` subscriber numbers not already issued, never more than the exchange holds.
+ * `capacity` is a parameter only so the exhaustion boundary can be tested without building a
+ * ten-million-entry set.
+ */
+export const freeFixtureSubscribers = (taken: ReadonlySet<number>, count: number, capacity: number = FIXTURE_PHONE_CAPACITY): number[] => {
+  const out: number[] = [];
+  for (let n = 0; n < capacity && out.length < count; n += 1) if (!taken.has(n)) out.push(n);
+  return out;
 };
 
 /** Spread across the globe so at least one is inside 08:00-21:00 local at any UTC hour. */
@@ -168,13 +188,23 @@ export class SeedService extends Effect.Service<SeedService>()("@feather-lite/Se
           const prefix = input.prefix ?? `load-${Date.now().toString(36)}`;
           yield* crm.ensureActiveAgentVersion(yield* ids.next(), "collections-v2", "v2-bootstrap");
 
+          // Read inside the transaction; two concurrent batches would still be caught by the UNIQUE
+          // index, which is why it stays.
+          const issued = yield* sql<{ readonly value: string }>`
+            SELECT value FROM contact_points WHERE value LIKE ${`${FIXTURE_PHONE_PREFIX}%`}`;
+          const taken = new Set(issued.map((r) => Number(r.value.slice(FIXTURE_PHONE_PREFIX.length))));
+          const subscribers = freeFixtureSubscribers(taken, input.count);
+          if (subscribers.length < input.count) {
+            return yield* Effect.fail(new Error(`the ${FIXTURE_PHONE_PREFIX} fixture exchange has ${String(FIXTURE_PHONE_CAPACITY - taken.size)} numbers free; ${String(input.count)} were asked for`));
+          }
+
           const out: Array<{ borrower_id: string; contact_point_id: string; name: string; timezone: string }> = [];
           for (let i = 0; i < input.count; i += 1) {
             const borrowerId = yield* ids.next();
             const cpId = yield* ids.next();
             const name = `Jordan ${prefix}-${String(i).padStart(4, "0")}`;
             yield* sql`INSERT INTO borrowers ${sql.insert({ id: borrowerId, name, timezone: zone, status: "ACTIVE" })}`;
-            yield* sql`INSERT INTO contact_points ${sql.insert({ id: cpId, value: fixturePhone(borrowerId), isValid: true, consentStatus: "ALLOWED", timezoneOverride: zone })}`;
+            yield* sql`INSERT INTO contact_points ${sql.insert({ id: cpId, value: fixturePhone(subscribers[i]!), isValid: true, consentStatus: "ALLOWED", timezoneOverride: zone })}`;
             yield* sql`INSERT INTO borrower_contact_points ${sql.insert({ borrowerId, contactPointId: cpId, priority: 1, relationship: "PRIMARY" })}`;
             yield* sql`INSERT INTO loans ${sql.insert({ id: yield* ids.next(), borrowerId, principal: "10000.00", balanceDue: "550.00", dueDate: "2026-08-01", status: "DELINQUENT", delinquencyDays: 15 })}`;
             out.push({ borrower_id: borrowerId, contact_point_id: cpId, name, timezone: zone });
