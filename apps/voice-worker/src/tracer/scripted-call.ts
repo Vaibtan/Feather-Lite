@@ -284,14 +284,27 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
         // around 250 and channel silence stays under ~25, so 80 splits them cleanly. First
         // energetic frame after the borrower fell silent is when a human would hear the reply.
         const SPEECH_RMS = 80;
+        /**
+         * Every fourth sample, not every sample (W8). Frames are ~10 ms, and the onset detector
+         * needs that 10 ms of resolution — it does not need the RMS of a 10 ms frame computed over
+         * all ~480 of its samples at 48 kHz. A quarter of them puts the same speech/silence
+         * decision either side of a threshold that sits between 25 and 250, and takes three
+         * quarters of this loop off the box the worker is being measured on. Frames are still
+         * counted one by one, and no frame is skipped, so onset timing is unchanged.
+         */
+        const SAMPLE_STRIDE = 4;
         for await (const frame of stream) {
           audioFrames += 1;
           const pending = awaiting.reply;
           if (pending && pending.audioAt === null) {
             const data = frame.data;
             let sum = 0;
-            for (let i = 0; i < data.length; i++) sum += data[i]! * data[i]!;
-            if (Math.sqrt(sum / data.length) > SPEECH_RMS) pending.audioAt = Date.now();
+            let n = 0;
+            for (let i = 0; i < data.length; i += SAMPLE_STRIDE) {
+              sum += data[i]! * data[i]!;
+              n += 1;
+            }
+            if (n > 0 && Math.sqrt(sum / n) > SPEECH_RMS) pending.audioAt = Date.now();
           }
         }
       })();

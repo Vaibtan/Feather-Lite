@@ -11,20 +11,25 @@
  * fleet mints throwaway fixtures via POST /api/demo/load-fixtures. Borrower lines are synthesised
  * once and replayed from the WAV cache, so a 10-call run does not pay TTS for 30 utterances.
  *
+ * Since 2026-08-27 the borrowers run in their own forked process (`--in-proc` to opt out) and the
+ * run reports CPU-seconds and peak RSS per process role, so the fleet finally distinguishes what
+ * the worker cost from what the harness cost on the same laptop (spec D1, findings W8).
+ *
  * Run: pnpm --filter @feather-lite/voice-worker fake-borrower-fleet -- --calls 5
  */
-import { writeFileSync, mkdirSync } from "node:fs";
+import { fork } from "node:child_process";
+import { existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
-import { initializeLogger } from "@livekit/agents";
 import type { TurnLatencyRow } from "@feather-lite/contracts";
 import { ttsAggregate } from "@feather-lite/domain";
+import { formatResourceReport, perCoreBudget, startResourceSampler, validateReport, WORKER_ROLES, type Role } from "@feather-lite/load-test/resources";
 import { checkEquivalence, loadScenarioReference, type EquivalenceResult } from "./equivalence.js";
 import { buildHarnessScores, postHarnessScores, summariseWer } from "./harness-scores.js";
-import { loadScriptedLines, runScriptedCall, type ScriptedCallResult } from "./scripted-call.js";
+import type { ScriptedCallResult } from "./scripted-call.js";
+import type { BorrowerProcMessage, BorrowerProcRequest } from "./borrower-proc.js";
 
 loadEnv({ path: fileURLToPath(new URL("../../../../.env", import.meta.url)) });
-initializeLogger({ pretty: true, level: "warn" });
 
 const flag = (name: string, fallback: string): string => {
   const i = process.argv.indexOf(`--${name}`);
@@ -46,6 +51,12 @@ const CALLS = Number(flag("calls", "5"));
  * worst while still failing a run whose transcription genuinely degrades.
  */
 const MAX_WER = Number(flag("max-wer", "0.20"));
+/**
+ * Borrowers run in a forked child by default (W8). `--in-proc` keeps the old single-process shape
+ * for a quick one-off; every committed measurement uses the forked one, because a run that reports
+ * the worker's latency while N Opus encoders share its event loop is measuring the harness.
+ */
+const IN_PROC = process.argv.includes("--in-proc");
 const CONTROL_PLANE_URL = (process.env["CONTROL_PLANE_URL"] ?? "http://127.0.0.1:8080").replace(/\/$/, "");
 const REPORT_DIR = fileURLToPath(new URL("../../../../docs/loadtest/", import.meta.url));
 
@@ -56,10 +67,15 @@ const authHeaders = (): Record<string, string> => {
   return { "content-type": "application/json", ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) };
 };
 
-log(`calls=${CALLS} max-wer=${MAX_WER} livekit=${process.env["LIVEKIT_URL"] ?? "(unset)"} stt/tts=${process.env["STT_TTS_PROVIDER"] ?? "inference"}`);
+log(`calls=${CALLS} max-wer=${MAX_WER} borrowers=${IN_PROC ? "in-process" : "forked child"} livekit=${process.env["LIVEKIT_URL"] ?? "(unset)"} stt/tts=${process.env["STT_TTS_PROVIDER"] ?? "inference"}`);
 
-const lines = await loadScriptedLines();
-log(`borrower lines ready (${lines.cached ? "WAV cache" : "synthesised"}): ${lines.describe}`);
+/**
+ * Started first so its opening tick is the idle worker tree: that reading is the `idle_rss_tree`
+ * term of `mb_per_call`, and it is only idle before the first room is created.
+ */
+const roleOverrides = new Map<number, Role>([[process.pid, "harness"]]);
+const sampler = startResourceSampler({ roleOverrides });
+await sampler.awaitFirstSample();
 
 const fixturesRes = await fetch(`${CONTROL_PLANE_URL}/api/demo/load-fixtures`, {
   method: "POST",
@@ -74,18 +90,62 @@ log("running the reference simulation scenario...");
 const reference = await loadScenarioReference(CONTROL_PLANE_URL);
 log(`reference: states=${JSON.stringify(reference.statePath)} tools=${JSON.stringify(reference.tools)} outcome=${String(reference.finalOutcome)}`);
 
-log(`starting ${CALLS} concurrent calls...`);
-const results = await Promise.all(
-  fixtures.map((f, i) =>
-    runScriptedCall({
-      lines,
-      controlPlaneUrl: CONTROL_PLANE_URL,
-      borrowerName: f.name,
-      participantIdentity: `borrower-fleet-${i}`,
-      label: `call${String(i).padStart(2, "0")}`,
-    }),
-  ),
-);
+const callSpecs = fixtures.map((f, i) => ({ borrowerName: f.name, participantIdentity: `borrower-fleet-${i}`, label: `call${String(i).padStart(2, "0")}` }));
+
+/** Run the fleet in a forked child so its CPU is attributable, or in this process on `--in-proc`. */
+const runBorrowers = async (): Promise<{ results: ScriptedCallResult[]; speech: string; dispose: () => void }> => {
+  if (IN_PROC) {
+    // Imported here, not at the top: with the borrowers in a child this process never touches the
+    // media stack, and a harness that loads `@livekit/agents` and `rtc-node` to measure a worker is
+    // adding hundreds of megabytes to the box it is measuring.
+    const { initializeLogger } = await import("@livekit/agents");
+    initializeLogger({ pretty: true, level: "warn" });
+    const { loadScriptedLines, runScriptedCall } = await import("./scripted-call.js");
+    const lines = await loadScriptedLines();
+    log(`borrower lines ready (${lines.cached ? "WAV cache" : "synthesised"}): ${lines.describe}`);
+    log(`starting ${CALLS} concurrent calls in this process...`);
+    const results = await Promise.all(callSpecs.map((c) => runScriptedCall({ lines, controlPlaneUrl: CONTROL_PLANE_URL, ...c })));
+    return { results, speech: lines.describe, dispose: () => undefined };
+  }
+  // The tracer harnesses run under `tsx`, so the child is the `.ts` source; the `.js` sibling is
+  // what a bundled build would leave. Pick whichever exists rather than assuming the toolchain.
+  const tsPath = fileURLToPath(new URL("./borrower-proc.ts", import.meta.url));
+  const childPath = existsSync(tsPath) ? tsPath : fileURLToPath(new URL("./borrower-proc.js", import.meta.url));
+  const child = fork(childPath, [], { execArgv: process.execArgv, stdio: ["ignore", "inherit", "inherit", "ipc"] });
+  roleOverrides.set(child.pid ?? -1, "harness-borrower");
+  log(`borrower process forked (pid ${String(child.pid)}); starting ${CALLS} concurrent calls...`);
+  let speech = "(not reported)";
+  return await new Promise((resolve, reject) => {
+    const request: BorrowerProcRequest = { controlPlaneUrl: CONTROL_PLANE_URL, calls: callSpecs };
+    child.on("message", (m: BorrowerProcMessage) => {
+      if (m.kind === "ready") child.send(request);
+      else if (m.kind === "log") {
+        if (m.line.startsWith("borrower lines ready")) speech = m.line.slice(m.line.indexOf("): ") + 3);
+        log(m.line);
+      } else if (m.kind === "results") {
+        // Left alive until the sampler has stopped: killing it here would drop up to a second of
+        // its CPU from the report, which is the one number this whole change exists to produce.
+        resolve({ results: [...m.results], speech, dispose: () => child.kill() });
+      } else reject(new Error(`borrower process failed: ${m.error}`));
+    });
+    // A child that dies without answering must fail the run loudly; a fleet that silently reported
+    // zero calls would read as "nothing went wrong".
+    child.on("exit", (code, signal) => {
+      if (signal === null && code !== 0) reject(new Error(`borrower process exited ${String(code)} before reporting results`));
+    });
+    child.on("error", reject);
+  });
+};
+
+sampler.mark();
+const { results, speech: speechDescribe, dispose: disposeBorrowers } = await runBorrowers();
+// Stopped the moment the calls end. The equivalence sweep and the ledger reads that follow are the
+// harness's own work; leaving them inside the window would stretch the wall clock the per-core
+// budget divides by and flatter every figure derived from it.
+const resources = await sampler.stop();
+disposeBorrowers();
+const callMinutes = results.reduce((a, r) => a + r.durationMs, 0) / 60_000;
+const budget = perCoreBudget(resources, { roles: WORKER_ROLES, calls: CALLS, callMinutes });
 
 const equivalences: Array<{ call: ScriptedCallResult; eq: EquivalenceResult | null; eqError: string | null }> = [];
 for (const call of results) {
@@ -175,6 +235,8 @@ for (const o of tts.outliers.slice(0, 3)) {
   console.log(`      outlier ${o.turnId} ${o.charsPerSecond.toFixed(1)} chars/s (${o.deviation > 0 ? "+" : ""}${(o.deviation * 100).toFixed(0)}%)`);
 }
 console.log("");
+console.log(formatResourceReport(resources, budget));
+console.log("");
 for (const { call, eq, eqError } of equivalences) {
   const verdict = eq?.equivalent ? "EQUIVALENT" : "MISMATCH";
   console.log(`  ${call.label} ${verdict} hungUp=${call.hungUp} frames=${call.agentAudioFrames} ${call.durationMs}ms ${call.error ?? ""}`);
@@ -186,7 +248,7 @@ const report = {
   tier: "2-voice",
   livekit_url: process.env["LIVEKIT_URL"] ?? null,
   stt_tts_provider: process.env["STT_TTS_PROVIDER"] ?? "inference",
-  speech: lines.describe,
+  speech: speechDescribe,
   calls: CALLS,
   agent_hung_up: hungUp,
   equivalence_green: green,
@@ -208,6 +270,9 @@ const report = {
     baseline_readings: tts.baselineReadings,
     outliers: tts.outliers,
   },
+  borrowers: IN_PROC ? "in-process" : "forked-child",
+  resources,
+  per_core: budget,
   reference: { scenario_id: reference.scenarioId, state_path: reference.statePath, tools: reference.tools, final_outcome: reference.finalOutcome },
   results: equivalences.map(({ call, eq, eqError }) => ({
     label: call.label,
@@ -226,6 +291,10 @@ const report = {
     final_outcome: eq?.finalOutcome ?? null,
   })),
 };
+// A report without its resources block looks like a measurement and is not; the next phase would
+// cite it. Fail the run rather than write one.
+const reportProblems = validateReport(report);
+if (reportProblems.length > 0) throw new Error(`report is not a valid measurement: ${reportProblems.join("; ")}`);
 mkdirSync(REPORT_DIR, { recursive: true });
 const path = `${REPORT_DIR}${new Date().toISOString().slice(0, 10)}-tier2-n${CALLS}.json`;
 writeFileSync(path, `${JSON.stringify(report, null, 2)}\n`);
