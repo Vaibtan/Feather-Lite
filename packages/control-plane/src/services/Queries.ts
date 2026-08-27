@@ -148,12 +148,20 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
       });
 
     /**
-     * The per-turn latency waterfall for one conversation, read straight out of
+     * The per-turn latency waterfall across a set of conversations, read straight out of
      * `conversation_turns.result` — `ttft_ms` written by the orchestrator, the three worker-side
      * numbers merged in later by the `turn_metrics` signal.
+     *
+     * One query for the whole set, not one per conversation (O11). It used to be called in a loop:
+     * measured at ~1.4 ms per conversation and linear, so the status page's `MAX_WINDOW` of 1 000
+     * meant ~1.4 s of round trips — on an endpoint the console polls every 5 seconds. A console tab
+     * left open during a load run was itself a meaningful share of the load.
      */
-    const turnLatenciesWithDropped = (conversationId: string): Effect.Effect<{ rows: TurnLatencyRow[]; dropped: number }, never, PgClient.PgClient> =>
+    const turnRowsForMany = (conversationIds: ReadonlyArray<string>): Effect.Effect<{ rows: TurnLatencyRow[]; dropped: number }, never, PgClient.PgClient> =>
       Effect.gen(function* () {
+        // `sql.in` of an empty set is not valid SQL, and an empty window is a normal thing to ask
+        // about — a fresh database, or a range with no calls in it.
+        if (conversationIds.length === 0) return { rows: [], dropped: 0 };
         const sql = yield* PgClient.PgClient;
         // The client camel-cases result keys, so `turn_id` arrives as `turnId`.
         const rows = yield* sql<{
@@ -200,8 +208,8 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
                    )
                  )                                                 AS tts_silent
           FROM conversation_turns t
-          WHERE t.conversation_id = ${conversationId}
-          ORDER BY t.started_at ASC`.pipe(Effect.orDie);
+          WHERE t.conversation_id IN ${sql.in(conversationIds)}
+          ORDER BY t.conversation_id, t.started_at ASC`.pipe(Effect.orDie);
         // `::float8` can still surface as a string depending on the driver's type parsing, so each
         // component is coerced once here rather than trusted.
         //
@@ -255,7 +263,8 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
         return { rows: mapped, dropped };
       });
 
-    const turnLatencies = (conversationId: string) => turnLatenciesWithDropped(conversationId).pipe(Effect.map((r) => r.rows as ReadonlyArray<TurnLatencyRow>));
+    /** One conversation's waterfall, for the call detail page. */
+    const turnLatencies = (conversationId: string) => turnRowsForMany([conversationId]).pipe(Effect.map((r) => r.rows as ReadonlyArray<TurnLatencyRow>));
 
     /**
      * The same components across an explicit set of conversations.
@@ -265,17 +274,7 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
      * an SLO computed over a different window than the funnel beside it is a number that cannot be
      * reconciled with anything on the page.
      */
-    const turnRowsFor = (conversationIds: ReadonlyArray<string>): Effect.Effect<{ rows: ReadonlyArray<TurnLatencyRow>; dropped: number }, never, PgClient.PgClient> =>
-      Effect.gen(function* () {
-        const all: TurnLatencyRow[] = [];
-        let dropped = 0;
-        for (const id of conversationIds) {
-          const r = yield* turnLatenciesWithDropped(id);
-          all.push(...r.rows);
-          dropped += r.dropped;
-        }
-        return { rows: all, dropped };
-      });
+    const turnRowsFor = turnRowsForMany;
 
     const latencyAggregateFor = (conversationIds: ReadonlyArray<string>): Effect.Effect<LatencyAggregate, never, PgClient.PgClient> =>
       turnRowsFor(conversationIds).pipe(Effect.map(({ rows, dropped }) => aggregateTurnRows(conversationIds.length, rows, dropped)));

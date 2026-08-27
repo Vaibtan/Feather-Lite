@@ -268,13 +268,35 @@ export class Quality extends Effect.Service<Quality>()("@feather-lite/Quality", 
      * the real decider by default: that is the population the targets were set from, and the one an
      * operator means when they ask whether the agent is fast enough.
      */
-    const sloStatus = (calls: number, segment: { channel?: string | null; decider?: string | null } = { channel: "voice", decider: "openai" }) =>
+    const sloUncached = (calls: number, segment: { channel?: string | null; decider?: string | null }) =>
       queries.latencyAggregateForSegment({ channel: segment.channel ?? null, decider: segment.decider ?? null }, calls).pipe(
         Effect.orDie,
         Effect.map(({ aggregate, found }) =>
           sloFrom(aggregate, { channel: segment.channel ?? null, decider: segment.decider ?? null, calls_requested: calls, calls_found: found }),
         ),
       );
+
+    /**
+     * Memoised for 5 seconds (O11).
+     *
+     * The console polls `/status` every 5 s, and every poll recomputed the SLO over the last 50
+     * calls — reading every turn of every one of them. The verdict cannot meaningfully change
+     * inside that window (it is a p95 over fifty calls), so the recomputation bought nothing and
+     * cost a full window scan per poll, per open tab. A plain timestamped cell rather than a cache
+     * library: one entry, one writer, and a stale read is at worst five seconds old.
+     */
+    const SLO_TTL_MS = 5_000;
+    let sloCache: { key: string; at: number; value: SloReport } | null = null;
+
+    const sloStatus = (calls: number, segment: { channel?: string | null; decider?: string | null } = { channel: "voice", decider: "openai" }) =>
+      Effect.gen(function* () {
+        const key = `${String(calls)}|${segment.channel ?? "*"}|${segment.decider ?? "*"}`;
+        const now = Date.now();
+        if (sloCache !== null && sloCache.key === key && now - sloCache.at < SLO_TTL_MS) return sloCache.value;
+        const value = yield* sloUncached(calls, segment);
+        sloCache = { key, at: now, value };
+        return value;
+      });
 
     /** Call-level score aggregates. Turn-level rows are excluded: they aggregate per turn, not per call. */
     const scoreSummaries = (ids: ReadonlyArray<string>) =>
