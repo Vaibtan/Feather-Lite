@@ -103,6 +103,146 @@ CPU-seconds per turn is 9 %.
   regression; O9 will give it a bypass token and the status page a counter.
 - **`JUDGE_ENABLED=false`.** A C=50 run would otherwise enqueue fifty reasoning-model calls.
 
+## 2026-08-28 — the efficiency phase, measured commit by commit
+
+Every row here was taken on the same box in one sitting, with the voice worker stopped for the
+control-plane runs and the Langfuse stack down. Two pieces of measurement hygiene were added on the
+day and both changed what the numbers said:
+
+- **The harness waits for the outbox to drain before it starts.** A C=100 run leaves 300 post-call
+  jobs; the loop was clearing them at four a second, so the next run began inside a 70-second
+  backlog and reported a throughput that was really the drain. Two runs three minutes apart read
+  80.5 and 69.8 turns/s while the database time between them *fell* 1 521 → 921 ms. This is very
+  likely also why the five Phase-0 C=100 runs disagreed with each other.
+- **`pg_stat_statements` is on**, reset immediately before each load, and every report carries the
+  top ten by total time, the top ten by calls, and **statements per completed turn**. That last
+  number is the one to read for a round-trip change; wall clock on this box has a spread of ±10 %
+  and will hide a 17 % reduction completely.
+
+### Tier 1, C=100, in the order the changes landed
+
+| after | correct | turns/s | turn p50 | statements/turn | pg time |
+|---|---|---:|---:|---:|---:|
+| baseline | 100/100 | 80.5 | 524 ms | **43.6** | 1 521 ms |
+| (indexes, before) ×2 | 100/100 | 76.0 / 77.3 | 625 / 582 ms | 43.2 | 1 462 / 1 449 ms |
+| two indexes from the ranking ×2 | 100/100 | 78.7 / 78.3 | 560 / 555 ms | 43.1 | 925 / 956 ms |
+| + event append in one statement ×2 | 100/100 | 78.4 / 88.0 | 597 / 440 ms | **35.7** | 832 / 862 ms |
+| + prompt context in one query ×2 | 100/100 | 81.2 / 89.1 | 556 / 419 ms | **31.7** | 915 / 859 ms |
+| + work-conserving outbox ×2 | 100/100 | 83.8 / 94.3 | 505 / 351 ms | 31.7 | 845 / 808 ms |
+
+**43.6 → 31.7 statements per completed turn, −27 %**, and database time down about 45 %. The audit's
+"about 43 round trips per turn", read from the code, was exactly right — and the server said so
+itself once it was asked.
+
+**Throughput is the least informative column.** 78 and 88 turns/s came from identical code three
+minutes apart. Read `statements/turn` and `pg time` for what changed, and treat anything under about
+10 % of wall clock as noise; the audit's own finding was that Postgres is not the constraint, so
+fewer round trips buy headroom rather than throughput.
+
+The one statement a round-trip audit could never have found: **`SELECT DISTINCT job_type FROM
+outbox_jobs WHERE conversation_id = $1`**, once per finished call, 5.9 ms each, **40 % of all
+database time in a run** — a sequential scan over 32 838 rows, because `outbox_jobs` had no index on
+`conversation_id`. One call per call, so no count of round trips would ever have looked at it.
+
+### The soak, and what grows
+
+`--rate 30 --duration 300`, 3000 conversations and 9000 turns, all correct in every run.
+
+| after | private slope | server peak private | CPU s/turn |
+|---|---:|---:|---:|
+| before | 46.25 MB/min | 502 MB | 0.0151 |
+| turn deltas dropped at `turn_end`, sweep throttled | 37.58 MB/min | 411 MB | 0.0146 |
+| + retention 5 min → 60 s | **26.27 MB/min** | 415 MB | 0.0145 |
+
+**26 MB/min is not zero and is not claimed to be.** The retention map's share is measured and gone;
+the remainder is unattributed — Effect fiber structures, the `pg` statement cache and ordinary V8
+growth under sustained allocation are the candidates. The peak barely moved while the slope fell by
+a third, which suggests the peak is a transient rather than retention. `feather_lite_live_turns` on
+`/metrics` is the series to watch it with.
+
+**Post-call work no longer paces itself.** The outbox claimed 20 jobs every 5 seconds and processed
+them one at a time: 283 jobs took **74 seconds**. Processing a batch concurrently made a batch about
+four times faster and the backlog still took 74 seconds, because the ceiling was the claim rate, not
+the work. With the loop claiming again while batches come back full: **103 jobs in 4 seconds**, and
+the backlog stops accumulating between runs.
+
+### Where the server's CPU actually goes
+
+`PROFILE_SECONDS=30 pnpm start:server` writes a `.cpuprofile` the process takes of itself —
+`node --cpu-prof` cannot be used here, because it writes only on a clean exit and Windows has no way
+to ask a detached console process for one. `node scripts/cpuprof-top.mjs <file>` reads it.
+
+C=100, 5 545 ms of busy time:
+
+| self ms | of busy | frame |
+|---:|---:|---|
+| 582.9 | 10.5 % | `writev` |
+| 421.5 | 7.6 % | `(program)` |
+| 343.1 | 6.2 % | `(garbage collector)` |
+| 114.1 | 2.1 % | effect `fiberRuntime.js:1142` |
+| 94.1 | 1.7 % | `addFields` (pg row parsing) |
+| 74.7 | 1.3 % | effect `ParseResult.js:867` |
+
+**There is no hot spot**, and schema decoding is not one: every `ParseResult` frame together is
+about 2.4 % of busy time, rows and events included. That is why `listEventsUnchecked` — skipping
+validation of ledger rows on the hot path — **was not built**: it trades the boundary that keeps a
+malformed row out of `replay` for one or two percent of a small slice.
+
+### The voice worker, idle (private commit, `start` mode)
+
+| role | tsx, 1 warm slot | after the W1 patch | + 4 warm slots | bundled |
+|---|---:|---:|---:|---:|
+| worker-main | 1 051 | 177 | 192 | **115** |
+| worker-inference | 878 | 879 | 880 | 871 |
+| worker-job | 197 (×1) | 199 (×1) | 1 056 (×4) | 520 (×4) |
+| worker-launcher | 280 | 280 | 281 | 114 |
+| **worker tree** | **2 406** | **1 535** | 2 409 | **1 620** |
+
+Read the third column beside the second: the warm pool spends almost exactly the gigabyte the W1
+patch freed, and buys a burst that does not stagger for it. The fourth column takes most of that
+back — a job process costs 130 MB bundled against 264 under `tsx`, and the `tsx` supervisors
+disappear entirely.
+
+**W1 under the bundle, which is the case that decides the patch**: 855 MB in the main process
+without it, 115 MB with it. The audit had seen −772 MB under `tsx` but only −322 MB in bare CJS, and
+the spec reserved the right to drop the patch if bundling made it moot. It does not.
+
+**Job-process cold start**, importing the agent module exactly as `job_proc_lazy_main` does:
+2 659 / 2 606 / 2 704 ms under `tsx`, **1 834 / 1 874 / 1 831 ms bundled** (−31 %). The remaining
+1.8 s is `@livekit/agents` and its plugins loading from `node_modules`, and it stays there — the
+framework resolves its job and inference entry points by URL at runtime.
+
+**`pidusage` costs 336 ms per poll on Windows** (714 ms cold), and `supervised_proc` calls it for
+every child every 5 seconds whether or not a memory limit is configured. With five job processes and
+the inference process that is about 2 s of `wmic` spawning every 5 s — 40 % of a core, for nothing.
+It is a dev-box tax, not a production one: `pidusage` reads `/proc` on Linux, which is where D6
+deploys. Limits are now set (warn 400 MB, kill 800 MB) so the poll at least earns its cost.
+
+### Tier 2 — N=5, real calls
+
+Langfuse down for these, unlike the 2026-08-27 baseline; borrowers in their own process throughout.
+
+| after | green | turn p50/p95 | call durations | worker cores | CPU s/call-min |
+|---|---|---:|---|---:|---:|
+| 2026-08-27 baseline | 5/5 | 2 984 / 5 045 ms | — | 1.378 | 9.32 |
+| explicit load function, 1 warm slot ×2 | 5/5 | 2 072 / 2 166, 2 047 / 2 121 ms | spread 12.8 s, 14.6 s | — | — |
+| 4 warm slots ×2 | 5/5 | 2 084 / 2 163, 2 134 / 2 410 ms | spread 3.9 s, 3.7 s | 1.484 / 1.487 | 11.71 / 11.66 |
+| bundled | 5/5 | 2 061 / 2 343 ms | spread 2.6 s | **1.279** | **10.19** |
+
+**The warm pool is visible as a staircase collapsing.** With one warm slot the five calls finished
+89.5 / 92.1 / 95.2 / 99.2 / 102.3 seconds in — about 3.2 s apart, which is a cold job process
+starting inside each call, serialised behind the pool's init mutex. With four, the spread falls from
+12.8 s to 3.9 s. Per-turn latency does not move and should not: the cold start was never in a turn,
+it was in front of the call.
+
+**Load shedding, probed deliberately** (`2026-08-28-tier2-shed-probe-maxjobs1.json`). Three calls
+started together against `WORKER_MAX_JOBS=1`: one admitted, two refused at the worker, and both
+refused calls finalized `FAILED` with reason **`NEVER_SERVED`** about 38 seconds later. The same
+three against `WORKER_MAX_JOBS=2` with no admission control were **all served** — the load function
+shapes what the SFU believes and it is republished only every 2.5 s, so a burst inside one interval
+is routed against a stale status. The threshold is a routing hint; the ceiling has to be enforced
+where the answer is given.
+
 ## Tier 1 — control plane, 2026-08-27 (Phase 0 baselines)
 
 Taken on a quiet box before any optimisation of this spec had landed, with the voice worker stopped
