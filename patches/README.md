@@ -36,6 +36,16 @@ and executed in the separate inference process.
 | worker-main peak RSS | 1 027 MB | 167 MB |
 | whole tree peak private | 3 115 MB | 2 251 MB |
 
+Re-measured under the esbuild bundle (`node dist/agent.js start`, four warm slots,
+`2026-08-28-idle-tree-{w1-unpatched-,}bundle.json`), because the audit had seen only −322 MB in
+bare CJS and the spec reserved the right to drop the patch if the bundle made it moot:
+
+| role | unpatched | patched |
+|---|---:|---:|
+| worker-main peak private | 855 MB | 115 MB |
+
+It still pays, and by nearly as much. The patch stays.
+
 The patch replaces the `require` with a `require.resolve` in the same module, as
 `_localInferenceResolvable()`. Resolution answers the actual question — is the package installed —
 without executing the addon or mapping the model.
