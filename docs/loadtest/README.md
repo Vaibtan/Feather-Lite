@@ -285,7 +285,15 @@ reproduce its August result on this machine, and the cause is the machine.**
 | N | equivalence green | WER p50 / p95 | silent playouts | TTS TTFB p50/p95 | turn latency p50/p95 |
 |---:|---|---|---|---|---|
 | 2 | **2/2** | 0.000 / 0.111 | 0 / 6 | 430 / 459 ms | 3345 / 5490 ms |
-| 5 | 3/5 (also 4/5, 3/5 on two earlier attempts) | 0.000 / **1.000** — gate FAILED | 1 / 13 | 398 / 2394 ms | 7170 / 18211 ms |
+| 5 | 3/5 (also 4/5, 3/5 on two earlier attempts) | 0.000 / **1.000** — gate FAILED | 1 / 13 | 398 / 2394 ms | 3049 / 18449 ms |
+
+The N=5 turn-latency figures are the ones in `2026-08-26-tier2-n5.json`. This row previously read
+`7170 / 18211 ms`, which matched no committed artefact: the fleet writes `${date}-tier2-n${N}.json`,
+so a same-day re-run silently overwrote the report the row had been read from (O16). Three attempts
+were made that day and only the last one's JSON survives. The two earlier equivalence counts are
+kept above because they were recorded in prose at the time; their latencies are gone and are not
+reconstructed here. **Date-stamped-only filenames are the hazard** — the fix on the reader's side is
+to copy a committed baseline aside before re-running, which the ground rules now say.
 
 **The diagnosis, in one number.** Every stage that runs *locally* degraded by 3–5× against the
 August baseline — end-of-utterance 578 → 2767 ms, decide TTFT ~1100 → 3372 ms — while the one stage

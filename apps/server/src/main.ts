@@ -102,9 +102,11 @@ const MainLive = Layer.mergeAll(HttpLive, RootRoute, SchedulersLive).pipe(
   // regardless of which conversationalist ran the call, and constructing the client is free — it
   // fails at call time, with a clear message, when no key is configured.
   Layer.provideMerge(OpenAILlmClientLive),
-  // Metrics is provided once, at the root, for the same reason Tracing is: the decider counts
-  // provider failures, the orchestrator counts the conversation-loop ones and the status handler
-  // reads them. Three instances would each hold a third of the answer.
+  // Metrics is provided once, at the root, for the same reason Tracing is: the decider records
+  // provider failures, the HTTP edge counts requests and rejections, and the status handler reads
+  // both. Separate instances would each hold half the answer.
+  //
+  // (This comment used to say the orchestrator counted here as well. It never has — O14.)
   Layer.provideMerge(Metrics.Default),
   Layer.provideMerge(LiveKitMediaPlaneLive),
   Layer.provideMerge(LangfuseTracingLive),

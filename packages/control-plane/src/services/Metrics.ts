@@ -1,5 +1,5 @@
 /**
- * In-process counters/histograms surfaced on `/api/system/status` (SPEC §17.2). Cheap and
+ * In-process counters surfaced on `/api/system/status` (SPEC §17.2). Cheap and
  * process-local by design; a Langfuse/OTel exporter is a separate layer.
  *
  * These are the **live** view: they reset when the process does. The durable answer to the same
@@ -7,9 +7,16 @@
  * and labelled, because "no errors" from a process that restarted a minute ago is not the same
  * claim as "no errors" from the record of every call ever made.
  *
- * Lives under `services/` rather than `http/` because the orchestrator counts here too — the
- * failure modes worth watching (a superseded turn, a decider outage, a read-back repeated because
- * the borrower heard silence) happen in the conversation loop, not at the HTTP edge.
+ * Lives under `services/` rather than `http/` because the decider records provider failures here
+ * (`OpenAITurnDecider`), while the request counters are incremented at the HTTP edge — one
+ * instance has to serve both.
+ *
+ * **There is no histogram surface.** There was one, `observe()`, and it had no callers in the
+ * entire tree, so `histograms` was `{}` on every response while this file's own comment claimed the
+ * orchestrator counted here — it does not; `grep 'metrics\.' Orchestrator.ts` returns nothing
+ * (O14). An empty map that looks like a measurement is worse than an absent one. The process gauges
+ * D3 adds are a different shape (sampled values, not accumulated observations) and will bring their
+ * own surface rather than inherit this one.
  */
 import { Effect, Ref } from "effect";
 
@@ -34,7 +41,6 @@ export interface RecordedProviderEvent extends ProviderEvent {
 
 export interface MetricsShape {
   readonly increment: (name: string, by?: number) => Effect.Effect<void>;
-  readonly observe: (name: string, value: number) => Effect.Effect<void>;
   /** Count a vendor failure and keep it in the recent-errors ring. */
   readonly providerEvent: (e: ProviderEvent) => Effect.Effect<void>;
   /** Counters plus the last few provider failures, newest first. */
@@ -51,17 +57,11 @@ const PROVIDER_ERROR_RING = 20;
 export class Metrics extends Effect.Service<Metrics>()("@feather-lite/Metrics", {
   effect: Effect.gen(function* () {
     const counters = yield* Ref.make(new Map<string, number>());
-    const hist = yield* Ref.make(new Map<string, { count: number; total: number; max: number }>());
     const providerRing = yield* Ref.make<ReadonlyArray<RecordedProviderEvent>>([]);
     const startedAt = Date.now();
     const increment = (name: string, by = 1) => Ref.update(counters, (m) => new Map(m).set(name, (m.get(name) ?? 0) + by));
     const shape: MetricsShape = {
       increment,
-      observe: (name, value) =>
-        Ref.update(hist, (m) => {
-          const cur = m.get(name) ?? { count: 0, total: 0, max: 0 };
-          return new Map(m).set(name, { count: cur.count + 1, total: cur.total + value, max: Math.max(cur.max, value) });
-        }),
       providerEvent: (e) =>
         Effect.gen(function* () {
           // Two counters per event: by vendor (which one is degrading) and by stage (what broke).
@@ -82,11 +82,9 @@ export class Metrics extends Effect.Service<Metrics>()("@feather-lite/Metrics", 
       snapshot: () =>
         Effect.gen(function* () {
           const c = yield* Ref.get(counters);
-          const h = yield* Ref.get(hist);
           return {
             uptime_seconds: Math.round((Date.now() - startedAt) / 1000),
             counters: Object.fromEntries(c),
-            histograms: Object.fromEntries([...h].map(([k, v]) => [k, { count: v.count, avg: v.count ? Math.round((v.total / v.count) * 100) / 100 : 0, max: v.max }])),
           };
         }),
     };
