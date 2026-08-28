@@ -233,6 +233,10 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
           count(*) FILTER (WHERE type = 'TURN_SUPERSEDED')::text AS turns_superseded,
           count(*) FILTER (WHERE type = 'CALL_CONTROL' AND payload->>'action' = 'NO_INPUT_CLOSE')::text AS no_input_closes,
           count(*) FILTER (WHERE type = 'TURN_DECISION_REJECTED' AND payload->>'reason' = 'DECIDER_UNAVAILABLE')::text AS decider_unavailable,
+          -- The SQL twin of the domain's silentPlayoutTurnIds, and the third copy of it. The NOT
+          -- EXISTS is load-bearing: a turn the borrower superseded before the agent replied reports
+          -- the same shape and is not a TTS failure. **Change this, change the all-time query below
+          -- and the domain predicate.**
           count(*) FILTER (
             WHERE type = 'AGENT_TURN_PLAYOUT' AND payload->>'interrupted' = 'true' AND payload->>'heard_text' = ''
               AND NOT EXISTS (
@@ -434,6 +438,31 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
      * live in the turn row, not in the ledger, because they are telemetry rather than something
      * that happened on the call.
      */
+    /**
+     * The four latency components per turn, for the per-call SLO verdict the EVALUATION job writes
+     * (O6). Separate from `turnTtsFacts` because they answer different questions and this one runs
+     * post-call, once, rather than on every page load.
+     */
+    const turnLatencyFacts = SqlSchema.findAll({
+      Request: Schema.String,
+      Result: Schema.Struct({
+        turnId: Schema.String,
+        eouDelayMs: Schema.NullOr(Schema.Number),
+        transcriptionDelayMs: Schema.NullOr(Schema.Number),
+        ttftMs: Schema.NullOr(Schema.Number),
+        ttsTtfbMs: Schema.NullOr(Schema.Number),
+      }),
+      execute: (conversationId) => sql`
+        SELECT turn_id,
+               (result->>'eou_delay_ms')::float8           AS eou_delay_ms,
+               (result->>'transcription_delay_ms')::float8 AS transcription_delay_ms,
+               (result->>'ttftMs')::float8                 AS ttft_ms,
+               (result->>'tts_ttfb_ms')::float8            AS tts_ttfb_ms
+        FROM conversation_turns
+        WHERE conversation_id = ${conversationId} AND result IS NOT NULL
+        ORDER BY started_at ASC`,
+    });
+
     const turnTtsFacts = SqlSchema.findAll({
       Request: Schema.String,
       Result: Schema.Struct({ turnId: Schema.String, ttsAudioMs: Schema.NullOr(Schema.Number), ttsChars: Schema.NullOr(Schema.Number) }),
@@ -458,6 +487,7 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
     return {
       mergeTurnResult,
       turnTtsFacts,
+      turnLatencyFacts,
       findOpenWorkflow,
       findWorkflow,
       lockWorkflow,

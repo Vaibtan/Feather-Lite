@@ -13,7 +13,7 @@
  * one, so the aggregate this page needs does not exist there. Postgres has both the events and the
  * scores, so it is the only place the two can be joined at all.
  */
-import { DateTime, Effect, Option } from "effect";
+import { DateTime, Duration, Effect, Option } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import type { LatencyAggregate, QualityReport, SloComponent, SloReport, SloSegment, TtsHeuristicsReport } from "@feather-lite/contracts";
 import { localIsoDate, ORPHANED_REASON, percentile, SCORE_DATA_TYPE_BY_NAME, sloComponentStatus, ttsAggregate, type ScoreName, type ScoreSource, type TtsHeuristics } from "@feather-lite/domain";
@@ -286,18 +286,23 @@ export class Quality extends Effect.Service<Quality>()("@feather-lite/Quality", 
      * cost a full window scan per poll, per open tab. A plain timestamped cell rather than a cache
      * library: one entry, one writer, and a stale read is at worst five seconds old.
      */
-    const SLO_TTL_MS = 5_000;
-    let sloCache: { key: string; at: number; value: SloReport } | null = null;
+    /**
+     * `/status` always asks the same question — the last 50 voice calls served by the real decider —
+     * so exactly that question is cached, and anything else falls straight through uncached.
+     *
+     * `Effect.cachedWithTTL` rather than a timestamp cell so that concurrent callers deduplicate:
+     * several console tabs hitting an expired entry would otherwise each recompute a p95 over fifty
+     * calls before any of them stored it, which is the load this is meant to remove rather than
+     * reshape.
+     */
+    const STATUS_SEGMENT = { channel: "voice" as const, decider: "openai" as const };
+    const STATUS_CALLS = 50;
+    const sloStatusCached = yield* Effect.cachedWithTTL(sloUncached(STATUS_CALLS, STATUS_SEGMENT), Duration.seconds(5));
 
-    const sloStatus = (calls: number, segment: { channel?: string | null; decider?: string | null } = { channel: "voice", decider: "openai" }) =>
-      Effect.gen(function* () {
-        const key = `${String(calls)}|${segment.channel ?? "*"}|${segment.decider ?? "*"}`;
-        const now = Date.now();
-        if (sloCache !== null && sloCache.key === key && now - sloCache.at < SLO_TTL_MS) return sloCache.value;
-        const value = yield* sloUncached(calls, segment);
-        sloCache = { key, at: now, value };
-        return value;
-      });
+    const sloStatus = (calls: number, segment: { channel?: string | null; decider?: string | null } = STATUS_SEGMENT) =>
+      calls === STATUS_CALLS && (segment.channel ?? null) === STATUS_SEGMENT.channel && (segment.decider ?? null) === STATUS_SEGMENT.decider
+        ? sloStatusCached
+        : sloUncached(calls, segment);
 
     /** Call-level score aggregates. Turn-level rows are excluded: they aggregate per turn, not per call. */
     const scoreSummaries = (ids: ReadonlyArray<string>) =>

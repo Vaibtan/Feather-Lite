@@ -2,7 +2,7 @@
  * Read side for the operator console and API (SPEC §12.3/§12.4): list, detail with
  * transcript + timeline + replay snapshot, borrowers for the demo picker, worker liveness.
  */
-import { DateTime, Effect, Option } from "effect";
+import { DateTime, Duration, Effect, Option } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import type { LatencyAggregate, TurnLatencyRow } from "@feather-lite/contracts";
 import type { EventRecord, ReplaySnapshot, TimelineEntry, TranscriptEntry, TurnTtsReading } from "@feather-lite/domain";
@@ -145,8 +145,6 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
      * All-time counts over an append-only ledger cannot meaningfully change inside five seconds,
      * and the page labels them "all time" precisely because they are not a live reading.
      */
-    const LEDGER_TTL_MS = 5_000;
-    let ledgerCache: { at: number; value: LedgerCountsValue } | null = null;
 
     const ledgerCounts = () =>
       Effect.gen(function* () {
@@ -177,15 +175,14 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
      * DB tests read as a source of truth immediately after writing events, and a five-second-stale
      * answer broke four of them — correctly, because a stale read *is* wrong for that caller. It is
      * right only for a dashboard that polls every five seconds, so only that caller opts in.
+     *
+     * `Effect.cachedWithTTL` rather than a hand-rolled timestamp cell, because a timestamp cell
+     * does not deduplicate *concurrent* callers: N console tabs polling a cold or expired entry
+     * would each run the full scan before any of them wrote the result, which is precisely the
+     * scenario this exists to prevent. `cachedWithTTL` holds a latch, so the second through Nth
+     * callers await the first instead of repeating its work.
      */
-    const ledgerCountsForStatus = () =>
-      Effect.gen(function* () {
-        const now = Date.now();
-        if (ledgerCache !== null && now - ledgerCache.at < LEDGER_TTL_MS) return ledgerCache.value;
-        const value = yield* ledgerCounts();
-        ledgerCache = { at: now, value };
-        return value;
-      });
+    const ledgerCountsForStatus = yield* Effect.cachedWithTTL(ledgerCounts(), Duration.seconds(5));
 
     /**
      * The per-turn latency waterfall across a set of conversations, read straight out of
@@ -362,7 +359,7 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
       borrowerDirectory,
       heartbeats,
       ledgerCounts,
-      ledgerCountsForStatus,
+      ledgerCountsForStatus: () => ledgerCountsForStatus,
       reliabilityCountsFor: (ids: ReadonlyArray<string>) =>
         conv.reliabilityCountsFor(ids).pipe(
           Effect.map((r) => ({

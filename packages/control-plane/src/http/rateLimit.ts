@@ -28,12 +28,19 @@ export const makeRateLimiter = (): RateLimiter => {
   const buckets = new Map<string, { count: number; windowStart: number }>();
 
   /**
-   * Swept on write rather than on a timer. A bucket only becomes stale as time passes, and the only
+   * Swept on write rather than on a timer: a bucket only becomes stale as time passes, and the only
    * thing here that observes time passing is a request — so there is no loop to leak and nothing to
-   * shut down. The sweep runs only when a window rolls over, which is at most once per key per
-   * minute rather than once per request.
+   * shut down.
+   *
+   * Rate-limited to one sweep per window. Sweeping on every *new* key is O(map size) per new
+   * caller, which is O(n²) across n distinct IPs arriving together — and a burst of distinct IPs is
+   * exactly the case the eviction exists for, so the fix would have made the attack cheaper to
+   * mount than the leak it prevents. Nothing can become stale faster than one window anyway.
    */
+  let lastSweptAt = 0;
   const sweep = (now: number): void => {
+    if (now - lastSweptAt < WINDOW_MS) return;
+    lastSweptAt = now;
     for (const [key, b] of buckets) if (now - b.windowStart > STALE_AFTER_MS) buckets.delete(key);
   };
 

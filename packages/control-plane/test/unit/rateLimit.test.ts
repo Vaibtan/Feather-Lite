@@ -56,6 +56,21 @@ describe("makeRateLimiter", () => {
     expect(rl.size()).toBe(2);
   });
 
+  it("does not rescan the map for every new caller in a burst", () => {
+    // The sweep is O(map size). Running it per new key is O(n^2) across n distinct IPs arriving
+    // together - and a burst of distinct IPs is exactly what the eviction exists for, so sweeping
+    // eagerly would make the burst cheaper to mount than the leak it prevents. At most one sweep
+    // per window: a thousand new callers inside one window evict nobody and cost one scan.
+    const rl = makeRateLimiter();
+    const t = 1_000_000;
+    for (let i = 0; i < 1000; i++) rl.check(`burst-${String(i)}`, 10, t + i);
+    expect(rl.size()).toBe(1000);
+    // Once every one of them is stale — the burst itself spans a second, so the last entry goes
+    // stale a second after the first — one request is enough to clear the lot.
+    rl.check("after", 10, t + 1000 + STALE_AFTER_MS + 1);
+    expect(rl.size()).toBe(1);
+  });
+
   it("reports its own size, which is what makes unbounded growth visible", () => {
     const rl = makeRateLimiter();
     expect(rl.size()).toBe(0);

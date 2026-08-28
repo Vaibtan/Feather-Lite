@@ -77,14 +77,17 @@ export const securityMiddleware = HttpMiddleware.make((app) =>
        * are counted apart because they mean different things: a refused start is a call that never
        * happened, a refused turn is a call that broke midway.
        */
-      const bucketName = url.includes("/turn") || url.includes("/simulate_turn") ? "rate_limited_turn" : "rate_limited_start";
+      // Matched on the path's last segment, not on a substring of the whole URL: `includes("/turn")`
+      // is correct for today's five rate-limited routes and would silently miscount the first route
+      // that merely contains the word (a `/return`, a `/turnaround`).
+      const bucketName = isTurnPath(url) ? "rate_limited_turn" : "rate_limited_start";
       const ip = (req.headers["cf-connecting-ip"] ?? req.headers["x-forwarded-for"] ?? req.remoteAddress.pipe((o) => (o._tag === "Some" ? o.value : "local"))).split(",")[0]!.trim();
       const ok = yield* rateLimit(ip, cfg.rateLimitPerMinute);
       if (!ok) {
         yield* metrics.increment(bucketName);
         return HttpServerResponse.unsafeJson({ _tag: "ApiRateLimited", message: "too many requests" }, { status: 429 });
       }
-      if (url.includes("/turn") || url.includes("/simulate_turn")) {
+      if (isTurnPath(url)) {
         const under = yield* dailyTurnBudget(cfg.dailyTurnCap);
         if (!under) {
           yield* metrics.increment("rate_limited_daily_cap");
@@ -95,6 +98,16 @@ export const securityMiddleware = HttpMiddleware.make((app) =>
     return yield* app;
   }),
 );
+
+/**
+ * Is this the turn-taking path? The two routes that consume the daily budget both end in a segment
+ * named for a turn; anything else under the rate-limited prefixes is a call-level request.
+ */
+const isTurnPath = (url: string): boolean => {
+  const path = (url.split("?")[0] ?? "").replace(/\/+$/, "");
+  const last = path.slice(path.lastIndexOf("/") + 1);
+  return last === "turn" || last === "simulate_turn";
+};
 
 /** The per-IP budget; see `rateLimit.ts` for why it is a unit rather than six lines inline (O9). */
 const rateLimit = (ip: string, perMinute: number) => Effect.sync(() => limiter.check(ip, perMinute));

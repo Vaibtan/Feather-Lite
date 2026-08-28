@@ -213,8 +213,11 @@ if (status.turn_decider !== "scripted") {
  * warning is not enough here, because the run is unattended by design and the money is spent by
  * the time anyone reads the log. `--allow-judge` is the deliberate override.
  */
-if (status.judge?.enabled === true && !process.argv.includes("--allow-judge")) {
-  console.error(`[tier1] refusing to start: the server has the judge enabled (${status.judge.model}).`);
+// Fail closed, as D2 says: "refuses to start unless the server reports `judge.enabled=false`". A
+// server that does not report judge state at all is an older or misconfigured one, and assuming it
+// is cheap is the assumption that costs money.
+if (status.judge?.enabled !== false && !process.argv.includes("--allow-judge")) {
+  console.error(`[tier1] refusing to start: the server ${status.judge === undefined ? "does not report judge state" : `has the judge enabled (${status.judge.model})`}.`);
   console.error(`[tier1] a run of ${String(CONVERSATIONS)} conversations would enqueue that many reasoning-model calls.`);
   console.error(`[tier1] set JUDGE_ENABLED=false in the SERVER process env, or pass --allow-judge if you mean it.`);
   process.exit(2);
