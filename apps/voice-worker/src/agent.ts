@@ -11,6 +11,7 @@
  *
  * Run: pnpm --filter @feather-lite/voice-worker dev   (needs .env at repo root)
  */
+import { availableParallelism } from "node:os";
 import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
 import { type AgentServer, type JobContext, type JobProcess, type JobRequest, ServerOptions, cli, defineAgent, voice } from "@livekit/agents";
@@ -53,8 +54,48 @@ const SIP_OUTBOUND_TRUNK_ID = process.env["LIVEKIT_SIP_OUTBOUND_TRUNK_ID"] ?? nu
  */
 const WORKER_MAX_JOBS = Math.max(1, Number(process.env["WORKER_MAX_JOBS"] ?? 8));
 const WORKER_LOAD_THRESHOLD = Number(process.env["WORKER_LOAD_THRESHOLD"] ?? 0.75);
-/** How many job processes are kept warm. Still 1, as it has always been; W3 is where the number moves. */
-const WORKER_IDLE_PROCESSES = Math.max(0, Number(process.env["WORKER_IDLE_PROCESSES"] ?? 1));
+/**
+ * How many job processes are kept warm (W3).
+ *
+ * A cold job process costs ~2.8 s before it can speak, and 2 655 ms of that is module loading — the
+ * framework, then `contracts` and `domain` as raw TypeScript. That is not paid at dispatch: it is
+ * paid *inside* the call, while the borrower is on the line. With one warm slot, a burst of five
+ * paid it four times, serialised behind the pool's init mutex.
+ *
+ * `min(WORKER_MAX_JOBS, 4)` follows the framework's own production default. It is not free — each
+ * warm slot is ~190 MB resident doing nothing — but the gigabyte W1 just gave back buys four of
+ * them and still leaves the tree lighter than it was this morning.
+ */
+const WORKER_IDLE_PROCESSES = Math.max(0, Number(process.env["WORKER_IDLE_PROCESSES"] ?? Math.min(WORKER_MAX_JOBS, 4)));
+
+/**
+ * The EOU model's thread pool (W4).
+ *
+ * libuv's default is 4 threads, and the shared inference process runs every end-of-turn prediction
+ * on it — 42-48 ms of wall per 1.2 s window, one to three predictions per user turn, for every call
+ * at once. The audit measured its ceiling at ~65 predicts/s with 4 threads and ~80/s with 12
+ * (a concurrency-10 burst finishing in 124 ms instead of 160).
+ *
+ * Set here, on the parent, because the inference and job processes are forked and inherit the
+ * environment as it stands at fork time — which is the only reliable moment. This process's *own*
+ * pool is already built by then (tsx has read files), and that does not matter: the main worker
+ * does no threadpool work. `??=` so an operator's value wins.
+ */
+process.env["UV_THREADPOOL_SIZE"] ??= String(Math.min(12, availableParallelism()));
+
+/**
+ * Per-job memory bounds (W7).
+ *
+ * These were both 0, which did not mean "no monitoring": `supervised_proc` polls `pidusage` for
+ * every child every 5 seconds regardless, and on Windows each of those polls spawns a `wmic`
+ * process. So the cost was being paid and nothing was being enforced.
+ *
+ * Real numbers instead of deleting the monitor, because a job that grows past 800 MB is a bug an
+ * operator should be told about. Measured job processes sit at 185-290 MB idle and peak near
+ * 340 MB during a call, so 400 MB is "look at this" and 800 MB is "this is not a call any more".
+ */
+const WORKER_JOB_MEMORY_WARN_MB = Number(process.env["WORKER_JOB_MEMORY_WARN_MB"] ?? 400);
+const WORKER_JOB_MEMORY_LIMIT_MB = Number(process.env["WORKER_JOB_MEMORY_LIMIT_MB"] ?? 800);
 
 const client = new ControlPlaneClient({ baseUrl: CONTROL_PLANE_URL, bearerToken: API_BEARER_TOKEN });
 
@@ -347,6 +388,11 @@ const loadFunc = async (w: AgentServer): Promise<number> => {
       admitting,
       load: Math.round(load * 1000) / 1000,
       idle_processes: WORKER_IDLE_PROCESSES,
+      // The parent's value. `fork` passes `process.env` through unless told otherwise, so this is
+      // also what the inference and job processes start with — and they are the ones that use it.
+      uv_threadpool_size: Number(process.env["UV_THREADPOOL_SIZE"]),
+      job_memory_warn_mb: WORKER_JOB_MEMORY_WARN_MB,
+      job_memory_limit_mb: WORKER_JOB_MEMORY_LIMIT_MB,
       /**
        * This process only. The framework does not expose the pids of the inference process or the
        * job processes, so the tree-wide figures stay the resource sampler's job
@@ -367,6 +413,8 @@ cli.runApp(
     loadFunc,
     loadThreshold: WORKER_LOAD_THRESHOLD,
     numIdleProcesses: WORKER_IDLE_PROCESSES,
+    jobMemoryWarnMB: WORKER_JOB_MEMORY_WARN_MB,
+    jobMemoryLimitMB: WORKER_JOB_MEMORY_LIMIT_MB,
     initializeProcessTimeout: 60_000,
   }),
 );
