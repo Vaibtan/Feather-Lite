@@ -21,6 +21,7 @@ import { scoreRecordProblem } from "@feather-lite/domain";
 import { AppConfig } from "../config.js";
 import { ConversationCompleted, NotFound, PreCallRejected, TelephonyError, TurnInProgress, UnknownScenario } from "../errors.js";
 import { rateLimitBucketCount } from "./rateLimit.js";
+import { unknownTurnIdMessage, unknownTurnIds } from "./scoreTargets.js";
 import { SchedulingRepo } from "../repos/scheduling.js";
 import { Orchestrator, type Signal } from "../services/Orchestrator.js";
 import { Quality } from "../services/Quality.js";
@@ -315,6 +316,18 @@ export const ConversationsLive = HttpApiBuilder.group(FeatherApi, "conversations
           // with nothing to join it to. (The scenario suite's synthetic id is written server-side
           // and does not come through here.)
           yield* queries.conversationDetail(path.id).pipe(Effect.catchTag("NotFound", (e) => Effect.fail(mapNotFound(e))), Effect.orDie);
+          /**
+           * A `turn_id` must name a turn *of this conversation* (O8).
+           *
+           * The conversation was checked and the turn was not, so a score could name anything and
+           * be accepted. The voice harness posted the scripted line it had spoken — `"BARGE-IN: I
+           * can pay 550 on Friday"` — as a turn id for weeks: the rows landed, joined nothing, and
+           * every one of them silently took the session-level fallback in `Tracing.score`. Nothing
+           * was lost and nothing said anything was wrong, which is the worst of both.
+           */
+          const known = (yield* queries.turnLatencies(path.id).pipe(Effect.orDie)).map((t) => t.turn_id);
+          const unknown = unknownTurnIds(known, payload.scores.map((s) => s.turn_id));
+          if (unknown.length > 0) return yield* Effect.fail(new ApiBadRequest({ message: unknownTurnIdMessage(unknown) }));
           const records = payload.scores.map((s) => ({
             conversationId: path.id,
             turnId: s.turn_id ?? null,

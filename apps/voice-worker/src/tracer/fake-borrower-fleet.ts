@@ -198,12 +198,19 @@ const werBreached = werP95 !== null && werP95 > MAX_WER;
  * describing a different set of calls than every other number in this report.
  */
 const turnRows: TurnLatencyRow[] = [];
+/** The same rows, kept per conversation, so a harness score can carry the ledger's turn id (O8). */
+const rowsByConversation = new Map<string, TurnLatencyRow[]>();
 for (const { call } of equivalences) {
   if (!call.conversationId) continue;
   try {
     const res = await fetch(`${CONTROL_PLANE_URL}/api/conversations/${call.conversationId}/latency`, { headers: authHeaders() });
-    if (res.ok) turnRows.push(...((await res.json()) as TurnLatencyRow[]));
-    else log(`latency fetch for ${call.label} failed: ${res.status}`);
+    if (res.ok) {
+      const rows = (await res.json()) as TurnLatencyRow[];
+      rowsByConversation.set(call.conversationId, rows);
+      turnRows.push(...rows);
+    } else {
+      log(`latency fetch for ${call.label} failed: ${res.status}`);
+    }
   } catch (e) {
     log(`latency fetch for ${call.label} failed: ${String(e)}`);
   }
@@ -313,6 +320,8 @@ for (const { call, eq } of equivalences) {
       equivalenceComment: eq?.equivalent ? `matches scenario ${reference.scenarioId}` : (eq?.failures[0] ?? "no equivalence result"),
       werLines: call.werLines,
       turnLatencies: call.turnLatencies,
+      // The ledger's own turn ids, which this run already fetched for its TTS numbers (O8).
+      ledgerTurnIds: (rowsByConversation.get(call.conversationId) ?? []).map((r) => r.turn_id),
     }),
   );
 }
