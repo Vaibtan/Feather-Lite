@@ -103,7 +103,14 @@ export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/Turn
           });
 
         yield* Effect.forkDaemon(
+          /**
+           * The annotation is applied out here rather than inside `processTurn`, which carries its
+           * own: the failure branch below logs from the *handler*, outside that effect, and that
+           * line — "turn failed after start" — is precisely the one an operator needs joined to a
+           * call (D3).
+           */
           orch.processTurn(params, emit).pipe(
+            Effect.annotateLogs({ conversation_id: params.conversationId, turn_id: params.turnId }),
             Effect.matchCauseEffect({
               onSuccess: () => finish(null),
               onFailure: (cause) =>

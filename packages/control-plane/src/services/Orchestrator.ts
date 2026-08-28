@@ -784,7 +784,16 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           ttft_ms: r.ttftMs,
         });
         return r;
-      });
+      }).pipe(
+        /**
+         * Every log line this turn produces names the call and the turn it came from (D3). A
+         * server under load interleaves the lines of N calls, and before this the only way to
+         * attribute a `turn failed` was the timestamp — which is exactly the case where timestamps
+         * collide. The annotation is on the whole effect rather than each call site so that a log
+         * line added later is joinable without anyone remembering to do it.
+         */
+        Effect.annotateLogs({ conversation_id: params.conversationId, turn_id: params.turnId }),
+      );
 
     /* ---------------------------- processNoInput ---------------------------- */
 
@@ -818,7 +827,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           yield* append(row.id, { type: "AGENT_TURN", payload: { text, state: row.currentState, speak_mode: "interruptible" } }, at);
           return { turnId: `no-input-${strike}`, agentText: text, newState: row.currentState, toolCalled: null, callControlAction: null, outcome: null, endCall: false, degraded: false, ttftMs: null } satisfies TurnResult;
         }),
-      ).pipe(Effect.tap(finalizeTracingIfEnded(conversationId)));
+      ).pipe(Effect.tap(finalizeTracingIfEnded(conversationId)), Effect.annotateLogs({ conversation_id: conversationId, path: "no_input" }));
 
     /* ---------------------------- processSignal ---------------------------- */
 
@@ -918,7 +927,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           yield* finalize({ row, ctx, currentState: row.currentState, outcome, metadata: { reason: signal.reason ?? "hangup" }, at });
           return done({ agentText: "", newState: "COMPLETED", callControlAction: { action: "HANGUP", action_id: logged.action_id }, outcome, endCall: true });
         }),
-      ).pipe(Effect.tap(finalizeTracingIfEnded(conversationId)));
+      ).pipe(Effect.tap(finalizeTracingIfEnded(conversationId)), Effect.annotateLogs({ conversation_id: conversationId, path: `signal:${signal.kind}` }));
 
     return { processTurn, processNoInput, processSignal } as const;
   }),

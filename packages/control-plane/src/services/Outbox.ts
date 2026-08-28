@@ -139,7 +139,11 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
         const judged =
           job.jobType === "JUDGE" ? yield* runJudge(job.conversationId, yield* conv.listEvents(job.conversationId)) : null;
         return yield* processJobTx(job, now, judged);
-      });
+      }).pipe(
+        // Post-call work is per-conversation and runs minutes after the call, on a shared loop, so
+        // its log lines are the least attributable in the system without this (D3).
+        Effect.annotateLogs({ conversation_id: job.conversationId, outbox_job: job.jobType }),
+      );
 
     const processJobTx = (job: OutboxJobRow, now: Date, judged: JudgeOutcome | null) =>
       sql.withTransaction(

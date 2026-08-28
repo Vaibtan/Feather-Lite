@@ -48,7 +48,9 @@ const DeciderLive = Layer.unwrapEffect(
     const cfg = yield* AppConfig;
     if (cfg.turnDecider === "openai") {
       if (cfg.openaiApiKey === null) yield* Effect.logWarning("TURN_DECIDER=openai but OPENAI_API_KEY is missing; every turn will degrade to the safe fallback");
-      yield* Effect.logInfo(`turn decider: openai (${cfg.llmModelByState.GREETING} / ${cfg.llmModelByState.DISCUSSING_PAYMENT}); tracing: ${cfg.langfuse ? "langfuse" : "off"}`);
+      // `cfg.langfuse` alone was not the state: LANGFUSE_ENABLED=false with keys present reported
+      // "tracing: langfuse" while exporting nothing.
+      yield* Effect.logInfo(`turn decider: openai (${cfg.llmModelByState.GREETING} / ${cfg.llmModelByState.DISCUSSING_PAYMENT}); tracing: ${cfg.langfuse && cfg.langfuseEnabled ? "langfuse" : "off"}`);
       // Tracing is provided once, at the root: the decider records the generation and the
       // orchestrator records the turn it belongs to, and they have to be the same instance for the
       // two halves to meet.
@@ -56,7 +58,13 @@ const DeciderLive = Layer.unwrapEffect(
       // and it must be the same one whichever decider is running.
       return OpenAITurnDeciderLive;
     }
-    yield* Effect.logInfo("turn decider: scripted (deterministic)");
+    /**
+     * The tracing state is said on *both* branches (D3). It used to be named only under
+     * `openai`, so a scripted run left "is Langfuse on?" unanswered in the log — and the answer
+     * matters most there: the scripted decider is what the tier-1 harness drives, and an exporter
+     * left on during a load run is both a cost and a latency the numbers would carry silently.
+     */
+    yield* Effect.logInfo(`turn decider: scripted (deterministic); tracing: ${cfg.langfuse && cfg.langfuseEnabled ? "langfuse" : "off"}`);
     return ScriptedTurnDeciderLive;
   }),
 );
