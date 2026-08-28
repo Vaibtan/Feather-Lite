@@ -7,10 +7,15 @@
  *  4. Barge-in truncation is observable via `conversation_item_added` (interrupted assistant item)
  *  5. `userAwayTimeout` -> `user_state_changed: away`
  *  6. `preemptiveGeneration` disabled so `llmNode` runs once per confirmed turn
- *  7. LiveKit Inference STT/TTS on the Build plan; silero VAD; multilingual turn detector
+ *  7. LiveKit Inference STT/TTS on the Build plan; silero VAD; audio-native turn detector
  *
- * Run:  pnpm --filter @feather-lite/voice-worker download-files   (once)
- *       pnpm --filter @feather-lite/voice-worker tracer            (worker, dev mode)
+ * Kept runnable, not frozen. The turn detector it originally used — the text-based
+ * `MultilingualModel` from `@livekit/agents-plugin-livekit` — was dropped from the production agent
+ * in Phase 9 P4 for the audio-native `inference.TurnDetector` (2397 -> 2145 ms per turn), and the
+ * plugin has now left the tree with it: it pulled `@huggingface/transformers` and a second ONNX
+ * runtime for one import on this one line. Nothing this file proves depended on which detector ran.
+ *
+ * Run:  pnpm --filter @feather-lite/voice-worker tracer            (worker, dev mode)
  *       pnpm --filter @feather-lite/voice-worker tracer:token      (token server + test page)
  */
 import { fileURLToPath } from "node:url";
@@ -24,7 +29,6 @@ import {
   inference,
   voice,
 } from "@livekit/agents";
-import * as livekitPlugin from "@livekit/agents-plugin-livekit";
 import * as silero from "@livekit/agents-plugin-silero";
 import { RemoteOrchestratorLLM } from "./remote-orchestrator-llm.js";
 import { TracerAgent } from "./tracer-agent.js";
@@ -47,8 +51,9 @@ export default defineAgent({
       tts: new inference.TTS({ model: "cartesia/sonic-3", voice: "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc" }),
       vad: ctx.proc.userData.vad as silero.VAD,
       turnHandling: {
-        turnDetection: new livekitPlugin.turnDetector.MultilingualModel(),
-        endpointing: { minDelay: 500, maxDelay: 3000 },
+        // No `turnDetection` and no `endpointing`, for the reason `src/agent.ts` gives at length:
+        // leaving both unset makes the session auto-provision the audio-native turn detector and
+        // apply its tighter endpointing table. A key supplied here would silently win.
         interruption: {
           enabled: true,
           mode: "adaptive",
