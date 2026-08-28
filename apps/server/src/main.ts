@@ -29,6 +29,7 @@ import {
   pgPoolGauge,
   ProcessMetrics,
   ProcessMetricsLive,
+  profileIfAsked,
   SchedulingService,
   ScriptedTurnDeciderLive,
   ServicesLive,
@@ -102,6 +103,9 @@ const SchedulersLive = Layer.scopedDiscard(
     // Which media plane resolved matters: without LiveKit every sweep falls back to the long
     // unconfirmed window, which is a very different detection time than the ~35 s headline.
     yield* Effect.logInfo(`schedulers started (sweeper ${cfg.sweeperEnabled ? `on, ${sweeper.stalenessMs} ms staleness, confirming via ${media.name}` : "off"})`);
+    // `PROFILE_SECONDS=30 pnpm start:server` writes a .cpuprofile of the first N seconds and keeps
+    // serving. See services/Profiler.ts for why `node --cpu-prof` cannot be used on this box.
+    yield* profileIfAsked;
   }),
 );
 

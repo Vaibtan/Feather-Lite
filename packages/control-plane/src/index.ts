@@ -27,6 +27,7 @@ export * from "./services/Seed.js";
 export * from "./services/VoiceSessions.js";
 export * from "./services/Metrics.js";
 export * from "./services/ProcessMetrics.js";
+export * from "./services/Profiler.js";
 export * from "./http/TurnRunner.js";
 export * from "./http/handlers.js";
 export * from "./http/app.js";
