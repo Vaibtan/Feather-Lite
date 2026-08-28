@@ -3,6 +3,14 @@
 - Status: accepted (2026-08-16)
 - Related: review `docs/reviews/2026-08-16-plan-vs-implementation-review.md`, plan `docs/plans/2026-08-16-ts-effect-rebuild.md`
 
+> **Amended 2026-08-28 by [ADR 0010](0010-patch-the-worker-shed-load-at-the-worker-and-measure-before-cutting.md).**
+> The question was reopened and settled by measurement rather than by preference: Go is closed for
+> every component (no LiveKit Agents SDK, and the control plane's ceiling was round trips, not the
+> language), and a Python worker measured *heavier* than Node once the main process stopped loading a
+> 69 MB addon it never used. A Python thread-executor worker stays in reserve, triggered only by an
+> N=10 acceptance failing on a memory ceiling. See ADR 0010, Decision 7.
+
+
 ## Context
 
 v1 was Python, kept at decision time as the reference implementation under `backend/`. The author
