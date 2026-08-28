@@ -15,6 +15,7 @@ export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) 
   const latency = h("div", { class: "card" });
   const quality = h("div", { class: "card" });
   const providers = h("div", { class: "card" });
+  const processCard = h("div", { class: "card" });
   const seedOut = h("div", { class: "small muted", style: "margin-top:8px" });
 
   const baseInput = h("input", { value: apiBase(), placeholder: "https://api.example.com (empty = same origin)", style: "min-width:340px" }) as HTMLInputElement;
@@ -41,6 +42,8 @@ export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) 
     quality,
     h("h2", {}, "Vendor failures (most recent)"),
     providers,
+    h("h2", {}, "This process"),
+    processCard,
     h("h2", {}, "Process counters (since start)"),
     counters,
     h("h2", {}, "Demo data"),
@@ -137,6 +140,43 @@ export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) 
                 ),
               ),
             ),
+      );
+      clear(processCard);
+      // The operator's half of D3; the scraper's half is the same numbers at GET /metrics. Loop
+      // liveness leads because it is the one row that can be *wrong* in a way nothing else shows:
+      // a process with a dead outbox serves this page perfectly.
+      const p = s.process;
+      const mb = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(0)} MB`;
+      const stale = p.loops.filter((l) => l.stale);
+      processCard.append(
+        h(
+          "div",
+          { class: "row", style: "align-items:center;gap:10px;margin-bottom:10px" },
+          badge(stale.length === 0 ? "LOOPS ALIVE" : "LOOP STOPPED", stale.length === 0 ? "good" : "bad"),
+          h(
+            "span",
+            { class: "muted small" },
+            p.loops.length === 0
+              ? "no background loop has reported a tick yet"
+              : stale.length > 0
+                ? `${stale.map((l) => l.name).join(", ")} — /readyz is failing`
+                : p.loops.map((l) => `${l.name} ${ago(l.last_tick_at ?? "")}`).join(" · "),
+          ),
+        ),
+        h(
+          "div",
+          { class: "row", style: "gap:22px;flex-wrap:wrap" },
+          // Lateness beyond the 20 ms sampling floor, so 0 means the loop is keeping up rather
+          // than meaning the measurement is broken.
+          metric("event-loop delay", `${p.event_loop_delay_ms.p99.toFixed(1)} ms`, `p99 over the floor · p50 ${p.event_loop_delay_ms.p50.toFixed(1)} ms`),
+          metric("resident memory", mb(p.memory_bytes.rss), `heap ${mb(p.memory_bytes.heap_used)} of ${mb(p.memory_bytes.heap_total)}`),
+          metric("CPU", `${(p.cpu_seconds.user + p.cpu_seconds.system).toFixed(1)} s`, `over ${p.uptime_seconds} s up · ${(((p.cpu_seconds.user + p.cpu_seconds.system) / Math.max(1, p.uptime_seconds)) * 100).toFixed(0)}% of one core`),
+          metric("GC", `${p.gc.total_pause_ms.toFixed(0)} ms`, `paused over ${p.gc.collections} collection(s)`),
+          // Waiting is the number that diagnosed the 2026-08-21 pool experiment; a pool that is
+          // never waited on is not the constraint, whatever its size.
+          metric("pg pool", p.pg_pool === null ? "—" : `${p.pg_pool.size - p.pg_pool.idle}/${p.pg_pool.size}`, p.pg_pool === null ? "no database in this process" : `in use · ${p.pg_pool.waiting} waiting`),
+          metric("in flight", String(p.live_turns), `retained turns · ${p.sse_streams} SSE stream(s) · ${p.rate_limit_buckets} ip bucket(s)`),
+        ),
       );
       clear(counters);
       counters.append(pre(s.counters));

@@ -15,7 +15,7 @@
  */
 import { Effect, Layer } from "effect";
 import { PerformanceObserver, monitorEventLoopDelay } from "node:perf_hooks";
-import { memoryUsage } from "node:process";
+import { cpuUsage, memoryUsage } from "node:process";
 
 /** A scheduler loop that is expected to tick, and when it last did. */
 export interface LoopLiveness {
@@ -28,6 +28,15 @@ export interface LoopLiveness {
 
 export interface ProcessSnapshot {
   readonly uptime_seconds: number;
+  /**
+   * CPU this process has burned since it started, split the way the OS accounts for it.
+   *
+   * The one number the per-core budget (D1) needs from the server and could only get from outside
+   * it: the load harness was reading it out of `Get-Process` through a child `powershell`, which
+   * measures whichever process the harness guessed was the server. A process that reports its own
+   * CPU cannot be confused with its launcher.
+   */
+  readonly cpu_seconds: { readonly user: number; readonly system: number };
   /** Lateness *beyond* the sampling period: 0 means the loop is keeping up. See `ms` below. */
   readonly event_loop_delay_ms: { readonly p50: number; readonly p99: number; readonly max: number };
   readonly memory_bytes: { readonly rss: number; readonly heap_used: number; readonly heap_total: number; readonly external: number };
@@ -112,6 +121,9 @@ export const makeProcessMetrics = (sources: ProcessMetricsSources) =>
       snapshot: () =>
         Effect.sync(() => {
           const mem = memoryUsage();
+          // Microseconds since process start, both counters monotonic. Rounded to the millisecond:
+          // more precision than that is noise from the accounting itself.
+          const cpu = cpuUsage();
           /**
            * Nanoseconds to milliseconds, minus the sampling period.
            *
@@ -125,6 +137,7 @@ export const makeProcessMetrics = (sources: ProcessMetricsSources) =>
           const ms = (ns: number) => Math.max(0, Math.round((ns / 1e6 - LOOP_RESOLUTION_MS) * 100) / 100);
           return {
             uptime_seconds: Math.round((Date.now() - startedAt) / 1000),
+            cpu_seconds: { user: Math.round(cpu.user / 1000) / 1000, system: Math.round(cpu.system / 1000) / 1000 },
             event_loop_delay_ms: { p50: ms(loopDelay.percentile(50)), p99: ms(loopDelay.percentile(99)), max: ms(loopDelay.max) },
             memory_bytes: { rss: mem.rss, heap_used: mem.heapUsed, heap_total: mem.heapTotal, external: mem.external },
             gc: { total_pause_ms: Math.round(gc.totalPauseMs * 100) / 100, collections: gc.collections },

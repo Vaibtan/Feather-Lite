@@ -471,6 +471,12 @@ export const SystemStatus = Schema.Struct({
    */
   process: Schema.Struct({
     uptime_seconds: Schema.Number,
+    /**
+     * CPU this process has burned since boot. The denominator of the per-core budget (D1): before
+     * this it could only be read from outside, by a harness guessing which OS process was the
+     * server.
+     */
+    cpu_seconds: Schema.Struct({ user: Schema.Number, system: Schema.Number }),
     event_loop_delay_ms: Schema.Struct({ p50: Schema.Number, p99: Schema.Number, max: Schema.Number }),
     memory_bytes: Schema.Struct({ rss: Schema.Number, heap_used: Schema.Number, heap_total: Schema.Number, external: Schema.Number }),
     gc: Schema.Struct({ total_pause_ms: Schema.Number, collections: Schema.Number }),
@@ -618,6 +624,16 @@ export const SystemGroup = HttpApiGroup.make("system")
     HttpApiEndpoint.get("readyz", "/readyz")
       .addSuccess(Schema.Struct({ status: Schema.Literal("ready"), database: Schema.Literal("ok"), loops: Schema.Array(Schema.String) }))
       .addError(ApiUnavailable),
+  )
+  /**
+   * The `process` block below, in Prometheus exposition format, so the same numbers a human reads
+   * on the console can be scraped beside `livekit-server`'s own `/metrics` (D3). Text, not JSON:
+   * the content type is part of the contract a scraper checks.
+   */
+  .add(
+    HttpApiEndpoint.get("metrics", "/metrics").addSuccess(
+      Schema.String.pipe(HttpApiSchema.withEncoding({ kind: "Text", contentType: "text/plain; version=0.0.4; charset=utf-8" })),
+    ),
   )
   .add(HttpApiEndpoint.get("status", "/api/system/status").addSuccess(SystemStatus))
   .add(

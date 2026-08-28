@@ -20,6 +20,7 @@ import {
 import { scoreRecordProblem } from "@feather-lite/domain";
 import { AppConfig } from "../config.js";
 import { ConversationCompleted, NotFound, PreCallRejected, TelephonyError, TurnInProgress, UnknownScenario } from "../errors.js";
+import { prometheusText } from "./prometheus.js";
 import { rateLimitBucketCount } from "./rateLimit.js";
 import { unknownTurnIdMessage, unknownTurnIds } from "./scoreTargets.js";
 import { SchedulingRepo } from "../repos/scheduling.js";
@@ -34,6 +35,12 @@ import { VoiceSessions } from "../services/VoiceSessions.js";
 import { WorkflowService } from "../services/Workflow.js";
 import { Metrics } from "../services/Metrics.js";
 import { TurnRunner } from "./TurnRunner.js";
+
+/**
+ * Reported by `/healthz`, and as the `version` label on `/metrics` build info. One constant so a
+ * scraper's view of which build is running cannot drift from the health check's.
+ */
+const SERVICE_VERSION = "2.0.0";
 
 /* --------------------------- error mapping --------------------------- */
 
@@ -88,7 +95,7 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
     const metrics = yield* Metrics;
     const processMetrics = yield* ProcessMetrics;
     return handlers
-      .handle("healthz", () => Effect.succeed({ status: "ok" as const, version: "2.0.0" }))
+      .handle("healthz", () => Effect.succeed({ status: "ok" as const, version: SERVICE_VERSION }))
       .handle("readyz", () =>
         Effect.gen(function* () {
           yield* sql`SELECT 1`.pipe(Effect.mapError(() => new ApiUnavailable({ message: "database not reachable" })));
@@ -109,6 +116,20 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
           }
           const loops = yield* processMetrics.snapshot().pipe(Effect.map((p) => p.loops.map((l) => l.name)));
           return { status: "ready" as const, database: "ok" as const, loops };
+        }),
+      )
+      /**
+       * Built from the same snapshot `/status` serves, so the two surfaces cannot disagree — see
+       * `prometheus.ts` for why the library's default metrics are deliberately not collected.
+       */
+      .handle("metrics", () =>
+        Effect.gen(function* () {
+          const snapshot = yield* processMetrics.snapshot();
+          const counters = yield* metrics.snapshot();
+          const flat = (counters as { counters?: Record<string, unknown> }).counters ?? {};
+          const numeric: Record<string, number> = {};
+          for (const [k, v] of Object.entries(flat)) if (typeof v === "number") numeric[k] = v;
+          return yield* Effect.promise(() => prometheusText({ process: snapshot, counters: numeric, service: "feather-lite-server", version: SERVICE_VERSION }));
         }),
       )
       .handle("status", () =>

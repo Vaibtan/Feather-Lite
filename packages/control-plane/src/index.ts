@@ -31,6 +31,7 @@ export * from "./http/TurnRunner.js";
 export * from "./http/handlers.js";
 export * from "./http/app.js";
 export * from "./http/rateLimit.js";
+export * from "./http/prometheus.js";
 export * from "./services/Tracing.js";
 export * from "./llm/LlmClient.js";
 export * from "./llm/prompts.js";

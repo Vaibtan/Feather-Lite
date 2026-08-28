@@ -239,6 +239,19 @@ export interface SystemStatus {
   /** Live vendor failures; the durable rates are on /api/system/quality. */
   provider_events: { counters: Record<string, number>; recent: Array<{ provider: string; kind: string; stage: string; message: string; at: string; conversation_id: string | null }> };
   slo: SloReport;
+  /** What the server process is doing to itself (D3): loop lateness, memory, GC, pool, loop liveness. */
+  process: {
+    uptime_seconds: number;
+    cpu_seconds: { user: number; system: number };
+    event_loop_delay_ms: { p50: number; p99: number; max: number };
+    memory_bytes: { rss: number; heap_used: number; heap_total: number; external: number };
+    gc: { total_pause_ms: number; collections: number };
+    pg_pool: { size: number; idle: number; waiting: number } | null;
+    loops: Array<{ name: string; last_tick_at: string | null; interval_ms: number; stale: boolean }>;
+    sse_streams: number;
+    live_turns: number;
+    rate_limit_buckets: number;
+  };
   turn_decider: string;
   judge: { enabled: boolean; model: string };
   /** Load this server shed rather than served (O9). A 429 is configuration, not a vendor failure. */
