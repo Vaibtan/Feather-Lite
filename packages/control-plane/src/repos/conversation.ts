@@ -355,11 +355,43 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
 
     /* ------------------------------ events ------------------------------ */
 
-    const nextSequenceNo = SqlSchema.single({
-      Request: Schema.String,
-      Result: Schema.Struct({ next: Schema.NumberFromString }),
-      execute: (conversationId) => sql`
-        SELECT (COALESCE(MAX(sequence_no), 0) + 1)::text AS next FROM conversation_events WHERE conversation_id = ${conversationId}`,
+    /**
+     * Number the row and write it in **one** statement.
+     *
+     * It used to be two: `SELECT COALESCE(MAX(sequence_no),0)+1` and then an `INSERT` with the
+     * answer. Together they were a sixth of every statement this system executes — 2 200 calls each
+     * over a C=100 run, and a terminal turn writes eight events, so sixteen round trips inside the
+     * conversation row lock for what is one write.
+     *
+     * **What was actually costing anything.** `pg_stat_statements` put the aggregate at 0.045 ms a
+     * call: it is an index-only `MAX` over `(conversation_id, sequence_no)`, and 2 200 of them are
+     * 99 ms of server time in a run that spends 1 450. The cost was never the aggregate — it was
+     * the round trip, the event-loop turn, and the pool checkout, all held under the row lock.
+     *
+     * **Which is why `conversations.next_sequence_no` is not built.** D5b offered it as the
+     * alternative and told the implementer to choose on the numbers: a counter column would save
+     * those 99 ms and add a second write to the hottest row in the schema on every event, to remove
+     * a round trip this already removes. The spec says do not ship both; this is the one the
+     * measurement argues for.
+     *
+     * The safety property is unchanged. The caller still holds the conversation row lock, so the
+     * `MAX` cannot race, and `UNIQUE (conversation_id, sequence_no)` is still the backstop if a
+     * caller ever forgets.
+     */
+    const insertEventRow = SqlSchema.single({
+      Request: Schema.Struct({
+        id: Schema.String,
+        conversationId: Schema.String,
+        type: Schema.String,
+        payload: Schema.Any,
+        createdAt: Schema.DateFromSelf,
+      }),
+      Result: Schema.Struct({ sequenceNo: Schema.NumberFromString }),
+      execute: ({ id, conversationId, type, payload, createdAt }) => sql`
+        INSERT INTO conversation_events (id, conversation_id, sequence_no, type, payload, created_at)
+        SELECT ${id}, ${conversationId}, COALESCE(MAX(sequence_no), 0) + 1, ${type}, ${sql.json(payload as Record<string, unknown>)}, ${createdAt}
+        FROM conversation_events WHERE conversation_id = ${conversationId}
+        RETURNING sequence_no::text AS sequence_no`,
     });
 
     /**
@@ -368,17 +400,15 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
      */
     const appendEvent = (params: { id: string; conversationId: string; event: ConversationEvent; createdAt: Date }) =>
       Effect.gen(function* () {
-        const { next } = yield* nextSequenceNo(params.conversationId);
-        yield* sql`INSERT INTO conversation_events ${sql.insert({
+        const { sequenceNo } = yield* insertEventRow({
           id: params.id,
           conversationId: params.conversationId,
-          sequenceNo: next,
           type: params.event.type,
-          payload: sql.json(params.event.payload as Record<string, unknown>),
+          payload: params.event.payload,
           createdAt: params.createdAt,
-        })}`;
+        });
         const record: EventRecord = {
-          sequence_no: next,
+          sequence_no: sequenceNo,
           created_at: params.createdAt.toISOString(),
           ...params.event,
         } as EventRecord;
