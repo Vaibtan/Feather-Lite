@@ -163,6 +163,74 @@ describe("EVALUATION outbox job", () => {
     expect(out.filter((r) => r.source === "EVALUATOR").every((r) => r.turnId === null)).toBe(true);
   });
 
+  it("persists the SLO verdict per call, and withholds it from a call that measured nothing (O6)", async () => {
+    // `latency.slo_pass` sat in the closed score vocabulary, typed BOOLEAN, with no producer
+    // anywhere in the tree - while `scores.ts` says "an entry here is never a metric nobody emits".
+    // Written by the EVALUATION job, which runs post-call when every turn row and its worker-side
+    // components exist, so "was this call within SLO" is a historical query and not a page refresh.
+    const out = await rt.runPromise(
+      withFrozenClock(NOW)(
+        Effect.gen(function* () {
+          const sql = yield* PgClient.PgClient;
+          const wf = yield* WorkflowService;
+          const orch = yield* Orchestrator;
+          const outbox = yield* OutboxService;
+          const scores = yield* Scores;
+
+          /**
+           * Each call is driven to a close first — "please stop calling me" ends it — because the
+           * EVALUATION job is only enqueued at finalize. The components are written onto the turn
+           * rows afterwards but before `runOnce`, which is the real ordering: the worker's
+           * `turn_metrics` signal lands during the call, the job reads the rows after it.
+           */
+          // A voice call whose end-of-utterance delay is far past target.
+          const slow = yield* seedBorrower("Slow Voice", "+15550004001");
+          const slowCall = yield* wf.startCall({ borrowerId: slow.borrowerId, contactPointId: slow.cpId, channel: "voice", now: NOW });
+          yield* orch.processTurn({ conversationId: slowCall.conversationId, turnId: "t1", userText: "please stop calling me" }, () => Effect.void);
+          yield* sql`UPDATE conversation_turns SET result = COALESCE(result, '{}'::jsonb) ||
+                       '{"eou_delay_ms": 9000, "tts_ttfb_ms": 300}'::jsonb
+                     WHERE conversation_id = ${slowCall.conversationId}`;
+
+          // A voice call comfortably inside every target it measured.
+          const fast = yield* seedBorrower("Fast Voice", "+15550004002");
+          const fastCall = yield* wf.startCall({ borrowerId: fast.borrowerId, contactPointId: fast.cpId, channel: "voice", now: NOW });
+          yield* orch.processTurn({ conversationId: fastCall.conversationId, turnId: "t1", userText: "please stop calling me" }, () => Effect.void);
+          yield* sql`UPDATE conversation_turns SET result = COALESCE(result, '{}'::jsonb) ||
+                       '{"eou_delay_ms": 400, "tts_ttfb_ms": 300}'::jsonb
+                     WHERE conversation_id = ${fastCall.conversationId}`;
+
+          // A call with no component measurement at all: never measured, rather than measured and
+          // fine. The orchestrator's decide TTFT is stripped to make that the case.
+          const sim = yield* seedBorrower("Simulated Only", "+15550004003");
+          const simCall = yield* wf.startCall({ borrowerId: sim.borrowerId, contactPointId: sim.cpId, channel: "simulated", now: NOW });
+          yield* orch.processTurn({ conversationId: simCall.conversationId, turnId: "t1", userText: "please stop calling me" }, () => Effect.void);
+          yield* sql`UPDATE conversation_turns SET result = result - 'ttftMs' WHERE conversation_id = ${simCall.conversationId}`;
+
+          yield* outbox.runOnce(50, NOW);
+          return {
+            slow: yield* scores.listForConversation(slowCall.conversationId),
+            fast: yield* scores.listForConversation(fastCall.conversationId),
+            sim: yield* scores.listForConversation(simCall.conversationId),
+          };
+        }),
+      ),
+    );
+
+    const slo = (rows: ReadonlyArray<{ name: string; value: number; comment: string | null; source: string }>) => rows.find((r) => r.name === "latency.slo_pass");
+
+    const breached = slo(out.slow);
+    expect(breached?.value).toBe(0);
+    expect(breached?.source).toBe("EVALUATOR");
+    // The comment names the component, so the persisted row says *which* target was missed.
+    expect(breached?.comment).toContain("eou_delay_ms");
+
+    expect(slo(out.fast)?.value).toBe(1);
+
+    // Nothing measured is not a pass. A green tick here would be the flattering reading of an
+    // absence, which is the whole reason this vocabulary entry existed unfilled.
+    expect(slo(out.sim)).toBeUndefined();
+  });
+
   it("flags a call whose first line skipped the Mini-Miranda", async () => {
     const out = await rt.runPromise(
       withFrozenClock(NOW)(Effect.gen(function* () {

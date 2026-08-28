@@ -43,3 +43,51 @@ export const sloComponentStatus = (observed: { readonly p95: number | null; read
   if (observed.n < minSample) return "insufficient_sample";
   return observed.p95 > targetMs ? "breach" : "pass";
 };
+
+/** The four latency components a turn can carry, plus the decide TTFT. All optional per turn. */
+export interface TurnLatencyComponents {
+  readonly eou_delay_ms: number | null;
+  readonly transcription_delay_ms: number | null;
+  readonly ttft_ms: number | null;
+  readonly tts_ttfb_ms: number | null;
+}
+
+export interface SloTargetsMs {
+  readonly eouP95Ms: number;
+  readonly transcriptionP95Ms: number;
+  readonly ttftP95Ms: number;
+  readonly ttsTtfbP95Ms: number;
+}
+
+/**
+ * Was this one call within the latency SLO (O6)?
+ *
+ * A per-call verdict is a different question from the windowed one, and it is answered differently
+ * on purpose. The window reports a p95 across many calls; a single call has three to six turns, so
+ * a "p95" of it would be its slowest turn wearing a percentile's clothes. The claim here is the one
+ * that is actually checkable: **no turn in this call exceeded any component's target**.
+ *
+ * Null when the call carries no component measurement at all — a simulated call has no
+ * end-of-utterance delay and never had one, which is not the same as passing. `breached` names the
+ * components that failed, so the persisted score can say which, rather than only that.
+ */
+export const callSloVerdict = (
+  turns: ReadonlyArray<TurnLatencyComponents>,
+  targets: SloTargetsMs,
+): { readonly pass: boolean | null; readonly breached: ReadonlyArray<string>; readonly measured: number } => {
+  const components = [
+    { name: "eou_delay_ms", target: targets.eouP95Ms, of: (t: TurnLatencyComponents) => t.eou_delay_ms },
+    { name: "transcription_delay_ms", target: targets.transcriptionP95Ms, of: (t: TurnLatencyComponents) => t.transcription_delay_ms },
+    { name: "ttft_ms", target: targets.ttftP95Ms, of: (t: TurnLatencyComponents) => t.ttft_ms },
+    { name: "tts_ttfb_ms", target: targets.ttsTtfbP95Ms, of: (t: TurnLatencyComponents) => t.tts_ttfb_ms },
+  ];
+  const breached: string[] = [];
+  let measured = 0;
+  for (const c of components) {
+    const values = turns.map(c.of).filter((v): v is number => v !== null);
+    measured += values.length;
+    if (values.length === 0) continue; // nothing to be within target of
+    if (Math.max(...values) > c.target) breached.push(c.name);
+  }
+  return { pass: measured === 0 ? null : breached.length === 0, breached, measured };
+};

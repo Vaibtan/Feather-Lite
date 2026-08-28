@@ -8,7 +8,7 @@
  * observation instead of the first.
  */
 import { describe, expect, it } from "vitest";
-import { percentile, sloComponentStatus } from "../src/percentile.js";
+import { callSloVerdict, percentile, sloComponentStatus, type TurnLatencyComponents } from "../src/percentile.js";
 
 describe("percentile", () => {
   it("has nothing to say about no observations", () => {
@@ -85,5 +85,54 @@ describe("sloComponentStatus", () => {
   it("treats the target as a ceiling, not a range — equal to target passes", () => {
     expect(sloComponentStatus({ p95: target, n: min }, target, min)).toBe("pass");
     expect(sloComponentStatus({ p95: target + 1, n: min }, target, min)).toBe("breach");
+  });
+});
+
+describe("callSloVerdict", () => {
+  const targets = { eouP95Ms: 700, transcriptionP95Ms: 600, ttftP95Ms: 1500, ttsTtfbP95Ms: 600 };
+  const turn = (over: Partial<TurnLatencyComponents> = {}): TurnLatencyComponents => ({
+    eou_delay_ms: null,
+    transcription_delay_ms: null,
+    ttft_ms: null,
+    tts_ttfb_ms: null,
+    ...over,
+  });
+
+  it("passes a call whose every turn is inside every target it measured", () => {
+    const v = callSloVerdict([turn({ eou_delay_ms: 500, ttft_ms: 900 }), turn({ eou_delay_ms: 600, ttft_ms: 1200 })], targets);
+    expect(v.pass).toBe(true);
+    expect(v.breached).toEqual([]);
+  });
+
+  it("fails on one slow turn, and names the component", () => {
+    // Not a percentile: one turn over target fails the call, which is the claim that can actually
+    // be checked against the ledger afterwards.
+    const v = callSloVerdict([turn({ eou_delay_ms: 500 }), turn({ eou_delay_ms: 9000 })], targets);
+    expect(v.pass).toBe(false);
+    expect(v.breached).toEqual(["eou_delay_ms"]);
+  });
+
+  it("names every component that breached, not just the first", () => {
+    const v = callSloVerdict([turn({ eou_delay_ms: 9000, tts_ttfb_ms: 4000 })], targets);
+    expect(v.breached).toEqual(["eou_delay_ms", "tts_ttfb_ms"]);
+  });
+
+  it("is null, not true, for a call that measured nothing", () => {
+    // A simulated call has no end-of-utterance delay and never had one. Scoring that as a pass
+    // would put a green tick on a call nobody measured.
+    expect(callSloVerdict([turn(), turn()], targets).pass).toBeNull();
+    expect(callSloVerdict([], targets).pass).toBeNull();
+  });
+
+  it("judges a call on the components it does carry, ignoring the ones it does not", () => {
+    // A simulated call records only the decide TTFT. That is judgeable on its own.
+    const v = callSloVerdict([turn({ ttft_ms: 200 })], targets);
+    expect(v.pass).toBe(true);
+    expect(v.measured).toBe(1);
+  });
+
+  it("treats the target as a ceiling", () => {
+    expect(callSloVerdict([turn({ ttft_ms: 1500 })], targets).pass).toBe(true);
+    expect(callSloVerdict([turn({ ttft_ms: 1501 })], targets).pass).toBe(false);
   });
 });

@@ -9,6 +9,7 @@ import {
   booleanScore,
   buildJudgeInput,
   buildTranscript,
+  callSloVerdict,
   decodeJudgeVerdict,
   evaluateCall,
   evaluationScores,
@@ -188,8 +189,36 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
               // and scored alongside the ledger-derived ones — one job, one set of post-call scores.
               const ttsRows = yield* conv.turnTtsFacts(job.conversationId);
               const silentTurns = silentPlayoutTurnIds(events);
+              /**
+               * The per-call SLO verdict (O6). `latency.slo_pass` has been in the closed score
+               * vocabulary since it was written, typed BOOLEAN, with no producer anywhere — while
+               * `scores.ts` says "an entry here is never a metric nobody emits". It is written here
+               * because this job runs post-call, when every turn row exists and its worker-side
+               * components have landed, and because "was this call within SLO" should be a
+               * historical query rather than something recomputed on a page refresh.
+               */
+              const latencyRows = yield* conv.turnLatencyFacts(job.conversationId);
+              const verdict = callSloVerdict(
+                latencyRows.map((r) => ({
+                  eou_delay_ms: r.eouDelayMs,
+                  transcription_delay_ms: r.transcriptionDelayMs,
+                  ttft_ms: r.ttftMs,
+                  tts_ttfb_ms: r.ttsTtfbMs,
+                })),
+                cfg.slo,
+              );
               const written = yield* scores.recordMany([
                 ...evaluationScores(job.conversationId, evaluation),
+                // Null stays unwritten: a call that measured nothing has not passed the SLO, and a
+                // green tick on it would be the flattering reading of an absence.
+                ...(verdict.pass === null
+                  ? []
+                  : [
+                      booleanScore(job.conversationId, "latency.slo_pass", verdict.pass, "EVALUATOR", {
+                        comment: verdict.pass ? `${String(verdict.measured)} component reading(s), all within target` : `over target: ${verdict.breached.join(", ")}`,
+                        evidence: { breached: verdict.breached, readings: verdict.measured },
+                      }),
+                    ]),
                 ...ttsScores(
                   job.conversationId,
                   ttsRows.map((r) => ({ turnId: r.turnId, audioMs: r.ttsAudioMs, chars: r.ttsChars, silent: silentTurns.has(r.turnId) })),
