@@ -22,6 +22,7 @@ import type {
 import { decodeEventRecord, ORPHANED_REASON, READBACK_INTERRUPTED_DETAIL } from "@feather-lite/domain";
 import {
   CallAttemptRow,
+  ConversationContextRow,
   ConversationRow,
   EventRow,
   type PendingProposalJson,
@@ -96,6 +97,54 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
       direction: string;
       startedAt: Date;
     }) => sql`INSERT INTO call_attempts ${sql.insert({ ...row, attemptStatus: "INITIATED" })}`.pipe(Effect.asVoid);
+
+    /**
+     * The five rows the prompt context needs, in one round trip (D5).
+     *
+     * `ContextBuilder` asked for borrower, attempt, workflow, contact point and loan one at a time,
+     * and it does so inside T1 while the conversation row lock is held — five serial round trips on
+     * one pooled connection, on the hot path of every turn. They are one join: the attempt names
+     * the workflow and the contact point, and the borrower and the loan hang off the borrower id
+     * the conversation row already carries.
+     *
+     * Written as a purpose-built query rather than a generic join helper because the *question* is
+     * specific: this is "what does the prompt need to know", and the caller should not have to
+     * reassemble it from five row types.
+     *
+     * `LEFT JOIN LATERAL` for the loan keeps `primaryLoanForBorrower`'s ordering
+     * (`delinquency_days DESC, due_date ASC, id ASC`) exactly, and keeps the row when there is no
+     * loan — a borrower with none has a public context and no protected one, which the gate
+     * already understands.
+     */
+    const contextForConversation = SqlSchema.findOne({
+      Request: Schema.Struct({ borrowerId: Schema.String, callAttemptId: Schema.String }),
+      Result: ConversationContextRow,
+      execute: ({ borrowerId, callAttemptId }) => sql`
+        SELECT
+          b.name                    AS borrower_name,
+          b.timezone                AS borrower_timezone,
+          a.workflow_execution_id,
+          a.contact_point_id,
+          w.workflow_type,
+          w.current_attempt_no,
+          cp.timezone_override,
+          l.id                      AS loan_id,
+          l.balance_due,
+          l.due_date::text          AS due_date,
+          l.status                  AS loan_status,
+          l.delinquency_days,
+          l.last_promise_date::text AS last_promise_date
+        FROM call_attempts a
+        JOIN workflow_executions w ON w.id = a.workflow_execution_id
+        JOIN borrowers b ON b.id = ${borrowerId}
+        LEFT JOIN contact_points cp ON cp.id = a.contact_point_id
+        LEFT JOIN LATERAL (
+          SELECT id, balance_due, due_date, status, delinquency_days, last_promise_date
+          FROM loans WHERE borrower_id = ${borrowerId}
+          ORDER BY delinquency_days DESC, due_date ASC, id ASC LIMIT 1
+        ) l ON true
+        WHERE a.id = ${callAttemptId}`,
+    });
 
     const findAttempt = SqlSchema.findOne({
       Request: Schema.String,
@@ -545,6 +594,7 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
       releaseTurn,
       updateConversation,
       appendEvent,
+      contextForConversation,
       listEvents,
       insertTurn,
       findTurn,

@@ -10,7 +10,6 @@ import { AppConfig } from "../config.js";
 import { NotFound } from "../errors.js";
 import type { ConversationRow } from "../db/rows.js";
 import { ConversationRepo } from "../repos/conversation.js";
-import { CrmRepo } from "../repos/crm.js";
 
 export interface ConversationContext {
   readonly bundle: ContextBundle;
@@ -47,44 +46,63 @@ const describeLocalTime = (now: DateTime.Utc, timeZone: string): string =>
 export class ContextBuilder extends Effect.Service<ContextBuilder>()("@feather-lite/ContextBuilder", {
   effect: Effect.gen(function* () {
     const cfg = yield* AppConfig;
-    const crm = yield* CrmRepo;
     const conv = yield* ConversationRepo;
 
     const forConversation = (row: ConversationRow, now: DateTime.Utc) =>
       Effect.gen(function* () {
-        const borrower = yield* crm.findBorrower(row.borrowerId).pipe(
-          Effect.flatMap(Option.match({ onNone: () => Effect.fail(new NotFound({ entity: "borrower", id: row.borrowerId })), onSome: Effect.succeed })),
+        /**
+         * Two queries, not six (D5). This runs inside T1 with the conversation row lock held, and
+         * it used to be borrower, attempt, workflow, contact point and loan one after another on
+         * the same pooled connection — five serial round trips per turn, under the lock, before
+         * anything about the turn had happened.
+         *
+         * The first four of the five were only ever sequential because each was written
+         * separately; the attempt names the workflow and the contact point, and the borrower and
+         * the loan hang off the borrower id this row already carries. `priorConversations` returns
+         * many rows and stays its own query.
+         */
+        const ctxRow = yield* conv.contextForConversation({ borrowerId: row.borrowerId, callAttemptId: row.callAttemptId }).pipe(
+          Effect.flatMap(
+            Option.match({
+              /**
+               * One `None` where there used to be three named ones. Every join here is across a
+               * foreign key, so the only way to reach this is an attempt id that does not exist —
+               * the borrower and workflow cannot be missing while the attempt is present. The
+               * message names both ids so the loss of granularity costs nothing diagnostically.
+               */
+              onNone: () => Effect.fail(new NotFound({ entity: "call_attempt", id: `${row.callAttemptId} (borrower ${row.borrowerId})` })),
+              onSome: Effect.succeed,
+            }),
+          ),
         );
-        const attempt = yield* conv.findAttempt(row.callAttemptId).pipe(
-          Effect.flatMap(Option.match({ onNone: () => Effect.fail(new NotFound({ entity: "call_attempt", id: row.callAttemptId })), onSome: Effect.succeed })),
-        );
-        const workflow = yield* conv.findWorkflow(attempt.workflowExecutionId).pipe(
-          Effect.flatMap(Option.match({ onNone: () => Effect.fail(new NotFound({ entity: "workflow_execution", id: attempt.workflowExecutionId })), onSome: Effect.succeed })),
-        );
-        const contactPoint = yield* crm.findContactPoint(attempt.contactPointId);
-        const loan = yield* crm.primaryLoanForBorrower(row.borrowerId);
         const prior = yield* conv.priorConversations({ borrowerId: row.borrowerId, excludeId: row.id, limit: 5 });
 
-        const timeZone = Option.getOrNull(contactPoint)?.timezoneOverride ?? borrower.timezone;
+        const timeZone = ctxRow.timezoneOverride ?? ctxRow.borrowerTimezone;
         const publicContext: PublicContext = {
           agent_name: cfg.agentName,
           company: cfg.companyName,
           callback_number: cfg.callbackNumber,
-          workflow_type: workflow.workflowType,
-          attempt_no: workflow.currentAttemptNo,
+          workflow_type: ctxRow.workflowType,
+          attempt_no: ctxRow.currentAttemptNo,
           local_time_description: describeLocalTime(now, timeZone),
-          borrower_first_name: firstName(borrower.name),
+          borrower_first_name: firstName(ctxRow.borrowerName),
         };
-        const protectedContext: ProtectedContext | null = Option.isSome(loan)
-          ? {
-              borrower_full_name: borrower.name,
-              balance_due: loan.value.balanceDue,
-              due_date: loan.value.dueDate,
-              loan_status: loan.value.status,
-              delinquency_days: loan.value.delinquencyDays,
-              last_promise_date: loan.value.lastPromiseDate,
-            }
-          : null;
+        /**
+         * All-or-nothing on the loan, as it was when this came from an `Option<LoanRow>`: the outer
+         * join makes every loan column null together, and `loanId` is the one that cannot be null
+         * on a real row.
+         */
+        const protectedContext: ProtectedContext | null =
+          ctxRow.loanId !== null
+            ? {
+                borrower_full_name: ctxRow.borrowerName,
+                balance_due: ctxRow.balanceDue ?? "0.00",
+                due_date: ctxRow.dueDate ?? "",
+                loan_status: ctxRow.loanStatus ?? "CURRENT",
+                delinquency_days: ctxRow.delinquencyDays ?? 0,
+                last_promise_date: ctxRow.lastPromiseDate,
+              }
+            : null;
         const memory: MemoryBlock = buildMemoryBlock(
           prior.map((p) => ({
             final_outcome: (p.finalOutcome ?? null) as Outcome | null,
@@ -97,15 +115,17 @@ export class ContextBuilder extends Effect.Service<ContextBuilder>()("@feather-l
           bundle: { publicContext, protectedContext, memory },
           borrowerTimeZone: timeZone,
           borrowerLocalDate: Option.getOrElse(localIsoDate(now, timeZone), () => DateTime.formatIsoDate(now)),
-          borrowerFirstName: firstName(borrower.name),
-          loanId: Option.isSome(loan) ? loan.value.id : "",
-          contactPointId: attempt.contactPointId,
-          workflowExecutionId: attempt.workflowExecutionId,
+          borrowerFirstName: firstName(ctxRow.borrowerName),
+          loanId: ctxRow.loanId ?? "",
+          contactPointId: ctxRow.contactPointId,
+          workflowExecutionId: ctxRow.workflowExecutionId,
         };
         return ctx;
       });
 
     return { forConversation } as const;
   }),
-  dependencies: [CrmRepo.Default, ConversationRepo.Default],
+  // `CrmRepo` is gone from this service: the one query it needs lives on `ConversationRepo` beside
+  // the conversation it is about.
+  dependencies: [ConversationRepo.Default],
 }) {}

@@ -69,6 +69,34 @@ export const LoanRow = Schema.Struct({
 });
 export type LoanRow = typeof LoanRow.Type;
 
+/**
+ * Everything the prompt context needs about a conversation, in one row (D5).
+ *
+ * `ContextBuilder` used to assemble this from six sequential selects — borrower, attempt, workflow,
+ * contact point, loan, prior conversations — inside T1, holding the conversation row lock for all
+ * six round trips. Five of them are one join; the sixth returns many rows and stays its own query.
+ *
+ * The loan half is nullable throughout because `primaryLoanForBorrower` was an `Option`: a borrower
+ * with no loan has a public context and no protected one, which is a state the gate already knows.
+ */
+export const ConversationContextRow = Schema.Struct({
+  borrowerName: Schema.String,
+  borrowerTimezone: Schema.String,
+  workflowExecutionId: Schema.String,
+  contactPointId: Schema.String,
+  workflowType: Schema.String,
+  currentAttemptNo: Schema.Number,
+  /** Null when the contact point has no override, and when there is no contact point row at all. */
+  timezoneOverride: Schema.NullOr(Schema.String),
+  loanId: Schema.NullOr(Schema.String),
+  balanceDue: Schema.NullOr(Schema.String),
+  dueDate: Schema.NullOr(Schema.String),
+  loanStatus: Schema.NullOr(LoanStatus),
+  delinquencyDays: Schema.NullOr(Schema.Number),
+  lastPromiseDate: Schema.NullOr(Schema.String),
+});
+export type ConversationContextRow = typeof ConversationContextRow.Type;
+
 export const AgentVersionRow = Schema.Struct({
   id: Schema.String,
   name: Schema.String,
