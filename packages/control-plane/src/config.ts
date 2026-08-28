@@ -32,6 +32,13 @@ export interface AppConfigShape {
    * without anyone having to strip credentials out of .env and put them back afterwards.
    */
   readonly langfuseEnabled: boolean;
+  /**
+   * Mask account facts — amounts, dates, long digit runs — in every span body before it is
+   * exported (D3). **On by default**: Langfuse is a second store with its own retention and its
+   * own readers, and nothing in the pipeline had ever drawn that line. Turn it off to debug a
+   * prompt, knowing what that writes.
+   */
+  readonly traceRedactAccountData: boolean;
   readonly livekit: { readonly url: string; readonly apiKey: string; readonly apiSecret: Redacted.Redacted<string>; readonly agentName: string } | null;
   /** Demo conveniences: clock override on /calls/start, "reset demo" endpoint. */
   readonly demoMode: boolean;
@@ -125,6 +132,7 @@ export const appConfig: Config.Config<AppConfigShape> = Config.all({
   langfuseBaseUrl: Config.string("LANGFUSE_BASE_URL").pipe(Config.withDefault("https://cloud.langfuse.com")),
   langfuseEnvironment: Config.string("LANGFUSE_TRACING_ENVIRONMENT").pipe(Config.withDefault("local")),
   langfuseEnabled: Config.boolean("LANGFUSE_ENABLED").pipe(Config.withDefault(true)),
+  traceRedactAccountData: Config.boolean("TRACE_REDACT_ACCOUNT_DATA").pipe(Config.withDefault(true)),
   livekitUrl: optionalString("LIVEKIT_URL"),
   livekitApiKey: optionalString("LIVEKIT_API_KEY"),
   livekitApiSecret: optionalRedacted("LIVEKIT_API_SECRET"),
@@ -169,6 +177,7 @@ export const appConfig: Config.Config<AppConfigShape> = Config.all({
           ? { publicKey: c.langfusePublicKey.value, secretKey: c.langfuseSecretKey.value, baseUrl: c.langfuseBaseUrl, environment: c.langfuseEnvironment }
           : null,
       langfuseEnabled: c.langfuseEnabled,
+      traceRedactAccountData: c.traceRedactAccountData,
       livekit:
         c.livekitUrl._tag === "Some" && c.livekitApiKey._tag === "Some" && c.livekitApiSecret._tag === "Some"
           ? { url: c.livekitUrl.value, apiKey: c.livekitApiKey.value, apiSecret: c.livekitApiSecret.value, agentName: c.livekitAgentName }

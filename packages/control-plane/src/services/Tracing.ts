@@ -19,11 +19,12 @@
  */
 import { Context, Effect, Layer, Redacted } from "effect";
 import { createHash, randomUUID } from "node:crypto";
+import { resourceFromAttributes } from "@opentelemetry/resources";
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import { LangfuseClient } from "@langfuse/client";
 import { LangfuseSpanProcessor } from "@langfuse/otel";
 import { propagateAttributes, setLangfuseTracerProvider, startActiveObservation, startObservation } from "@langfuse/tracing";
-import type { ScoreDataType } from "@feather-lite/domain";
+import { redactAccountData, redactAccountDataDeep, type ScoreDataType } from "@feather-lite/domain";
 import { AppConfig } from "../config.js";
 import { Metrics } from "./Metrics.js";
 
@@ -230,6 +231,33 @@ interface Pending {
   latency: WorkerTurnLatency | null;
 }
 
+/**
+ * What this process calls itself on its exported telemetry. The worker is not a second value here
+ * — it has no OTel exporter of its own and reports through the control plane (ADR 0009) — but the
+ * name is explicit so a future second exporter is not silently `unknown_service:node`.
+ */
+const serviceName = "feather-lite-server";
+
+/**
+ * What the SDK's mask hook runs on every exported span body.
+ *
+ * The attribute arrives as whatever the tracing layer put there — usually a JSON string, sometimes
+ * an object — so the redaction is applied to the parsed structure where it parses and to the raw
+ * text where it does not. Exported for its test: a mask that silently stopped masking would look
+ * exactly like one that had nothing to mask.
+ */
+export const spanMask = ({ data }: { data: unknown }): unknown => {
+  if (typeof data !== "string") return redactAccountDataDeep(data);
+  try {
+    // Re-serialised from the parsed form, so a redaction can never leave broken JSON behind.
+    return JSON.stringify(redactAccountDataDeep(JSON.parse(data)));
+  } catch {
+    return redactAccountData(data);
+  }
+};
+/** Kept in step with `/healthz` and the `/metrics` build info by being the same string. */
+const SERVICE_VERSION = "2.0.0";
+
 export const LangfuseTracingLive: Layer.Layer<Tracing, never, AppConfig | Metrics> = Layer.scoped(
   Tracing,
   Effect.gen(function* () {
@@ -241,13 +269,41 @@ export const LangfuseTracingLive: Layer.Layer<Tracing, never, AppConfig | Metric
       secretKey: Redacted.value(cfg.langfuse.secretKey),
       baseUrl: cfg.langfuse.baseUrl,
       environment: cfg.langfuse.environment,
+      /**
+       * Account facts leave here masked unless someone turned that off (D3).
+       *
+       * Installed on the processor rather than at each `span.update` call site on purpose. The SDK
+       * applies it to every input, output and metadata attribute of every span it exports — the
+       * turn span, the nested generation whose prompt carries the whole protected block, the
+       * judge's span with the full transcript — so a span added next month is covered by having
+       * been added, not by someone remembering. Doing it per call site is how one of the three
+       * would eventually be missed.
+       */
+      ...(cfg.traceRedactAccountData ? { mask: spanMask } : {}),
     });
     // `.register()` is required, not cosmetic: besides publishing the tracer provider it installs
     // the AsyncLocalStorage context manager. Without one, `context.active()` is always ROOT, so
     // `startActiveObservation` has no active span for the generation to nest under and
     // `propagateAttributes` has nowhere to put the session id — both were verified empty against a
     // local Langfuse before this call was added. This process has no other OpenTelemetry consumer.
-    const provider = new NodeTracerProvider({ spanProcessors: [processor] });
+    /**
+     * Who is exporting these spans, said in OTel's own vocabulary (D3). Without a resource the SDK
+     * falls back to `unknown_service:node`, which is what every process in a fleet is called.
+     *
+     * Worth knowing before relying on it: **Langfuse ignores this today.** Its span processor reads
+     * `span.resource.attributes` in exactly one place, a debug log line
+     * (`@langfuse/otel@5.10.1`) — the identity a Langfuse trace is filed under comes from
+     * `environment` and the session id, both already set above. This is here because the resource
+     * is the correct place for the answer and any other exporter pointed at this provider (a
+     * collector, a second backend) reads it; it is not here because it changes what appears in
+     * Langfuse.
+     */
+    const provider = new NodeTracerProvider({
+      spanProcessors: [processor],
+      // Literal keys rather than a dependency on `@opentelemetry/semantic-conventions` for two
+      // constants; these two are stable in the spec and have never been renamed.
+      resource: resourceFromAttributes({ "service.name": serviceName, "service.version": SERVICE_VERSION }),
+    });
     provider.register();
     setLangfuseTracerProvider(provider);
 
