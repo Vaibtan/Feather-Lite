@@ -96,7 +96,9 @@ const SchedulersLive = Layer.scopedDiscard(
         Effect.forkScoped,
       );
     yield* tick("scheduled-actions", scheduling.runOnce(20), "15 seconds");
-    yield* tick("outbox", outbox.runOnce(20), "5 seconds");
+    // `drain`, not `runOnce`: a full batch means there is more waiting, and a backlog should clear
+    // at the rate the work can be done rather than at the rate this loop polls (C2).
+    yield* tick("outbox", outbox.drain(20), "5 seconds");
     // Every 10 s, so worst-case detection is one heartbeat interval past the staleness window
     // (~40 s) and typical is ~35 s — the number D6 set.
     yield* tick("sweeper", sweeper.runOnce(20), "10 seconds");

@@ -134,21 +134,31 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
 
     const processJob = (job: OutboxJobRow, now: Date) =>
       Effect.gen(function* () {
+        /**
+         * The ledger is read **once per job**, here, and handed to both the judge and the
+         * transaction. A JUDGE job used to read the whole conversation twice — once to give the
+         * model something to read, once again inside the transaction — and a judged call's ledger
+         * is the largest single read this system makes.
+         *
+         * Safe because every outbox job is post-call: `enqueuePostCall` is the only thing that
+         * writes one, and it runs at finalize. The conversation is finished and its event log is
+         * append-only, so a read taken a few milliseconds before the transaction opens sees exactly
+         * what a read inside it would.
+         */
+        const events = yield* conv.listEvents(job.conversationId);
         // Everything that talks to another system happens before the transaction opens. Today that
         // is only the judge; the rule is the point.
-        const judged =
-          job.jobType === "JUDGE" ? yield* runJudge(job.conversationId, yield* conv.listEvents(job.conversationId)) : null;
-        return yield* processJobTx(job, now, judged);
+        const judged = job.jobType === "JUDGE" ? yield* runJudge(job.conversationId, events) : null;
+        return yield* processJobTx(job, now, judged, events);
       }).pipe(
         // Post-call work is per-conversation and runs minutes after the call, on a shared loop, so
         // its log lines are the least attributable in the system without this (D3).
         Effect.annotateLogs({ conversation_id: job.conversationId, outbox_job: job.jobType }),
       );
 
-    const processJobTx = (job: OutboxJobRow, now: Date, judged: JudgeOutcome | null) =>
+    const processJobTx = (job: OutboxJobRow, now: Date, judged: JudgeOutcome | null, events: ReadonlyArray<EventRecord>) =>
       sql.withTransaction(
         Effect.gen(function* () {
-          const events = yield* conv.listEvents(job.conversationId);
           const snapshot = replay(events);
           const transcript = buildTranscript(events);
           let result: Record<string, unknown>;
@@ -288,39 +298,89 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
         }),
       );
 
+    /**
+     * How many claimed jobs are processed at once (C2).
+     *
+     * The loop claimed up to 20 and then processed them **one at a time**, so a batch was as slow
+     * as the sum of its jobs. Measured: a C=100 tier-1 run leaves 300 jobs and took **~70 seconds**
+     * to drain them — long enough that the next load run started inside the backlog and reported a
+     * throughput that was really the drain (the tier-1 harness now waits for exactly this reason).
+     *
+     * Four, against a pool of ten: each job opens one transaction, so four is comfortably inside the
+     * pool with room for the turn path, which must never wait behind post-call work. Higher is an
+     * env change, not a code change, because the right number depends on the pool and on whether
+     * the judge is on — a JUDGE job spends most of its time waiting on a model, not on Postgres.
+     */
+    const OUTBOX_CONCURRENCY = Math.max(1, Number(process.env["OUTBOX_CONCURRENCY"] ?? 4));
+
     const runOnce = (limit = 20, nowOverride?: DateTime.Utc) =>
       Effect.gen(function* () {
         const now = DateTime.toDateUtc(nowOverride ?? (yield* DateTime.now));
         const jobs = yield* sql.withTransaction(sched.claimDueJobs({ now, limit }));
-        const out: Array<{ jobId: string; jobType: OutboxJobType; status: "DONE" | "PENDING" | "FAILED" }> = [];
-        for (const job of jobs) {
-          const r = yield* processJob(job, now).pipe(
-            Effect.catchAll((err) =>
-              Effect.gen(function* () {
-                const retry = Number(job.payload["retry_count"] ?? 0) + 1;
-                if (retry < retriesFor(job.jobType)) {
-                  yield* sched.finishJob({
-                    id: job.id,
-                    status: "PENDING",
-                    result: {},
-                    error: String(err),
-                    processedAt: null,
-                    availableAt: new Date(now.getTime() + Math.min(60, retry * 5) * 60_000),
-                    payloadPatch: { retry_count: retry },
-                  });
-                  return { jobId: job.id, jobType: job.jobType, status: "PENDING" as const };
-                }
-                yield* sched.finishJob({ id: job.id, status: "FAILED", result: {}, error: String(err), processedAt: now, payloadPatch: { retry_count: retry } });
-                return { jobId: job.id, jobType: job.jobType, status: "FAILED" as const };
-              }),
+        /**
+         * Order is not a property of this batch. Jobs are claimed with `SKIP LOCKED` from whatever
+         * is due, they belong to different conversations, and each is idempotent by construction —
+         * so processing them concurrently changes how long the batch takes and nothing else. The
+         * results are still returned in claim order, because callers (and the DB tests) read them
+         * positionally.
+         */
+        return yield* Effect.forEach(
+          jobs,
+          (job) =>
+            processJob(job, now).pipe(
+              Effect.catchAll((err) =>
+                Effect.gen(function* () {
+                  const retry = Number(job.payload["retry_count"] ?? 0) + 1;
+                  if (retry < retriesFor(job.jobType)) {
+                    yield* sched.finishJob({
+                      id: job.id,
+                      status: "PENDING",
+                      result: {},
+                      error: String(err),
+                      processedAt: null,
+                      availableAt: new Date(now.getTime() + Math.min(60, retry * 5) * 60_000),
+                      payloadPatch: { retry_count: retry },
+                    });
+                    return { jobId: job.id, jobType: job.jobType, status: "PENDING" as const };
+                  }
+                  yield* sched.finishJob({ id: job.id, status: "FAILED", result: {}, error: String(err), processedAt: now, payloadPatch: { retry_count: retry } });
+                  return { jobId: job.id, jobType: job.jobType, status: "FAILED" as const };
+                }),
+              ),
             ),
-          );
-          out.push(r);
-        }
-        return out;
+          { concurrency: OUTBOX_CONCURRENCY },
+        );
       });
 
-    return { enqueuePostCall, processJob, runOnce } as const;
+    /**
+     * Keep claiming while the batch comes back full, so a backlog drains at the rate the work can
+     * be done rather than at the rate the loop happens to poll (C2).
+     *
+     * **This is the half that actually mattered, and only measurement showed it.** Processing the
+     * batch concurrently made a batch of 20 take ~1.3 s instead of ~5, and a 283-job backlog still
+     * took **74 seconds** to clear — because the loop claims at most 20 every 5 seconds, so the
+     * ceiling was 4 jobs/s no matter how fast each one was. The concurrency was necessary and not
+     * sufficient; the pacing was the constraint.
+     *
+     * A short batch means the queue is empty, and the loop goes back to sleep for its interval. The
+     * cap exists so one tick cannot monopolise the process: at 20 a batch that is 200 jobs, after
+     * which the turn path gets the interval back whether or not the queue is clear.
+     */
+    const MAX_BATCHES_PER_TICK = 10;
+    const drain = (limit = 20) =>
+      Effect.gen(function* () {
+        let processed = 0;
+        for (let i = 0; i < MAX_BATCHES_PER_TICK; i++) {
+          const batch = yield* runOnce(limit);
+          processed += batch.length;
+          if (batch.length < limit) break;
+          // Cooperative: a full batch means there is more, and the turn path is on this event loop.
+          yield* Effect.yieldNow();
+        }
+        return processed;
+      });
+
+    return { enqueuePostCall, processJob, runOnce, drain } as const;
   }),
   dependencies: [SchedulingRepo.Default, ConversationRepo.Default, IdGen.Default, Scores.Default],
 }) {}
