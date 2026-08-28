@@ -1,0 +1,442 @@
+{
+  "tier": "2-voice",
+  "livekit_url": "ws://127.0.0.1:7880",
+  "stt_tts_provider": "plugins",
+  "speech": "plugins stt=deepgram/nova-3 tts=deepgram/aura-2-orion-en",
+  "worker": {
+    "production": true,
+    "maxJobs": 1,
+    "idleProcesses": 1,
+    "allow_dev": false
+  },
+  "calls": 3,
+  "agent_hung_up": 1,
+  "equivalence_green": 1,
+  "duration_ms": {
+    "p50": 262578,
+    "p95": 262774,
+    "max": 262774
+  },
+  "turn_latency_ms": {
+    "n": 3,
+    "unanswered": 6,
+    "p50": 2091,
+    "p95": 2236,
+    "max": 2236
+  },
+  "stt_wer": {
+    "n": 9,
+    "unmatched_transcripts": 0,
+    "p50": 1,
+    "p95": 1,
+    "max": 1,
+    "gate": 0.2,
+    "breached": true,
+    "worst_line": {
+      "turn": "yes this is the borrower",
+      "wer": 1,
+      "reference": "Yes, this is Jordan.",
+      "hypothesis": ""
+    }
+  },
+  "tts_heuristics": {
+    "turns": 3,
+    "silent_playouts": 0,
+    "silent_playout_rate": 0,
+    "chars_per_second": {
+      "n": 3,
+      "median": 12.83,
+      "min": 12.79,
+      "max": 24.35
+    },
+    "ttfb_ms": {
+      "n": 3,
+      "p50": 394,
+      "p95": 397
+    },
+    "outlier_band": 0.4,
+    "baseline_readings": 3,
+    "outliers": [
+      {
+        "turnId": "46a07006-5d86-4764-8875-8737e9136365",
+        "charsPerSecond": 24.35,
+        "deviation": 0.8978955572876073
+      }
+    ]
+  },
+  "borrowers": "forked-child",
+  "resources": {
+    "platform": "win32",
+    "vcpus": 12,
+    "interval_ms": 1000,
+    "samples": 263,
+    "wall_ms": 267668,
+    "load_wall_ms": 266566,
+    "marked": true,
+    "roles": [
+      {
+        "role": "server",
+        "pids": [
+          22124
+        ],
+        "samples": 263,
+        "peak_rss_bytes": 369618944,
+        "peak_private_bytes": 385028096,
+        "cpu_seconds": 26.016,
+        "idle_rss_bytes": 189636608,
+        "last_rss_bytes": 191176704
+      },
+      {
+        "role": "server-launcher",
+        "pids": [
+          20484,
+          23404,
+          27908
+        ],
+        "samples": 263,
+        "peak_rss_bytes": 279613440,
+        "peak_private_bytes": 282742784,
+        "cpu_seconds": 0,
+        "idle_rss_bytes": 279613440,
+        "last_rss_bytes": 279613440
+      },
+      {
+        "role": "worker-main",
+        "pids": [
+          14440
+        ],
+        "samples": 263,
+        "peak_rss_bytes": 184901632,
+        "peak_private_bytes": 197107712,
+        "cpu_seconds": 0.938,
+        "idle_rss_bytes": 181444608,
+        "last_rss_bytes": 184229888
+      },
+      {
+        "role": "worker-inference",
+        "pids": [
+          28356
+        ],
+        "samples": 263,
+        "peak_rss_bytes": 972664832,
+        "peak_private_bytes": 1047695360,
+        "cpu_seconds": 0.438,
+        "idle_rss_bytes": 972652544,
+        "last_rss_bytes": 403070976
+      },
+      {
+        "role": "worker-job",
+        "pids": [
+          21396,
+          28748
+        ],
+        "samples": 230,
+        "peak_rss_bytes": 496644096,
+        "peak_private_bytes": 489873408,
+        "cpu_seconds": 14.688,
+        "idle_rss_bytes": 196395008,
+        "last_rss_bytes": 474796032
+      },
+      {
+        "role": "worker-launcher",
+        "pids": [
+          8108,
+          23244,
+          24604
+        ],
+        "samples": 263,
+        "peak_rss_bytes": 281440256,
+        "peak_private_bytes": 282157056,
+        "cpu_seconds": 0.047,
+        "idle_rss_bytes": 281440256,
+        "last_rss_bytes": 280215552
+      },
+      {
+        "role": "harness",
+        "pids": [
+          9528,
+          22056,
+          29292
+        ],
+        "samples": 263,
+        "peak_rss_bytes": 305709056,
+        "peak_private_bytes": 331960320,
+        "cpu_seconds": 0.719,
+        "idle_rss_bytes": 301719552,
+        "last_rss_bytes": 253571072
+      },
+      {
+        "role": "harness-borrower",
+        "pids": [
+          22632
+        ],
+        "samples": 262,
+        "peak_rss_bytes": 223997952,
+        "peak_private_bytes": 222560256,
+        "cpu_seconds": 24.531,
+        "idle_rss_bytes": 0,
+        "last_rss_bytes": 162725888
+      }
+    ],
+    "totals": {
+      "peak_rss_bytes": 3058855936,
+      "peak_private_bytes": 2993102848,
+      "cpu_seconds": 67.377,
+      "idle_rss_bytes": 2402902016
+    },
+    "subsets": {
+      "worker": {
+        "peak": 1931513856,
+        "idle": 1631932416,
+        "peak_private": 1993060352,
+        "idle_private": 1550286848,
+        "roles": [
+          "worker-main",
+          "worker-inference",
+          "worker-job",
+          "worker-launcher"
+        ]
+      },
+      "server": {
+        "peak": 649232384,
+        "idle": 469250048,
+        "peak_private": 667770880,
+        "idle_private": 481595392,
+        "roles": [
+          "server",
+          "server-launcher"
+        ]
+      }
+    },
+    "steady_state": {
+      "target_ms": 60000,
+      "full_window": false,
+      "worker": {
+        "cpu_seconds": 15.5,
+        "wall_ms": 60902
+      },
+      "server": {
+        "cpu_seconds": 25.063,
+        "wall_ms": 60853
+      }
+    },
+    "rss_slope_mb_per_min": -158.82,
+    "private_slope_mb_per_min": -39.78,
+    "containers": [
+      {
+        "name": "feather-lite-livekit",
+        "samples": 54,
+        "peak_mem_bytes": 33973862,
+        "peak_cpu_percent": 3,
+        "mean_cpu_percent": 1.1
+      },
+      {
+        "name": "feather-lite-postgres",
+        "samples": 54,
+        "peak_mem_bytes": 303038464,
+        "peak_cpu_percent": 118.6,
+        "mean_cpu_percent": 13.4
+      }
+    ],
+    "host": {
+      "total_mem_bytes": 16477151232,
+      "free_mem_bytes_start": 2283909120,
+      "free_mem_bytes_end": 3136450560
+    },
+    "unclassified_pids": 1,
+    "notes": []
+  },
+  "per_core": {
+    "cores_used": 0.255,
+    "cores_over_full_window": false,
+    "calls_per_vcpu": 11.76,
+    "mb_per_call": 99.9,
+    "mb_per_call_private": 147.6,
+    "turns_per_s_per_core": null,
+    "cpu_seconds_per_turn": null,
+    "cpu_seconds_per_call_minute": 1.6,
+    "vcpus": 12,
+    "basis": "worker-main+worker-inference+worker-job+worker-launcher"
+  },
+  "reference": {
+    "scenario_id": "happy-path-promise-to-pay",
+    "state_path": [
+      "GREETING",
+      "VERIFYING_IDENTITY",
+      "DISCUSSING_PAYMENT",
+      "CONFIRMING_OUTCOME",
+      "ENDING",
+      "COMPLETED"
+    ],
+    "tools": [
+      "confirm_right_party",
+      "propose_promise_to_pay",
+      "record_promise_to_pay"
+    ],
+    "final_outcome": "PROMISE_TO_PAY"
+  },
+  "results": [
+    {
+      "label": "call00",
+      "conversation_id": "be8bfad2-c44a-451a-83aa-d633e42e65d2",
+      "hung_up": false,
+      "agent_audio_frames": 0,
+      "duration_ms": 262578,
+      "turn_latencies": [],
+      "wer_lines": [
+        {
+          "turn": "yes this is the borrower",
+          "wer": 1,
+          "substitutions": 0,
+          "insertions": 0,
+          "deletions": 4
+        },
+        {
+          "turn": "I can pay 550 on Friday",
+          "wer": 1,
+          "substitutions": 0,
+          "insertions": 0,
+          "deletions": 9
+        },
+        {
+          "turn": "yes, that's correct",
+          "wer": 1,
+          "substitutions": 0,
+          "insertions": 0,
+          "deletions": 4
+        }
+      ],
+      "unanswered_turns": [
+        "yes this is the borrower",
+        "I can pay 550 on Friday",
+        "yes, that's correct"
+      ],
+      "call_error": null,
+      "equivalent": false,
+      "failures": [
+        "state path [\"GREETING\",\"ENDING\",\"COMPLETED\"] != simulation [\"GREETING\",\"VERIFYING_IDENTITY\",\"DISCUSSING_PAYMENT\",\"CONFIRMING_OUTCOME\",\"ENDING\",\"COMPLETED\"]",
+        "tools [] != simulation [\"confirm_right_party\",\"propose_promise_to_pay\",\"record_promise_to_pay\"]",
+        "outcome FAILED != simulation PROMISE_TO_PAY"
+      ],
+      "state_path": [
+        "GREETING",
+        "ENDING",
+        "COMPLETED"
+      ],
+      "tools": [],
+      "final_outcome": "FAILED"
+    },
+    {
+      "label": "call01",
+      "conversation_id": "e563ca47-1d2e-4206-89cd-bacfdd7df9b7",
+      "hung_up": true,
+      "agent_audio_frames": 4988,
+      "duration_ms": 80477,
+      "turn_latencies": [
+        {
+          "turn": "yes this is the borrower",
+          "ms": 2091
+        },
+        {
+          "turn": "BARGE-IN: I can pay 550 on Friday",
+          "ms": 1854
+        },
+        {
+          "turn": "yes, that's correct",
+          "ms": 2236
+        }
+      ],
+      "wer_lines": [
+        {
+          "turn": "yes this is the borrower",
+          "wer": 0,
+          "substitutions": 0,
+          "insertions": 0,
+          "deletions": 0
+        },
+        {
+          "turn": "BARGE-IN: I can pay 550 on Friday",
+          "wer": 0,
+          "substitutions": 0,
+          "insertions": 0,
+          "deletions": 0
+        },
+        {
+          "turn": "yes, that's correct",
+          "wer": 0,
+          "substitutions": 0,
+          "insertions": 0,
+          "deletions": 0
+        }
+      ],
+      "unanswered_turns": [],
+      "call_error": null,
+      "equivalent": true,
+      "failures": [],
+      "state_path": [
+        "GREETING",
+        "VERIFYING_IDENTITY",
+        "DISCUSSING_PAYMENT",
+        "CONFIRMING_OUTCOME",
+        "ENDING",
+        "COMPLETED"
+      ],
+      "tools": [
+        "confirm_right_party",
+        "propose_promise_to_pay",
+        "record_promise_to_pay"
+      ],
+      "final_outcome": "PROMISE_TO_PAY"
+    },
+    {
+      "label": "call02",
+      "conversation_id": "3d661b89-5cec-4920-a259-255a9eaa9f8e",
+      "hung_up": false,
+      "agent_audio_frames": 0,
+      "duration_ms": 262774,
+      "turn_latencies": [],
+      "wer_lines": [
+        {
+          "turn": "yes this is the borrower",
+          "wer": 1,
+          "substitutions": 0,
+          "insertions": 0,
+          "deletions": 4
+        },
+        {
+          "turn": "I can pay 550 on Friday",
+          "wer": 1,
+          "substitutions": 0,
+          "insertions": 0,
+          "deletions": 9
+        },
+        {
+          "turn": "yes, that's correct",
+          "wer": 1,
+          "substitutions": 0,
+          "insertions": 0,
+          "deletions": 4
+        }
+      ],
+      "unanswered_turns": [
+        "yes this is the borrower",
+        "I can pay 550 on Friday",
+        "yes, that's correct"
+      ],
+      "call_error": null,
+      "equivalent": false,
+      "failures": [
+        "state path [\"GREETING\",\"ENDING\",\"COMPLETED\"] != simulation [\"GREETING\",\"VERIFYING_IDENTITY\",\"DISCUSSING_PAYMENT\",\"CONFIRMING_OUTCOME\",\"ENDING\",\"COMPLETED\"]",
+        "tools [] != simulation [\"confirm_right_party\",\"propose_promise_to_pay\",\"record_promise_to_pay\"]",
+        "outcome FAILED != simulation PROMISE_TO_PAY"
+      ],
+      "state_path": [
+        "GREETING",
+        "ENDING",
+        "COMPLETED"
+      ],
+      "tools": [],
+      "final_outcome": "FAILED"
+    }
+  ]
+}

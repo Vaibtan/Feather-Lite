@@ -57,6 +57,13 @@ const MAX_WER = Number(flag("max-wer", "0.20"));
  * the worker's latency while N Opus encoders share its event loop is measuring the harness.
  */
 const IN_PROC = process.argv.includes("--in-proc");
+/**
+ * `dev` mode sets `loadThreshold` to `Infinity`, so the worker cannot report itself full and the
+ * SFU dispatches straight through the CPU ceiling. Every fleet number taken before 2026-08-27 was
+ * measured that way, and nothing said so — which is why a `dev`-mode run is now a refusal rather
+ * than a footnote. `--allow-dev` is there for a deliberate one, and it is recorded in the report.
+ */
+const ALLOW_DEV = process.argv.includes("--allow-dev");
 const CONTROL_PLANE_URL = (process.env["CONTROL_PLANE_URL"] ?? "http://127.0.0.1:8080").replace(/\/$/, "");
 const REPORT_DIR = fileURLToPath(new URL("../../../../docs/loadtest/", import.meta.url));
 
@@ -76,6 +83,36 @@ log(`calls=${CALLS} max-wer=${MAX_WER} borrowers=${IN_PROC ? "in-process" : "for
 const roleOverrides = new Map<number, Role>([[process.pid, "harness"]]);
 const sampler = startResourceSampler({ roleOverrides });
 await sampler.awaitFirstSample();
+
+/**
+ * Which worker is about to serve this run, and in which mode. Read from `/status` rather than
+ * asked of the worker directly: the heartbeat is already the only channel between them, and a
+ * worker that is not heartbeating is one this run would have waited on anyway.
+ */
+const workerMode = await (async (): Promise<{ production: boolean | null; maxJobs: number | null; idleProcesses: number | null }> => {
+  const res = await fetch(`${CONTROL_PLANE_URL}/api/system/status`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(`status ${String(res.status)}: ${await res.text()}`);
+  const status = (await res.json()) as { agents: Array<{ agent_name: string; online: boolean; meta: Record<string, unknown> }> };
+  // The main worker, not a job process: only the main one reports `production`.
+  const main = status.agents.filter((a) => a.online).map((a) => a.meta).find((m) => typeof m["production"] === "boolean");
+  const num = (k: string): number | null => (main !== undefined && typeof main[k] === "number" ? (main[k] as number) : null);
+  return { production: main === undefined ? null : (main["production"] as boolean), maxJobs: num("max_jobs"), idleProcesses: num("idle_processes") };
+})();
+log(`worker: production=${String(workerMode.production)} max_jobs=${String(workerMode.maxJobs)} idle_processes=${String(workerMode.idleProcesses)}`);
+if (workerMode.production !== true && !ALLOW_DEV) {
+  console.error(
+    workerMode.production === null
+      ? "[fleet] no online worker is reporting its mode. Start it with `pnpm start:worker` (production), or pass --allow-dev to measure anyway."
+      : "[fleet] the worker is in dev mode, where loadThreshold is Infinity and it can never shed load. Every number from this run would be unattributable. Use `pnpm start:worker`, or pass --allow-dev deliberately.",
+  );
+  process.exit(1);
+}
+if (workerMode.maxJobs !== null && CALLS > Math.floor(workerMode.maxJobs * 0.75)) {
+  // Not a refusal: the threshold is a margin, not a hard ceiling, and a run that is *meant* to find
+  // the shedding point is a legitimate run. But an unexpected "one call never got a worker" should
+  // not have to be diagnosed twice.
+  log(`warning: ${String(CALLS)} calls exceeds the worker's admitted concurrency (~${String(Math.floor(workerMode.maxJobs * 0.75))} at max_jobs=${String(workerMode.maxJobs)}); expect the surplus to be refused. Raise WORKER_MAX_JOBS to carry them.`);
+}
 
 const fixturesRes = await fetch(`${CONTROL_PLANE_URL}/api/demo/load-fixtures`, {
   method: "POST",
@@ -257,6 +294,8 @@ const report = {
   livekit_url: process.env["LIVEKIT_URL"] ?? null,
   stt_tts_provider: process.env["STT_TTS_PROVIDER"] ?? "inference",
   speech: speechDescribe,
+  /** Which mode served the run, so no number in this file is ever again unattributable to it (W2). */
+  worker: { ...workerMode, allow_dev: ALLOW_DEV },
   calls: CALLS,
   agent_hung_up: hungUp,
   equivalence_green: green,

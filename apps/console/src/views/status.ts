@@ -76,7 +76,42 @@ export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) 
       if (!s.agents.length) agents.append(h("div", { class: "muted" }, "No agent worker has ever reported. Start apps/voice-worker to enable live calls; Simulate and Scenarios work without it."));
       else
         agents.append(
-          h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Agent"), h("th", {}, "Status"), h("th", {}, "Last seen"), h("th", {}, "Meta"))), h("tbody", {}, ...s.agents.map((a) => h("tr", {}, h("td", { class: "mono" }, a.agent_name), h("td", {}, h("span", { class: `dot ${a.online ? "on" : "off"}` }), a.online ? "online" : "offline"), h("td", {}, ago(a.last_seen_at)), h("td", { class: "small mono" }, JSON.stringify(a.meta)))))),
+          h(
+            "table",
+            {},
+            h("thead", {}, h("tr", {}, h("th", {}, "Agent"), h("th", {}, "Status"), h("th", {}, "Mode"), h("th", {}, "Calls"), h("th", {}, "RSS"), h("th", {}, "Last seen"), h("th", {}, "Meta"))),
+            h(
+              "tbody",
+              {},
+              ...s.agents.map((a) => {
+                /**
+                 * The heartbeat's `meta` is free-form, and a job process sends a different shape
+                 * from the main worker — so every field is read defensively and an absent one shows
+                 * as a dash rather than as a zero. "dev" is called out because in that mode
+                 * `loadThreshold` is Infinity: the worker can never report itself full, and every
+                 * fleet number taken before 2026-08-27 was taken that way without anything saying so.
+                 */
+                const m = a.meta as Record<string, unknown>;
+                const num = (k: string): number | null => (typeof m[k] === "number" ? (m[k] as number) : null);
+                const production = typeof m["production"] === "boolean" ? (m["production"] as boolean) : null;
+                const active = num("active_jobs");
+                const max = num("max_jobs");
+                const load = num("load");
+                const rss = num("rss_mb");
+                return h(
+                  "tr",
+                  {},
+                  h("td", { class: "mono" }, a.agent_name),
+                  h("td", {}, h("span", { class: `dot ${a.online ? "on" : "off"}` }), a.online ? "online" : "offline"),
+                  h("td", {}, production === null ? h("span", { class: "muted small" }, "—") : badge(production ? "production" : "dev · no load shedding", production ? "good" : "warn")),
+                  h("td", { class: "small" }, active === null || max === null ? "—" : `${active}/${max}${load === null ? "" : ` (load ${load.toFixed(2)})`}`),
+                  h("td", { class: "small" }, rss === null ? "—" : `${rss} MB`),
+                  h("td", {}, ago(a.last_seen_at)),
+                  h("td", { class: "small mono" }, JSON.stringify(m)),
+                );
+              }),
+            ),
+          ),
         );
       clear(ledger);
       const g = s.ledger.guardrails;

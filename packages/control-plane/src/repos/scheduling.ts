@@ -137,9 +137,18 @@ export class SchedulingRepo extends Effect.Service<SchedulingRepo>()("@feather-l
 
     /* ---------------------------- heartbeats ---------------------------- */
 
+    /**
+     * Several processes share one agent name — the main worker and every job process it forks — and
+     * they have different things to say. The main worker reports its mode, its load and how many
+     * calls it is carrying; a job process reports only that its call is still alive, and used to
+     * blank all of that for the duration of the call by beating with its own small meta.
+     *
+     * `||` is jsonb concatenation, right-hand side winning per key: a beat with no meta leaves the
+     * row's fields exactly as they were, and a beat with fields updates those and only those.
+     */
     const upsertHeartbeat = (agentName: string, at: Date, meta: Record<string, unknown>) =>
       sql`INSERT INTO agent_heartbeats (agent_name, last_seen_at, meta) VALUES (${agentName}, ${at}, ${sql.json(meta)})
-          ON CONFLICT (agent_name) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at, meta = EXCLUDED.meta`.pipe(Effect.asVoid);
+          ON CONFLICT (agent_name) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at, meta = agent_heartbeats.meta || EXCLUDED.meta`.pipe(Effect.asVoid);
 
     /**
      * Record that a worker is still serving these conversations, as of `at`. Upsert-only: a row is

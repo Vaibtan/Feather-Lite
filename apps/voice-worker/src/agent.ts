@@ -13,7 +13,7 @@
  */
 import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
-import { type JobContext, type JobProcess, ServerOptions, cli, defineAgent, voice } from "@livekit/agents";
+import { type AgentServer, type JobContext, type JobProcess, type JobRequest, ServerOptions, cli, defineAgent, voice } from "@livekit/agents";
 import * as silero from "@livekit/agents-plugin-silero";
 import { RoomServiceClient, SipClient } from "livekit-server-sdk";
 import { ControlPlaneClient } from "./control-plane-client.js";
@@ -27,6 +27,34 @@ const AGENT_NAME = process.env["LIVEKIT_AGENT_NAME"] ?? "feather-lite-agent";
 const CONTROL_PLANE_URL = (process.env["CONTROL_PLANE_URL"] ?? "http://127.0.0.1:8080").replace(/\/$/, "");
 const API_BEARER_TOKEN = process.env["API_BEARER_TOKEN"] ?? null;
 const SIP_OUTBOUND_TRUNK_ID = process.env["LIVEKIT_SIP_OUTBOUND_TRUNK_ID"] ?? null;
+
+/**
+ * How many calls this worker is sized to carry at once, and how much of that it keeps in hand.
+ *
+ * The framework's default load function is a five-second **CPU average** of the whole box. That is
+ * the wrong quantity twice over: it counts every other process on the machine as this worker's
+ * load, and it lags — a burst of five dispatches arrives long before the CPU average notices them.
+ * A run on 2026-08-27 lost the fifth of five calls to exactly that: nothing was broken, the worker
+ * simply refused a job because a CPU spike happened to be in the window.
+ *
+ * `activeJobs / WORKER_MAX_JOBS` is instead the quantity being controlled — how many calls this
+ * worker is already carrying — and it is exact the instant a job is accepted.
+ *
+ * The threshold is the margin, and it exists because the SFU learns this number **2.5 seconds
+ * late** (`UPDATE_LOAD_INTERVAL`): between two updates it can assign more jobs against a status
+ * that is already stale. At 0.75 the worker stops accepting a quarter of the way before it is
+ * actually full, which is the room that lag needs.
+ *
+ * So the admitted concurrency is `floor(MAX_JOBS * THRESHOLD)` — **6 at the defaults**, not 8. The
+ * spec's D9 acceptance bar is ten concurrent calls; reaching it means raising `WORKER_MAX_JOBS`,
+ * which is why it is an env var and why the default is described as a starting point rather than a
+ * measurement. Nothing here decides what this box can carry; it decides that the answer is a number
+ * someone chose rather than a CPU average nobody controls.
+ */
+const WORKER_MAX_JOBS = Math.max(1, Number(process.env["WORKER_MAX_JOBS"] ?? 8));
+const WORKER_LOAD_THRESHOLD = Number(process.env["WORKER_LOAD_THRESHOLD"] ?? 0.75);
+/** How many job processes are kept warm. Still 1, as it has always been; W3 is where the number moves. */
+const WORKER_IDLE_PROCESSES = Math.max(0, Number(process.env["WORKER_IDLE_PROCESSES"] ?? 1));
 
 const client = new ControlPlaneClient({ baseUrl: CONTROL_PLANE_URL, bearerToken: API_BEARER_TOKEN });
 
@@ -70,7 +98,14 @@ export default defineAgent({
      * moment the call ends — so a worker that dies mid-call simply stops reporting, which is
      * exactly the signal the sweeper is looking for.
      */
-    const beat = () => void client.heartbeat(AGENT_NAME, { pid: process.pid, mode: "job", room: roomName }, [conversationId]);
+    /**
+     * No meta. Every process here shares one agent name and one `agent_heartbeats` row, and this
+     * beat's job is the conversation liveness the sweeper reads — not the display fields. Sending
+     * `{pid, mode:"job", room}` here overwrote the main process's `production`/`load`/`active_jobs`
+     * for as long as a call ran, which made the status page say least about the worker exactly when
+     * it was busiest. Nothing ever read the fields being dropped.
+     */
+    const beat = () => void client.heartbeat(AGENT_NAME, undefined, [conversationId]);
     beat();
     const livenessTimer = setInterval(beat, 10_000);
     livenessTimer.unref();
@@ -225,15 +260,114 @@ export default defineAgent({
   },
 });
 
-// Liveness for the console.
-setInterval(() => void client.heartbeat(AGENT_NAME, { pid: process.pid, mode: "worker" }), 10_000).unref();
-void client.heartbeat(AGENT_NAME, { pid: process.pid, mode: "worker", started: true });
+/**
+ * The worker's own state, captured from the load function.
+ *
+ * `loadFunc` is the only handle the framework hands back on the running `AgentServer` — `cli.runApp`
+ * constructs it internally and returns nothing — so this is where "how many calls am I on" becomes
+ * observable at all. It is called every 2.5 s whether or not anything is happening.
+ */
+let server: AgentServer | null = null;
+let lastBeatAt = 0;
+/**
+ * Jobs this worker has said yes to but which are not yet running.
+ *
+ * `activeJobs` counts child processes with a `runningJob`, and that flag is set at `launchJob` —
+ * *after* the accept has been sent and the SFU has answered with an assignment. Between those two
+ * points the job is this worker's responsibility and invisible to every count of it, which is why
+ * three simultaneous requests were all accepted against `activeJobs === 0`.
+ */
+let admitting = 0;
+const inFlight = (): number => (server?.activeJobs.length ?? 0) + admitting;
+
+/**
+ * Admission control, which is the half of load shedding the load function cannot do.
+ *
+ * **Measured on 2026-08-28**: with `WORKER_MAX_JOBS=2` and three calls started at once, all three
+ * were served. `loadFunc` shapes what the *SFU* believes about this worker, and it is republished
+ * only every 2.5 s (`UPDATE_LOAD_INTERVAL`), so a burst that arrives inside one interval is routed
+ * against a status that still says "idle" — no threshold, however low, can catch it. The framework's
+ * default `requestFunc` then accepts everything it is offered.
+ *
+ * So the ceiling is enforced here, where the answer is given, and it is exact. `WORKER_MAX_JOBS` is
+ * the hard limit; the threshold below it remains what it always was — the point at which this
+ * worker asks the SFU to prefer someone else, which matters when there is a someone else.
+ *
+ * A rejected job is not a lost call. The conversation row stays open with no worker claim, and the
+ * sweeper finalizes it as `NEVER_SERVED` — a call that never had a worker, distinct from one that
+ * lost hers (O4). That is the honest record of shed load.
+ */
+const requestFunc = async (req: JobRequest): Promise<void> => {
+  const busy = inFlight();
+  if (busy >= WORKER_MAX_JOBS) {
+    // The one line that must exist: a refused job is otherwise indistinguishable, from outside,
+    // from a call the SFU never offered.
+    console.log(`[feather] refusing job ${req.id}: at capacity (${String(server?.activeJobs.length ?? 0)} running + ${String(admitting)} admitting of ${String(WORKER_MAX_JOBS)})`);
+    await req.reject();
+    return;
+  }
+  admitting += 1;
+  try {
+    // Resolves once the job is launched, at which point `activeJobs` has taken it over.
+    await req.accept();
+  } finally {
+    admitting -= 1;
+  }
+};
+
+const loadFunc = async (w: AgentServer): Promise<number> => {
+  server = w;
+  const load = w.activeJobs.length / WORKER_MAX_JOBS;
+  /**
+   * The worker's heartbeat rides the load tick rather than a timer of its own.
+   *
+   * `defineAgent`'s module is imported by **every job process too** (`job_proc_lazy_main` forks and
+   * imports this file for its default export), so a module-scope `setInterval` heartbeat was being
+   * sent by the main process and by each job process, all under one agent name — and the last
+   * writer won. That was harmless while the meta was `{pid, mode}`; the moment it carries
+   * `active_jobs` and `load` it is a job process reporting zero over the truth.
+   *
+   * `loadFunc` is only ever called by the process that owns the `AgentServer`, so driving the beat
+   * from here makes "who reports the worker's state" a fact rather than a convention. Throttled to
+   * the 10 s the sweeper's staleness window is built around; the tick itself is 2.5 s.
+   *
+   * It also tightens what "online" means: the load monitor only runs once the worker is registered
+   * with the SFU, so a worker that is up but cannot receive jobs no longer reports itself healthy.
+   */
+  const now = Date.now();
+  if (now - lastBeatAt >= 10_000) {
+    lastBeatAt = now;
+    void client.heartbeat(AGENT_NAME, {
+      pid: process.pid,
+      mode: "worker",
+      production: process.env["LIVEKIT_DEV_MODE"] !== "1",
+      max_jobs: WORKER_MAX_JOBS,
+      load_threshold: WORKER_LOAD_THRESHOLD,
+      active_jobs: w.activeJobs.length,
+      admitting,
+      load: Math.round(load * 1000) / 1000,
+      idle_processes: WORKER_IDLE_PROCESSES,
+      /**
+       * This process only. The framework does not expose the pids of the inference process or the
+       * job processes, so the tree-wide figures stay the resource sampler's job
+       * (`apps/load-test/src/resources.ts` classifies them from their command lines) rather than
+       * being guessed at here.
+       */
+      rss_mb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+    });
+  }
+  return load;
+};
 
 cli.runApp(
   new ServerOptions({
     agent: fileURLToPath(import.meta.url),
     agentName: AGENT_NAME,
-    numIdleProcesses: 1,
+    requestFunc,
+    loadFunc,
+    loadThreshold: WORKER_LOAD_THRESHOLD,
+    numIdleProcesses: WORKER_IDLE_PROCESSES,
     initializeProcessTimeout: 60_000,
   }),
 );
+

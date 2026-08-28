@@ -112,11 +112,13 @@ export class ControlPlaneClient {
    * claimed for three intervals (D6). A job process reports its own call; the main worker reports
    * none, and the control plane only ever touches the ids it is given.
    */
-  async heartbeat(agentName: string, meta: Record<string, unknown>, conversations: ReadonlyArray<string> = []): Promise<void> {
+  async heartbeat(agentName: string, meta: Record<string, unknown> | undefined, conversations: ReadonlyArray<string> = []): Promise<void> {
     await fetch(`${this.cfg.baseUrl}/api/agents/heartbeat`, {
       method: "POST",
       headers: this.headers(),
-      body: JSON.stringify({ agent_name: agentName, meta, conversations }),
+      // Omitted rather than `{}`: the control plane merges what it is given onto the row, so a beat
+      // with no meta touches the timestamp without erasing what the main worker last reported.
+      body: JSON.stringify({ agent_name: agentName, ...(meta === undefined ? {} : { meta }), conversations }),
     }).catch(() => undefined);
   }
 
