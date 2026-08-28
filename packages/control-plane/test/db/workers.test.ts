@@ -84,6 +84,53 @@ describe("scheduled-action worker", () => {
     expect(Option.isSome(out.wfRow) && out.wfRow.value.status).toBe("RUNNING");
   });
 
+  it("fails a scheduled voice re-dial with no media plane instead of leaving a call nobody serves (O4)", async () => {
+    // `startCall({channel:'voice'})` opens a conversation and dispatches nothing. On a deployment
+    // with no LiveKit configured that produced a call no worker could ever claim, which the sweeper
+    // later booked as an orphan on the five-minute unconfirmed window — measured, unprompted:
+    // conversation `ae312a15…` from attempt 4, `system.orphan_detect_ms` 308 860 ms, taking the
+    // fleet's p95 with it. The action must fail and leave no conversation behind.
+    const out = await rt.runPromise(
+      Effect.gen(function* () {
+          const sql = yield* PgClient.PgClient;
+          const { borrowerId, cpId } = yield* seedBorrower("Voice Retry Person", "America/New_York", "+15550002009");
+          const ids = yield* IdGen;
+          const repo = yield* SchedulingRepo;
+          const sched = yield* SchedulingService;
+          const orch = yield* Orchestrator;
+          // A first call that goes unanswered, exactly as the retry path is reached in production —
+          // the workflow and its attempt counter come from the real thing rather than a fixture.
+          const first = yield* (yield* WorkflowService).startCall({ borrowerId, contactPointId: cpId, channel: "voice", now: FROZEN_NOW });
+          yield* orch.processSignal(first.conversationId, { kind: "no_answer" });
+          const wfId = first.workflowExecutionId;
+          // Whatever the no-answer path scheduled is cancelled; this test drives its own action.
+          for (const a of (yield* repo.listForWorkflow(wfId)).filter((x) => x.status === "PENDING")) {
+            yield* repo.setActionStatus(a.id, "CANCELED", { canceled_reason: "test" });
+          }
+          const before = yield* sql<{ n: string }>`SELECT count(*)::text AS n FROM conversations`;
+          yield* repo.insertScheduledAction({
+            id: yield* ids.next(),
+            workflowExecutionId: wfId,
+            actionType: "RETRY_CALL",
+            dueAt: DateTime.toDateUtc(DateTime.subtract(FROZEN_NOW, { minutes: 1 })),
+            payload: { borrower_id: borrowerId, contact_point_id: cpId, channel: "voice", reason: "no_answer" },
+          });
+          const processed = yield* sched.runOnce(20, FROZEN_NOW);
+          const after = yield* sql<{ n: string }>`SELECT count(*)::text AS n FROM conversations`;
+          const actions = yield* repo.listForWorkflow(wfId);
+          return { processed, before: Number(before[0]?.n ?? 0), after: Number(after[0]?.n ?? 0), actions };
+      }),
+    );
+
+    expect(out.processed).toHaveLength(1);
+    expect(out.processed[0]?.status).toBe("FAILED");
+    expect(out.processed[0]?.detail).toMatchObject({ reason: "NO_MEDIA_PLANE" });
+    // FAILED, not CANCELED: the system tried and could not, rather than a policy deciding not to.
+    expect(out.actions[0]?.status).toBe("FAILED");
+    // And - the point - no phantom conversation for the sweeper to find later.
+    expect(out.after).toBe(out.before);
+  });
+
   it("reschedules a callback that comes due outside the TCPA window to the next 08:00 local", async () => {
     const out = await rt.runPromise(
       Effect.gen(function* () {

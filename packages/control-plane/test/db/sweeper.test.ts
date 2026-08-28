@@ -41,7 +41,15 @@ const present = runtimeFor(true);
 const unreachable = runtimeFor(null);
 
 /** A voice call that started `startedAt` ago and was never finalized. */
-const seedVoiceCall = (name: string, phone: string, startedAt: DateTime.Utc) =>
+/**
+ * A voice call, optionally with a worker having claimed it.
+ *
+ * The claim matters since O4: a conversation with a `conversation_liveness` row is one a worker
+ * *had* and lost, and a conversation without one was never served at all. The sweeper treats them
+ * differently and only the first is timed, so a fixture that omits the claim is testing the other
+ * case whether it means to or not — which is what these tests were doing.
+ */
+const seedVoiceCall = (name: string, phone: string, startedAt: DateTime.Utc, opts: { readonly claimedAt?: DateTime.Utc } = {}) =>
   Effect.gen(function* () {
     const sql = yield* PgClient.PgClient;
     const ids = yield* IdGen;
@@ -54,6 +62,9 @@ const seedVoiceCall = (name: string, phone: string, startedAt: DateTime.Utc) =>
     const started = yield* (yield* WorkflowService).startCall({ borrowerId, contactPointId: cpId, channel: "voice", now: startedAt });
     // startCall stamps `started_at` from the clock it is given; the frozen clock makes it exact.
     yield* sql`UPDATE conversations SET started_at = ${DateTime.toDateUtc(startedAt)} WHERE id = ${started.conversationId}`;
+    if (opts.claimedAt !== undefined) {
+      yield* sql`INSERT INTO conversation_liveness ${sql.insert({ conversationId: started.conversationId, lastSeenAt: DateTime.toDateUtc(opts.claimedAt), agentName: "feather-lite-agent" })}`;
+    }
     return { borrowerId, cpId, conversationId: started.conversationId };
   });
 
@@ -69,7 +80,7 @@ describe("orphaned-call sweeper", () => {
     const out = await gone.runPromise(
       withFrozenClock(NOW)(
         Effect.gen(function* () {
-          const { borrowerId, cpId, conversationId } = yield* seedVoiceCall("Abandoned Person", "+15550005001", LONG_AGO);
+          const { borrowerId, cpId, conversationId } = yield* seedVoiceCall("Abandoned Person", "+15550005001", LONG_AGO, { claimedAt: LONG_AGO });
           const sweeper = yield* Sweeper;
           const q = yield* Queries;
           const wf = yield* WorkflowService;
@@ -103,11 +114,41 @@ describe("orphaned-call sweeper", () => {
     expect(out.canCallAgain._tag).toBe("Right");
   });
 
+  it("counts a call no worker ever claimed, and does not time it (O4)", async () => {
+    // An orphan is a call that *lost* a worker. A call that never had one is a different failure —
+    // a dispatch that did not happen — and timing it measures the unconfirmed window rather than
+    // detection latency. Measured before this split: one such call (a scheduled voice re-dial that
+    // created a conversation and dispatched no agent) took the fleet's `orphan_detect_ms` p95 from
+    // 38 902 ms to 308 860 ms.
+    const out = await gone.runPromise(
+      withFrozenClock(NOW)(
+        Effect.gen(function* () {
+          // No `claimedAt`: nothing ever heartbeated this conversation.
+          const { conversationId } = yield* seedVoiceCall("Never Dispatched", "+15550005006", LONG_AGO);
+          const swept = yield* (yield* Sweeper).runOnce(20, NOW);
+          const detail = yield* (yield* Queries).conversationDetail(conversationId);
+          const scores = yield* (yield* Scores).listForConversation(conversationId);
+          return { conversationId, swept, detail, scores };
+        }),
+      ),
+    );
+
+    expect(out.swept.filter((r) => r.conversationId === out.conversationId).map((r) => r.action)).toEqual(["NEVER_SERVED"]);
+    // Still finalized, and still FAILED — not NO_ANSWER, which would schedule a polite retry for
+    // what is a dispatch failure.
+    expect(out.detail.conversation.final_outcome).toBe("FAILED");
+    const hangup = out.detail.events.find((e) => e.type === "CALL_CONTROL" && e.payload.action === "HANGUP");
+    expect(hangup && hangup.type === "CALL_CONTROL" && hangup.payload.reason).toBe("NEVER_SERVED");
+    // **Not timed.** This is the whole point: no `system.orphan_detect_ms` for a call that was
+    // never healthy, so the detection percentile keeps describing detection.
+    expect(out.scores.find((s) => s.name === "system.orphan_detect_ms")).toBeUndefined();
+  });
+
   it("leaves a call alone when the agent is still in the room", async () => {
     const out = await present.runPromise(
       withFrozenClock(NOW)(
         Effect.gen(function* () {
-          const { conversationId } = yield* seedVoiceCall("Slow Worker Person", "+15550005002", LONG_AGO);
+          const { conversationId } = yield* seedVoiceCall("Slow Worker Person", "+15550005002", LONG_AGO, { claimedAt: LONG_AGO });
           const before = ((yield* (yield* Metrics).snapshot()) as { counters: Record<string, number> }).counters["sweeper_deferred"] ?? 0;
           const swept = yield* (yield* Sweeper).runOnce(20, NOW);
           const after = ((yield* (yield* Metrics).snapshot()) as { counters: Record<string, number> }).counters["sweeper_deferred"] ?? 0;
@@ -131,7 +172,8 @@ describe("orphaned-call sweeper", () => {
       withFrozenClock(NOW)(
         Effect.gen(function* () {
           // Two minutes: past the 30 s staleness window, well inside the 5-minute unconfirmed one.
-          const recent = yield* seedVoiceCall("Unconfirmable Person", "+15550005003", DateTime.subtract(NOW, { minutes: 2 }));
+          const twoMinutesAgo = DateTime.subtract(NOW, { minutes: 2 });
+          const recent = yield* seedVoiceCall("Unconfirmable Person", "+15550005003", twoMinutesAgo, { claimedAt: twoMinutesAgo });
           const sweeper = yield* Sweeper;
           const q = yield* Queries;
           const held = yield* sweeper.runOnce(20, NOW);

@@ -9,17 +9,19 @@ import { PgClient } from "@effect/sql-pg";
 import type { ScheduledActionType } from "@feather-lite/domain";
 import { POLICY, nextLocalHour } from "@feather-lite/domain";
 import type { ScheduledActionRow } from "../db/rows.js";
-import { PreCallRejected } from "../errors.js";
+import { PreCallRejected, TelephonyError } from "../errors.js";
 import { ConversationRepo } from "../repos/conversation.js";
 import { CrmRepo } from "../repos/crm.js";
 import { SchedulingRepo } from "../repos/scheduling.js";
+import { AppConfig } from "../config.js";
 import { IdGen } from "./Ids.js";
+import { NO_MEDIA_PLANE, dispatchAgent, hasMediaPlane, roomNameFor } from "./voiceDispatch.js";
 import { WorkflowService } from "./Workflow.js";
 
 export interface ProcessedAction {
   readonly actionId: string;
   readonly actionType: ScheduledActionType;
-  readonly status: "DONE" | "RESCHEDULED" | "CANCELED";
+  readonly status: "DONE" | "RESCHEDULED" | "CANCELED" | "FAILED";
   readonly detail: Record<string, unknown>;
 }
 
@@ -28,6 +30,7 @@ export class SchedulingService extends Effect.Service<SchedulingService>()("@fea
     const sql = yield* PgClient.PgClient;
     const sched = yield* SchedulingRepo;
     const conv = yield* ConversationRepo;
+    const cfg = yield* AppConfig;
     const crm = yield* CrmRepo;
     const ids = yield* IdGen;
     const workflow = yield* WorkflowService;
@@ -120,6 +123,28 @@ export class SchedulingService extends Effect.Service<SchedulingService>()("@fea
           const channel = (String(action.payload["channel"] ?? "simulated") === "voice" ? "voice" : "simulated") as "voice" | "simulated";
           const attempts = Number(action.payload["retry_count"] ?? 0);
 
+          /**
+           * A voice re-dial goes through `VoiceSessions`, not `startCall` (O4).
+           *
+           * `startCall` opens a conversation and nothing else. For `channel: 'voice'` that produced
+           * a call no agent was ever dispatched to: the room was never created, no worker claimed
+           * it, and the sweeper later finalized it as an orphan on the long unconfirmed window.
+           * Measured, unprompted: conversation `ae312a15…` from attempt 4 was swept 5 minutes 9
+           * seconds after it was created, and dragged the fleet's `orphan_detect_ms` p95 from
+           * 38 902 ms to 308 860 ms — a number describing a call that never had a worker to lose.
+           *
+           * `sip` because a scheduled re-dial is outbound: there is no browser tab waiting on the
+           * other end of it.
+           */
+          // Checked before anything is written: a voice re-dial on a system with no media plane
+          // must not leave a conversation row behind, because nothing will ever serve it and the
+          // sweeper will later book it as an orphan.
+          if (channel === "voice" && !hasMediaPlane(cfg)) {
+            yield* Effect.logWarning(`scheduled ${action.actionType} for borrower ${borrowerId} cannot place a voice call: no media plane configured`);
+            yield* sched.setActionStatus(action.id, "FAILED", { reason: NO_MEDIA_PLANE });
+            return { actionId: action.id, actionType: action.actionType, status: "FAILED", detail: { reason: NO_MEDIA_PLANE } } satisfies ProcessedAction;
+          }
+
           const started = yield* workflow
             .startCall({
               borrowerId,
@@ -132,8 +157,43 @@ export class SchedulingService extends Effect.Service<SchedulingService>()("@fea
             .pipe(Effect.either);
 
           if (started._tag === "Right") {
-            yield* sched.setActionStatus(action.id, "DONE", { conversation_id: started.right.conversationId });
-            return { actionId: action.id, actionType: action.actionType, status: "DONE", detail: { conversation_id: started.right.conversationId } } satisfies ProcessedAction;
+            const conversationId = started.right.conversationId;
+            /**
+             * **Dispatch an agent to it (O4).** `startCall` opens a conversation and nothing else;
+             * for `channel: 'voice'` that produced a call no worker was ever told about. The room
+             * was never created, nobody claimed it, and the sweeper finalized it as an orphan on
+             * the long unconfirmed window. Measured, unprompted: conversation `ae312a15…` from
+             * attempt 4 was swept 5 minutes 9 seconds after creation and pulled the fleet's
+             * `orphan_detect_ms` p95 from 38 902 ms to 308 860 ms — describing a call that never
+             * had a worker to lose.
+             */
+            if (channel === "voice") {
+              const roomName = roomNameFor(conversationId);
+              const metadata = JSON.stringify({
+                conversation_id: conversationId,
+                workflow_execution_id: started.right.workflowExecutionId,
+                call_attempt_id: started.right.callAttemptId,
+                borrower_id: borrowerId,
+                contact_point_id: contactPointId,
+                // Outbound: a scheduled re-dial has no browser tab waiting on the other end.
+                mode: "sip",
+                channel: "voice",
+                opening_text: started.right.openingText,
+              });
+              const dispatched = yield* dispatchAgent(cfg, { roomName, metadata, emptyTimeoutSeconds: 300 }).pipe(Effect.either);
+              if (dispatched._tag === "Left") {
+                // The media plane exists and did not answer. The conversation is left for the
+                // sweeper, which now finalizes a call no worker ever claimed as NEVER_SERVED
+                // rather than timing it as an orphan — closing it from here would mean importing
+                // the orchestrator, and the orchestrator imports this service.
+                yield* Effect.logWarning(`scheduled ${action.actionType} could not dispatch an agent: ${dispatched.left.detail}`);
+                yield* sched.setActionStatus(action.id, "FAILED", { reason: "DISPATCH_FAILED", detail: dispatched.left.detail });
+                return { actionId: action.id, actionType: action.actionType, status: "FAILED", detail: { reason: "DISPATCH_FAILED" } } satisfies ProcessedAction;
+              }
+              yield* conv.setAttemptProviderCallId(started.right.callAttemptId, `${roomName}/${dispatched.right}`);
+            }
+            yield* sched.setActionStatus(action.id, "DONE", { conversation_id: conversationId });
+            return { actionId: action.id, actionType: action.actionType, status: "DONE", detail: { conversation_id: conversationId } } satisfies ProcessedAction;
           }
           const err = started.left;
           if (err instanceof PreCallRejected && err.failures.includes("TCPA_TIME_WINDOW") && attempts < 3) {

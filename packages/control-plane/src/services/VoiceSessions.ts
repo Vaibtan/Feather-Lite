@@ -8,6 +8,8 @@
 import { DateTime, Effect, Option, Redacted } from "effect";
 import { AccessToken, AgentDispatchClient, RoomServiceClient } from "livekit-server-sdk";
 import { AppConfig } from "../config.js";
+import type { WorkflowType } from "@feather-lite/domain";
+import { NO_MEDIA_PLANE, dispatchAgent, participantToken, roomNameFor } from "./voiceDispatch.js";
 import { TelephonyError } from "../errors.js";
 import { ConversationRepo } from "../repos/conversation.js";
 import { CrmRepo } from "../repos/crm.js";
@@ -21,6 +23,12 @@ export interface VoiceSessionInput {
   readonly participantName?: string | undefined;
   readonly mode: "browser" | "sip";
   readonly now?: DateTime.Utc | undefined;
+  /**
+   * Attach to an existing workflow execution rather than opening a new one. A scheduled re-dial is
+   * the same workflow's next attempt, not a fresh piece of work (O4).
+   */
+  readonly workflowExecutionId?: string | undefined;
+  readonly workflowType?: WorkflowType | undefined;
 }
 
 export interface VoiceSession extends StartCallResult {
@@ -32,7 +40,9 @@ export interface VoiceSession extends StartCallResult {
   readonly dispatchId: string;
 }
 
-export const roomNameFor = (conversationId: string) => `feather-lite-${conversationId}`;
+// Re-exported: callers elsewhere (the sweeper, the scheduled-action worker) import these from
+// here historically, and the split into `voiceDispatch.ts` is an implementation detail of the cycle.
+export { roomNameFor, NO_MEDIA_PLANE } from "./voiceDispatch.js";
 
 export class VoiceSessions extends Effect.Service<VoiceSessions>()("@feather-lite/VoiceSessions", {
   effect: Effect.gen(function* () {
@@ -45,8 +55,18 @@ export class VoiceSessions extends Effect.Service<VoiceSessions>()("@feather-lit
     const create = (input: VoiceSessionInput) =>
       Effect.gen(function* () {
         const lk = cfg.livekit;
-        if (!lk) return yield* Effect.fail(new TelephonyError({ detail: "LiveKit is not configured (LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET)" }));
-        const call = yield* workflow.startCall({ borrowerId: input.borrowerId, contactPointId: input.contactPointId, channel: "voice", now: input.now });
+        // Checked before `startCall`, so a system with no media plane does not leave a conversation
+        // row behind that no worker will ever serve (O4). The detail string is matched by the
+        // scheduled-action worker, so it is a constant rather than prose.
+        if (!lk) return yield* Effect.fail(new TelephonyError({ detail: NO_MEDIA_PLANE }));
+        const call = yield* workflow.startCall({
+          borrowerId: input.borrowerId,
+          contactPointId: input.contactPointId,
+          channel: "voice",
+          now: input.now,
+          ...(input.workflowExecutionId === undefined ? {} : { workflowExecutionId: input.workflowExecutionId }),
+          ...(input.workflowType === undefined ? {} : { workflowType: input.workflowType }),
+        });
         const contactPoint = yield* crm.findContactPoint(input.contactPointId);
         const roomName = roomNameFor(call.conversationId);
         const metadata = JSON.stringify({
@@ -60,20 +80,7 @@ export class VoiceSessions extends Effect.Service<VoiceSessions>()("@feather-lit
           channel: "voice",
           opening_text: call.openingText,
         });
-        const secret = Redacted.value(lk.apiSecret);
-        const rooms = new RoomServiceClient(lk.url, lk.apiKey, secret);
-        const dispatch = new AgentDispatchClient(lk.url, lk.apiKey, secret);
-
-        const bootstrap = Effect.tryPromise({
-          try: async () => {
-            await rooms.createRoom({ name: roomName, emptyTimeout: 300, metadata });
-            const d = await dispatch.createDispatch(roomName, lk.agentName, { metadata });
-            return d.id;
-          },
-          catch: (e) => new TelephonyError({ detail: `LiveKit bootstrap failed: ${String(e)}` }),
-        });
-        const dispatchId = yield* bootstrap.pipe(
-          Effect.timeoutFail({ duration: "10 seconds", onTimeout: () => new TelephonyError({ detail: "LiveKit bootstrap timed out after 10s" }) }),
+        const dispatchId = yield* dispatchAgent(cfg, { roomName, metadata, emptyTimeoutSeconds: 300 }).pipe(
           Effect.tapError(() =>
             // Close the phantom conversation so the ledger stays truthful.
             orch.processSignal(call.conversationId, { kind: "hangup", reason: "livekit_bootstrap_failed" }).pipe(Effect.ignore),
@@ -82,9 +89,7 @@ export class VoiceSessions extends Effect.Service<VoiceSessions>()("@feather-lit
         yield* conv.setAttemptProviderCallId(call.callAttemptId, `${roomName}/${dispatchId}`);
 
         const participantIdentity = input.participantIdentity ?? `borrower-${input.borrowerId.slice(0, 8)}`;
-        const at = new AccessToken(lk.apiKey, secret, { identity: participantIdentity, name: input.participantName ?? participantIdentity, metadata });
-        at.addGrant({ roomJoin: true, room: roomName, canPublish: true, canSubscribe: true, canPublishData: true });
-        const token = yield* Effect.promise(() => at.toJwt());
+        const token = yield* participantToken(cfg, { identity: participantIdentity, name: input.participantName ?? participantIdentity, roomName, metadata });
         const session: VoiceSession = { ...call, roomName, participantIdentity, participantToken: token, livekitUrl: lk.url, agentName: lk.agentName, dispatchId };
         return session;
       });

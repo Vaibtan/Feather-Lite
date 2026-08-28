@@ -124,7 +124,13 @@ export type AgentVersionStatus = typeof AgentVersionStatus.Type;
 export const ScheduledActionType = Schema.Literal("CALLBACK", "RETRY_CALL", "HUMAN_FOLLOWUP");
 export type ScheduledActionType = typeof ScheduledActionType.Type;
 
-export const ScheduledActionStatus = Schema.Literal("PENDING", "CLAIMED", "DONE", "CANCELED");
+/**
+ * `FAILED` is distinct from `CANCELED`: cancelled means a policy decided not to do this (a TCPA
+ * window exhausted its retries, a borrower went on the do-not-call list), failed means the system
+ * tried and could not (O4 — a voice re-dial on a deployment with no media plane configured).
+ * A human reading the queue needs to tell "we chose not to" from "we could not".
+ */
+export const ScheduledActionStatus = Schema.Literal("PENDING", "CLAIMED", "DONE", "CANCELED", "FAILED");
 export type ScheduledActionStatus = typeof ScheduledActionStatus.Type;
 
 /**
@@ -184,6 +190,20 @@ export type TransitionTrigger = typeof TransitionTrigger.Type;
  * "no answer" would schedule a polite retry for what is a system failure.
  */
 export const ORPHANED_REASON = "ORPHANED";
+
+/**
+ * A conversation no worker ever claimed, as opposed to one that lost the worker it had (O4).
+ *
+ * Both end FAILED and both are swept, but they are different failures and only one of them is a
+ * *detection latency*. Measured: a scheduled voice re-dial created a conversation and dispatched no
+ * agent, so nothing ever claimed it; the sweeper booked it as an orphan detected after 5 minutes
+ * 9 seconds and the fleet's `orphan_detect_ms` p95 went from 38 902 ms to 308 860 ms. The number
+ * described how long the *unconfirmed window* is, not how fast a dead worker is noticed.
+ *
+ * So a never-served call is finalized, counted, and **not timed**: there was no moment at which it
+ * was healthy, and a time-to-detect measured from one that never existed is not a measurement.
+ */
+export const NEVER_SERVED_REASON = "NEVER_SERVED";
 
 /** Deterministic override classes, in precedence order (SPEC §8.4). */
 export const OverrideReason = Schema.Literal("OPT_OUT", "DISPUTE", "HARDSHIP", "WRONG_NUMBER");

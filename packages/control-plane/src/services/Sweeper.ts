@@ -24,7 +24,7 @@
  * replays like any other close.
  */
 import { DateTime, Effect } from "effect";
-import { numericScore, ORPHANED_REASON } from "@feather-lite/domain";
+import { NEVER_SERVED_REASON, numericScore, ORPHANED_REASON } from "@feather-lite/domain";
 import { AppConfig } from "../config.js";
 import { SchedulingRepo } from "../repos/scheduling.js";
 import { MediaPlane } from "./MediaPlane.js";
@@ -34,7 +34,7 @@ import { Scores } from "./Scores.js";
 import { roomNameFor } from "./VoiceSessions.js";
 
 /** Matches the SCREAMING_SNAKE per-tick status vocabulary of the other two workers. */
-export type SweepAction = "FINALIZED" | "AGENT_PRESENT" | "UNCONFIRMED" | "ALREADY_CLOSED";
+export type SweepAction = "FINALIZED" | "NEVER_SERVED" | "AGENT_PRESENT" | "UNCONFIRMED" | "ALREADY_CLOSED";
 
 export interface SweepResult {
   readonly conversationId: string;
@@ -83,15 +83,35 @@ export class Sweeper extends Effect.Service<Sweeper>()("@feather-lite/Sweeper", 
             continue;
           }
 
+          /**
+           * Did any worker ever claim this call? `lastSeenAt` is the newest heartbeat that named
+           * this conversation, and null means there has never been one (O4).
+           *
+           * An orphan is a call that *lost* a worker. A call that never had one is a different
+           * failure — a dispatch that did not happen — and timing it produces a number about the
+           * unconfirmed window rather than about detection. Measured: one such call moved the
+           * fleet's `orphan_detect_ms` p95 from 38 902 ms to 308 860 ms.
+           */
+          const neverServed = c.lastSeenAt === null;
+          const reason = neverServed ? NEVER_SERVED_REASON : ORPHANED_REASON;
+
           // The finalisation can legitimately lose a race — the worker's own hangup, or another
           // server process sweeping the same call — in which case this returns ConversationCompleted
           // and the detect score belongs to whoever got there first, not to us.
-          const finalized = yield* orch.processSignal(c.id, { kind: "hangup", reason: ORPHANED_REASON }).pipe(
+          const finalized = yield* orch.processSignal(c.id, { kind: "hangup", reason }).pipe(
             Effect.as(true),
             Effect.catchAll((e) => Effect.logDebug(`sweeper did not finalize ${c.id}: ${String(e)}`).pipe(Effect.as(false))),
           );
           if (!finalized) {
             out.push({ conversationId: c.id, action: "ALREADY_CLOSED", staleForMs });
+            continue;
+          }
+          if (neverServed) {
+            // Counted, not timed. The count is the signal worth watching: a rising number of calls
+            // that no worker ever claimed means dispatch is broken, which is a different alarm from
+            // workers dying mid-call.
+            yield* metrics.increment("sweeper_never_served");
+            out.push({ conversationId: c.id, action: "NEVER_SERVED", staleForMs });
             continue;
           }
           // Time-to-detect, so "the chaos scenario is measurable" is a number and not a claim.
