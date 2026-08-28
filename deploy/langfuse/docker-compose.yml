@@ -13,10 +13,26 @@
 # project, user and API keys on first boot, so the keys in .env are fixed and known in advance
 # instead of being clicked out of a fresh UI. These are local-development credentials for a
 # container bound to 127.0.0.1 and are not secrets.
+# **Every container here has a memory limit** (spec 2026-08-27, D6). Without them this stack has no
+# ceiling at all, and it shares a laptop with a voice pipeline whose worker tree needs ~2.5 GB: an
+# N=5 fleet run on 2026-08-27 came back 3/5 with every locally-computed stage 3-5x slower, and the
+# diagnosis was memory, not a regression. The numbers below are sized to hold the stack for a
+# development-scale trace volume, not to be generous:
+#
+#   clickhouse 768m   the only one that really wants memory; it is the trace store
+#   web / worker 512m each, Node processes serving a handful of requests
+#   postgres 256m     Langfuse's own metadata, tiny here
+#   minio 128m        object storage for event blobs
+#   redis 64m         a queue
+#
+# Total 2.24 GB, against a stack that was previously bounded only by the host. If ClickHouse starts
+# OOM-killing itself on a larger trace volume, raise *that* one and say why — do not remove the
+# limits, because the failure they prevent is silent and lands on the voice measurements.
 services:
   langfuse-worker:
     image: docker.langfuse.com/langfuse/langfuse-worker:4
     container_name: feather-lite-langfuse-worker
+    mem_limit: 512m
     restart: always
     depends_on: &langfuse-depends-on
       langfuse-postgres:
@@ -64,6 +80,7 @@ services:
   langfuse-web:
     image: docker.langfuse.com/langfuse/langfuse:4
     container_name: feather-lite-langfuse-web
+    mem_limit: 512m
     restart: always
     depends_on: *langfuse-depends-on
     ports:
@@ -86,6 +103,7 @@ services:
   langfuse-clickhouse:
     image: docker.io/clickhouse/clickhouse-server:25.12
     container_name: feather-lite-langfuse-clickhouse
+    mem_limit: 768m
     restart: always
     user: "101:101"
     environment:
@@ -105,6 +123,7 @@ services:
   langfuse-minio:
     image: docker.io/minio/minio
     container_name: feather-lite-langfuse-minio
+    mem_limit: 128m
     restart: always
     entrypoint: sh
     # create the 'langfuse' bucket before starting the service
@@ -126,6 +145,7 @@ services:
   langfuse-redis:
     image: docker.io/redis:7
     container_name: feather-lite-langfuse-redis
+    mem_limit: 64m
     restart: always
     command: >
       --requirepass myredissecret
@@ -141,6 +161,7 @@ services:
   langfuse-postgres:
     image: docker.io/postgres:17
     container_name: feather-lite-langfuse-postgres
+    mem_limit: 256m
     restart: always
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]

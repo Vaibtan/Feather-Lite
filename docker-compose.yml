@@ -10,15 +10,39 @@ services:
     # It is what turns "43 round trips per turn" into a ranked list of statements, so every D5
     # change is a measured delta per statement rather than a wall-clock guess (spec D5b). The
     # extension itself is created by migration 0006, which is a no-op without this line.
+    # Sized for the 512 MB this container is given, and instrumented (spec D5b). Passed as `-c`
+    # flags rather than a mounted postgresql.conf: mounting one *replaces* the image's file
+    # entirely, so a fragment that forgot `listen_addresses` would produce a container that starts
+    # and cannot be connected to. Flags compose with the defaults and are visible right here.
+    #
+    # `synchronous_commit` is deliberately absent, which means it stays `on`. The ledger is this
+    # product's durability claim (ADR 0001/0003); a 1-2 ms fsync per commit is not the bottleneck
+    # (the statement ranking says the whole run spends ~850 ms in Postgres) and turning it off is
+    # the one Postgres change this spec forbids.
     command: >
       postgres
       -c shared_preload_libraries=pg_stat_statements
       -c pg_stat_statements.max=2000
       -c pg_stat_statements.track=top
+      -c shared_buffers=128MB
+      -c effective_cache_size=384MB
+      -c work_mem=8MB
+      -c maintenance_work_mem=64MB
+      -c wal_compression=on
+      -c checkpoint_completion_target=0.9
+      -c max_wal_size=1GB
+      -c random_page_cost=1.1
+      -c jit=off
+      -c log_min_duration_statement=250ms
+      -c track_io_timing=on
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: feather_lite
+    # It peaked at 261 MB and 88 % of a core through a 30 turns/s soak, so 512 MB is headroom
+    # rather than a squeeze — and a ceiling that exists is what stops it competing with the voice
+    # worker for the last gigabyte on a laptop.
+    mem_limit: 512m
     ports:
       - "5434:5432"
     volumes:
@@ -36,6 +60,11 @@ services:
     container_name: feather-lite-livekit
     profiles: ["livekit"]
     command: --config /etc/livekit.yaml --node-ip 127.0.0.1
+    # Measured at 53 MB and 15 % of a core at N=5, so neither number is a squeeze. `cpus` is the
+    # one that matters: media forwarding is latency-critical and must not be the thing a runaway
+    # job process starves, so it gets two of the twelve reserved from the other direction.
+    cpus: 2
+    mem_limit: 512m
     ports:
       - "7880:7880" # signalling / server API (ws://127.0.0.1:7880)
       - "7881:7881" # ICE over TCP fallback

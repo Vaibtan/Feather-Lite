@@ -20,6 +20,7 @@
     "lk:down": "docker compose --profile livekit stop livekit",
     "lf:up": "docker compose -f deploy/langfuse/docker-compose.yml -p feather-lite-langfuse up -d",
     "lf:down": "docker compose -f deploy/langfuse/docker-compose.yml -p feather-lite-langfuse stop",
+    "stack:quiet": "node scripts/stack-quiet.mjs",
     "loadtest:tier1": "pnpm --filter @feather-lite/load-test tier1",
     "loadtest:tier2": "pnpm --filter @feather-lite/voice-worker fake-borrower-fleet",
     "loadtest:idle": "pnpm --filter @feather-lite/load-test idle",
