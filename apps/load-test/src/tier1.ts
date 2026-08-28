@@ -357,6 +357,34 @@ const readStatements = async (available: boolean): Promise<StatementReport> => {
     return { available: false, note: `pg_stat_statements read failed: ${String(e)}` };
   }
 };
+/**
+ * Wait for the previous run's post-call work to finish before starting this one.
+ *
+ * Each C=100 run leaves 300 outbox jobs behind, and the loop claims 20 every 5 seconds — 75 seconds
+ * of summary, evaluation and vector-index work. Start the next run inside that window and the
+ * server is serving turns *and* draining the last run, on the same event loop and the same pool.
+ *
+ * Found by measurement, not reasoning: two C=100 runs three minutes apart reported 80.5 and 69.8
+ * turns/s while the database time between them **fell** 1 521 -> 921 ms. Wall clock was measuring
+ * the backlog. This is very likely also what made the five Phase-0 C=100 runs disagree with each
+ * other, and it is the kind of thing that would have been blamed on the change under test.
+ */
+const outboxPending = async (): Promise<number> => {
+  const [row] = await sql<Array<{ n: string }>>`SELECT count(*)::text AS n FROM outbox_jobs WHERE status = 'PENDING'`;
+  return Number(row?.n ?? 0);
+};
+const DRAIN_TIMEOUT_MS = 180_000;
+const drainStart = Date.now();
+let pending = await outboxPending();
+const pendingAtArrival = pending;
+if (pending > 0) console.log(`[tier1] waiting for ${String(pending)} outbox job(s) from an earlier run to drain...`);
+while (pending > 0 && Date.now() - drainStart < DRAIN_TIMEOUT_MS) {
+  await sleep(2000);
+  pending = await outboxPending();
+}
+if (pending > 0) console.log(`[tier1] ${String(pending)} outbox job(s) still pending after ${String(Math.round((Date.now() - drainStart) / 1000))}s; measuring anyway, and the report says so`);
+else if (pendingAtArrival > 0) console.log(`[tier1] outbox drained in ${String(Math.round((Date.now() - drainStart) / 1000))}s`);
+
 const statementsAvailable = await resetStatements();
 if (!statementsAvailable) console.log("[tier1] pg_stat_statements is not loaded; the report will carry no statement ranking (see docs/loadtest/README.md)");
 
@@ -548,6 +576,11 @@ const report = {
   latency_ms: { start: starts, ttft, turn_wall: wall },
   errors: { by_status: Object.fromEntries(errorsByStatus), start_errors: startErrors.slice(0, 20), rate_limited: rateLimited },
   pg_at_peak: pg.peak,
+  /**
+   * The outbox backlog this run started against. Non-zero means the server was draining an earlier
+   * run's post-call work while serving this one, and the wall-clock numbers are not comparable.
+   */
+  outbox_pending_at_start: pending,
   /** What this run asked Postgres to do, per statement (D5b). The denominator of every D5 claim. */
   pg_statements: { ...statements, per_completed_turn: okTurns.length > 0 ? Math.round(((statements.total_calls ?? 0) / okTurns.length) * 100) / 100 : null },
   resources,

@@ -14,6 +14,7 @@ import { migration0002 } from "./migrations/0002_scores.js";
 import { migration0003 } from "./migrations/0003_conversation_liveness.js";
 import { migration0004 } from "./migrations/0004_conversation_decider.js";
 import { migration0005 } from "./migrations/0005_measure_and_hot_rows.js";
+import { migration0006 } from "./migrations/0006_indexes_from_evidence.js";
 
 /**
  * The connection pool, held so its depth can be reported (D3).
@@ -74,6 +75,7 @@ export const MigrationsLive = PgMigrator.layer({
     "0003_conversation_liveness": migration0003,
     "0004_conversation_decider": migration0004,
     "0005_measure_and_hot_rows": migration0005,
+    "0006_indexes_from_evidence": migration0006,
   }),
 }).pipe(Layer.provide(NodeContext.layer));
 
