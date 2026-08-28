@@ -19,15 +19,21 @@ import {
   DatabaseLive,
   HttpLive,
   LangfuseTracingLive,
+  liveTurnCount,
   LiveKitMediaPlaneLive,
   MediaPlane,
   Metrics,
   OpenAILlmClientLive,
   OpenAITurnDeciderLive,
   OutboxService,
+  pgPoolGauge,
+  ProcessMetrics,
+  ProcessMetricsLive,
   SchedulingService,
   ScriptedTurnDeciderLive,
   ServicesLive,
+  rateLimitBucketCount,
+  subscriberCount,
   Sweeper,
 } from "@feather-lite/control-plane";
 
@@ -63,10 +69,20 @@ const SchedulersLive = Layer.scopedDiscard(
     const outbox = yield* OutboxService;
     const sweeper = yield* Sweeper;
     const media = yield* MediaPlane;
+    const process = yield* ProcessMetrics;
+    /**
+     * Each loop records that it ticked (D3). A loop whose fiber has died stops updating its stamp
+     * and `/readyz` fails — which is the point: a process with a dead outbox answers HTTP perfectly
+     * and is not ready, and nothing could tell the difference before.
+     *
+     * Stamped after the run, so a tick that throws does not claim to have happened. The error is
+     * already logged and swallowed below to keep the loop alive.
+     */
     const tick = <A, E, R>(name: string, run: Effect.Effect<A, E, R>, every: Duration.DurationInput) =>
       run.pipe(
         Effect.tapError((e) => Effect.logError(`${name} tick failed`, e)),
         Effect.catchAll(() => Effect.void),
+        Effect.zipLeft(process.tick(name, Duration.toMillis(Duration.decode(every)))),
         Effect.repeat(Schedule.spaced(every)),
         Effect.forkScoped,
       );
@@ -113,6 +129,17 @@ const MainLive = Layer.mergeAll(HttpLive, RootRoute, SchedulersLive).pipe(
   // exporter now counts its own ingestion failures (O7). Still merged upward, so the decider and
   // the HTTP edge see the same single instance.
   Layer.provideMerge(Metrics.Default),
+  // The process's own gauges (D3). Its sources are functions rather than services because the
+  // things it reports on — the pool, the SSE map, the rate-limit buckets — are owned by modules
+  // that must not depend on a metrics service to be observable.
+  Layer.provideMerge(
+    ProcessMetricsLive({
+      pgPool: pgPoolGauge,
+      sseStreams: () => subscriberCount(),
+      liveTurns: () => liveTurnCount(),
+      rateLimitBuckets: rateLimitBucketCount,
+    }),
+  ),
   Layer.provideMerge(DatabaseLive),
   Layer.provideMerge(AppConfigLive),
   Layer.provide(NodeServerLive),

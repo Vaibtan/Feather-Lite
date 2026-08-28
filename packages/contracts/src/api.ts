@@ -465,6 +465,23 @@ export const SystemStatus = Schema.Struct({
    * they answer opposite questions: a 429 is this process working as configured, not a vendor
    * failing. `buckets` is the size of the per-IP map, published so an unbounded one is visible.
    */
+  /**
+   * What the server process is doing to itself (D3). Absent before this: every number on this page
+   * was about calls, and none of it answered "is the event loop blocked" or "is the pool starving".
+   */
+  process: Schema.Struct({
+    uptime_seconds: Schema.Number,
+    event_loop_delay_ms: Schema.Struct({ p50: Schema.Number, p99: Schema.Number, max: Schema.Number }),
+    memory_bytes: Schema.Struct({ rss: Schema.Number, heap_used: Schema.Number, heap_total: Schema.Number, external: Schema.Number }),
+    gc: Schema.Struct({ total_pause_ms: Schema.Number, collections: Schema.Number }),
+    /** Null in a process with no database, so "not measured" is not reported as an empty pool. */
+    pg_pool: Schema.NullOr(Schema.Struct({ size: Schema.Number, idle: Schema.Number, waiting: Schema.Number })),
+    /** Each background loop and when it last ticked. A stale one fails `/readyz`. */
+    loops: Schema.Array(Schema.Struct({ name: Schema.String, last_tick_at: Schema.NullOr(Schema.String), interval_ms: Schema.Number, stale: Schema.Boolean })),
+    sse_streams: Schema.Number,
+    live_turns: Schema.Number,
+    rate_limit_buckets: Schema.Number,
+  }),
   rate_limiting: Schema.Struct({
     per_minute: Schema.Number,
     daily_turn_cap: Schema.Number,
@@ -592,7 +609,16 @@ export type LatencyAggregate = typeof LatencyAggregate.Type;
 
 export const SystemGroup = HttpApiGroup.make("system")
   .add(HttpApiEndpoint.get("healthz", "/healthz").addSuccess(Schema.Struct({ status: Schema.Literal("ok"), version: Schema.String })))
-  .add(HttpApiEndpoint.get("readyz", "/readyz").addSuccess(Schema.Struct({ status: Schema.Literal("ready"), database: Schema.Literal("ok") })).addError(ApiUnavailable))
+  /**
+   * Readiness, not liveness (D3). `/healthz` says the process is running; this says it is doing its
+   * job. A process whose outbox fiber has died answers HTTP perfectly and is not ready, and before
+   * this the two were indistinguishable — `SELECT 1` was the whole check.
+   */
+  .add(
+    HttpApiEndpoint.get("readyz", "/readyz")
+      .addSuccess(Schema.Struct({ status: Schema.Literal("ready"), database: Schema.Literal("ok"), loops: Schema.Array(Schema.String) }))
+      .addError(ApiUnavailable),
+  )
   .add(HttpApiEndpoint.get("status", "/api/system/status").addSuccess(SystemStatus))
   .add(
     HttpApiEndpoint.get("latency", "/api/system/latency")

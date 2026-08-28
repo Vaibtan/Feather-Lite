@@ -24,6 +24,7 @@ import { rateLimitBucketCount } from "./rateLimit.js";
 import { unknownTurnIdMessage, unknownTurnIds } from "./scoreTargets.js";
 import { SchedulingRepo } from "../repos/scheduling.js";
 import { Orchestrator, type Signal } from "../services/Orchestrator.js";
+import { ProcessMetrics } from "../services/ProcessMetrics.js";
 import { Quality } from "../services/Quality.js";
 import { Queries } from "../services/Queries.js";
 import { Scores } from "../services/Scores.js";
@@ -85,13 +86,30 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
     const quality = yield* Quality;
     const sched = yield* SchedulingRepo;
     const metrics = yield* Metrics;
+    const processMetrics = yield* ProcessMetrics;
     return handlers
       .handle("healthz", () => Effect.succeed({ status: "ok" as const, version: "2.0.0" }))
       .handle("readyz", () =>
-        sql`SELECT 1`.pipe(
-          Effect.as({ status: "ready" as const, database: "ok" as const }),
-          Effect.mapError(() => new ApiUnavailable({ message: "database not reachable" })),
-        ),
+        Effect.gen(function* () {
+          yield* sql`SELECT 1`.pipe(Effect.mapError(() => new ApiUnavailable({ message: "database not reachable" })));
+          /**
+           * Every background loop must have ticked recently (D3). A process that cannot reach
+           * Postgres is obviously not ready; a process whose outbox fiber died is *also* not ready,
+           * and it used to answer this endpoint with a cheerful "ready" because the only question
+           * asked was whether a `SELECT 1` came back.
+           *
+           * Three of a loop's own intervals, so one slow tick is not an outage and a genuinely
+           * stopped loop is caught within about half a minute.
+           */
+          const stale = yield* processMetrics.staleLoops();
+          if (stale.length > 0) {
+            return yield* Effect.fail(
+              new ApiUnavailable({ message: `background loop(s) not ticking: ${stale.map((l) => `${l.name} (last ${l.lastTickAt ?? "never"})`).join(", ")}` }),
+            );
+          }
+          const loops = yield* processMetrics.snapshot().pipe(Effect.map((p) => p.loops.map((l) => l.name)));
+          return { status: "ready" as const, database: "ok" as const, loops };
+        }),
       )
       .handle("status", () =>
         Effect.gen(function* () {
@@ -130,6 +148,12 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
             turn_decider: cfg.turnDecider,
             demo_mode: cfg.demoMode,
             judge: { enabled: cfg.judge.enabled, model: cfg.judge.model },
+            process: yield* processMetrics.snapshot().pipe(
+              Effect.map((p) => ({
+                ...p,
+                loops: p.loops.map((l) => ({ name: l.name, last_tick_at: l.lastTickAt, interval_ms: l.intervalMs, stale: l.stale })),
+              })),
+            ),
             rate_limiting: {
               per_minute: cfg.rateLimitPerMinute,
               daily_turn_cap: cfg.dailyTurnCap,

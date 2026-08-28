@@ -30,10 +30,25 @@ const startError = (cause: Cause.Cause<unknown>): StartError | null => {
   return null;
 };
 
+/**
+ * Gauges for the process metrics, set when the service is built (D3).
+ *
+ * Module-level rather than on the service because `/status` is answered by a handler that already
+ * has enough dependencies, and because a process that never built a `TurnRunner` should report
+ * zero rather than fail to answer.
+ */
+export let liveTurnCount: () => number = () => 0;
+export let subscriberCount: () => number = () => 0;
+
 export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/TurnRunner", {
   effect: Effect.gen(function* () {
     const orch = yield* Orchestrator;
     const live = new Map<string, LiveTurn>();
+    // Published for the process gauges (D3). C1 in the audit is that this map retains every turn
+    // including delta frames for five minutes and is walked on every run; its size is the first
+    // thing worth watching, and the soak's +3.1 MB/min of growth is what makes it worth watching.
+    liveTurnCount = () => live.size;
+    subscriberCount = () => [...live.values()].reduce((n, t) => n + t.subscribers.size, 0);
     const keyOf = (p: { conversationId: string; turnId: string }) => `${p.conversationId}:${p.turnId}`;
 
     const broadcast = (turn: LiveTurn, item: TurnFrame | typeof END) =>
