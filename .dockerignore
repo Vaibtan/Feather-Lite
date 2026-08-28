@@ -1,0 +1,24 @@
+# Keep the build context to the sources the images actually need.
+#
+# `node_modules` is the one that matters: the tree is ~590 MB and none of it belongs in a build
+# context, because the images install from the lockfile inside the container for the target
+# platform. Copying a Windows tree into a linux/arm64 build would ship the wrong native binaries.
+node_modules
+**/node_modules
+
+# Built output — the images build their own, and a stale local `dist/` shadowing it is the sort of
+# thing that produces an image that works on the machine that built it.
+dist
+**/dist
+
+# Local state and artefacts.
+.env
+.env.local
+profiles
+docs/loadtest/*.json
+*.cpuprofile
+*.log
+
+.git
+.github
+.claude

@@ -104,7 +104,22 @@ export const OpenAILlmClientLive: Layer.Layer<LlmClient, never, AppConfig> = Lay
   Effect.gen(function* () {
     const cfg = yield* AppConfig;
     const apiKey = cfg.openaiApiKey ? Redacted.value(cfg.openaiApiKey) : "";
-    const client = new OpenAI({ apiKey, baseURL: cfg.openaiBaseUrl });
+    /**
+     * Built lazily, and only when there is a key.
+     *
+     * This layer is provided unconditionally — the post-call judge needs a client whichever decider
+     * ran the call — on the stated grounds that constructing one is free and fails at call time with
+     * a clear message. That was true of an older SDK and is **not** true of `openai@6`, whose
+     * constructor throws `Missing credentials` when the key is empty. The result was a server that
+     * refused to boot without `OPENAI_API_KEY` even with `TURN_DECIDER=scripted` and the judge off.
+     *
+     * It never showed on a dev box, where `.env` always has a key. It showed the first time the
+     * image was run: `docker run` with a database URL and nothing else, and the process exited
+     * before it listened. Both call sites below already fail properly on a missing key, so nothing
+     * changes except when the constructor runs.
+     */
+    let openai: OpenAI | null = null;
+    const client = (): OpenAI => (openai ??= new OpenAI({ apiKey, baseURL: cfg.openaiBaseUrl }));
     const complete = (request: CompletionRequest): Effect.Effect<CompletionResult, LlmCallFailed> =>
       Effect.gen(function* () {
         if (!apiKey) return yield* Effect.fail(new LlmCallFailed({ detail: "OPENAI_API_KEY is not configured" }));
@@ -121,7 +136,7 @@ export const OpenAILlmClientLive: Layer.Layer<LlmClient, never, AppConfig> = Lay
         // Two minutes, not the turn path's twenty seconds: a reasoning model at medium effort
         // thinks for a while, and nobody is waiting on the other end of this call.
         const res = yield* Effect.tryPromise({
-          try: () => client.chat.completions.create(params, { timeout: 120_000 }),
+          try: () => client().chat.completions.create(params, { timeout: 120_000 }),
           catch: (e) => new LlmCallFailed({ detail: `openai completion failed: ${String(e).slice(0, 300)}` }),
         });
         const choice = res.choices[0];
@@ -166,7 +181,7 @@ export const OpenAILlmClientLive: Layer.Layer<LlmClient, never, AppConfig> = Lay
               params.parallel_tool_calls = false;
             }
             const completion = yield* Effect.tryPromise({
-              try: () => client.chat.completions.create(params, { signal: controller.signal, timeout: 20_000 }),
+              try: () => client().chat.completions.create(params, { signal: controller.signal, timeout: 20_000 }),
               catch: (e) => new TurnDeciderUnavailable({ detail: `openai request failed: ${String(e).slice(0, 300)}` }),
             });
             return Stream.fromAsyncIterable(completion as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>, (e) => new TurnDeciderUnavailable({ detail: `openai stream failed: ${String(e).slice(0, 300)}` })).pipe(

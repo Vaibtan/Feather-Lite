@@ -1,6 +1,8 @@
-# Local Postgres for development and DB-backed tests, plus an optional self-hosted LiveKit SFU.
+# Local Postgres for development and DB-backed tests, an optional self-hosted LiveKit SFU, and the
+# two application images.
 #   docker compose up -d                                  # Postgres only (pnpm db:up)
 #   docker compose --profile livekit up -d livekit        # + LiveKit media server (pnpm lk:up)
+#   docker compose --profile livekit --profile app up -d --build   # + server and worker as images
 #   DATABASE_URL=postgres://postgres:postgres@localhost:5434/feather_lite
 services:
   postgres:
@@ -76,6 +78,69 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+
+  # --------------------------------------------------------------- app ----
+  # The deployable unit (spec D6, Q1). `--profile app` runs the two production images against the
+  # same Postgres and SFU the native processes use, so a containerised run can be compared with a
+  # native one on the same box rather than on a different one.
+  server:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    image: feather-lite-server:local
+    container_name: feather-lite-server
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/feather_lite
+      # Everything else comes from the repo-root .env, so a container run and a native run are
+      # configured from one file. Nothing here has a default that would quietly differ from it.
+      TURN_DECIDER: ${TURN_DECIDER:-scripted}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-false}
+      JUDGE_ENABLED: ${JUDGE_ENABLED:-false}
+      LIVEKIT_URL: ${LIVEKIT_URL:-}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-120}
+      DAILY_TURN_CAP: ${DAILY_TURN_CAP:-5000}
+    mem_limit: 768m
+    ports:
+      - "8080:8080"
+
+  worker:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: apps/voice-worker/Dockerfile
+    image: feather-lite-worker:local
+    container_name: feather-lite-worker
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      CONTROL_PLANE_URL: http://server:8080
+      # Signalling to the SFU over the compose network. **Media is a separate question**: the SFU is
+      # started with `--node-ip 127.0.0.1` for the browser path, so it advertises its media address
+      # as the host's loopback, which a worker in another container cannot reach. Registration and
+      # dispatch work as they are — verified — and a container-to-container *call* needs the SFU's
+      # node IP set to something both sides can reach. Do that before the N=10 container run, not by
+      # assuming it works.
+      LIVEKIT_URL: ws://livekit:7880
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
+      LIVEKIT_AGENT_NAME: ${LIVEKIT_AGENT_NAME:-feather-lite-agent}
+      STT_TTS_PROVIDER: ${STT_TTS_PROVIDER:-plugins}
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:-}
+      DEEPGRAM_TTS_MODEL: ${DEEPGRAM_TTS_MODEL:-aura-2-asteria-en}
+      WORKER_MAX_JOBS: ${WORKER_MAX_JOBS:-8}
+      WORKER_IDLE_PROCESSES: ${WORKER_IDLE_PROCESSES:-4}
+    # Measured in this image: main 192 MB, inference 235 MB, four warm job slots at ~194 MB each —
+    # 1.2 GB resident before a call, and a call adds ~300 MB. 3 GB carries the four warm slots plus
+    # four concurrent calls; raise it with WORKER_MAX_JOBS.
+    mem_limit: 3g
 
 volumes:
   feather_lite_pg:
