@@ -21,3 +21,4 @@ minimumReleaseAgeExclude:
 
 patchedDependencies:
   '@livekit/agents-plugin-deepgram@1.6.4': patches/@livekit__agents-plugin-deepgram@1.6.4.patch
+  '@livekit/agents@1.6.4': patches/@livekit__agents@1.6.4.patch

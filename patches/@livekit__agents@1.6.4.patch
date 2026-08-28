@@ -1,0 +1,130 @@
+diff --git a/dist/inference/_warmup.cjs b/dist/inference/_warmup.cjs
+index 40095002c6245195d3167c1562c14eec737c6771..70fda7c340700c1c67af35e0b873a3b9397434eb 100644
+--- a/dist/inference/_warmup.cjs
++++ b/dist/inference/_warmup.cjs
+@@ -18,7 +18,8 @@ var __copyProps = (to, from, except, desc) => {
+ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+ var warmup_exports = {};
+ __export(warmup_exports, {
+-  _getLocalInferenceModule: () => _getLocalInferenceModule
++  _getLocalInferenceModule: () => _getLocalInferenceModule,
++  _localInferenceResolvable: () => _localInferenceResolvable
+ });
+ module.exports = __toCommonJS(warmup_exports);
+ var getImportMetaUrl = () => typeof document === "undefined" ? new URL(`file:${__filename}`).href : document.currentScript && document.currentScript.src || new URL("main.js", document.baseURI).href;
+@@ -42,11 +43,25 @@ function getNative() {
+     return void 0;
+   }
+ }
++function _localInferenceResolvable() {
++  if (triedLoad) return nativeMod !== void 0;
++  try {
++    cjsRequire.resolve("@livekit/local-inference");
++    return true;
++  } catch (err) {
++    (0, import_log.log)().warn(
++      { err: err instanceof Error ? err.message : String(err) },
++      "@livekit/local-inference is not installed; local VAD/EOT paths disabled"
++    );
++    return false;
++  }
++}
+ function _getLocalInferenceModule() {
+   return getNative();
+ }
+ // Annotate the CommonJS export names for ESM import in node:
+ 0 && (module.exports = {
+-  _getLocalInferenceModule
++  _getLocalInferenceModule,
++  _localInferenceResolvable
+ });
+ //# sourceMappingURL=_warmup.cjs.map
+\ No newline at end of file
+diff --git a/dist/inference/_warmup.d.cts b/dist/inference/_warmup.d.cts
+index 67ef8c712016fb85988a34c121669468836f6dba..bf70c9d91c04624345d8c87a56e6807f01622010 100644
+--- a/dist/inference/_warmup.d.cts
++++ b/dist/inference/_warmup.d.cts
+@@ -1,3 +1,5 @@
+ /** @internal Returns the loaded native module, or `undefined` if unavailable. */
+ export declare function _getLocalInferenceModule(): typeof import('@livekit/local-inference') | undefined;
++/** @internal Patched (feather-lite W1): true when the addon is installed, WITHOUT loading it. */
++export declare function _localInferenceResolvable(): boolean;
+ //# sourceMappingURL=_warmup.d.ts.map
+\ No newline at end of file
+diff --git a/dist/inference/_warmup.d.ts b/dist/inference/_warmup.d.ts
+index 67ef8c712016fb85988a34c121669468836f6dba..bf70c9d91c04624345d8c87a56e6807f01622010 100644
+--- a/dist/inference/_warmup.d.ts
++++ b/dist/inference/_warmup.d.ts
+@@ -1,3 +1,5 @@
+ /** @internal Returns the loaded native module, or `undefined` if unavailable. */
+ export declare function _getLocalInferenceModule(): typeof import('@livekit/local-inference') | undefined;
++/** @internal Patched (feather-lite W1): true when the addon is installed, WITHOUT loading it. */
++export declare function _localInferenceResolvable(): boolean;
+ //# sourceMappingURL=_warmup.d.ts.map
+\ No newline at end of file
+diff --git a/dist/inference/_warmup.js b/dist/inference/_warmup.js
+index fdd027c23197a2541f78a6091165ee0b1c81dd8f..b535d118836fa1c448ca73416300070012fd7797 100644
+--- a/dist/inference/_warmup.js
++++ b/dist/inference/_warmup.js
+@@ -17,10 +17,24 @@ function getNative() {
+     return void 0;
+   }
+ }
++function _localInferenceResolvable() {
++  if (triedLoad) return nativeMod !== void 0;
++  try {
++    cjsRequire.resolve("@livekit/local-inference");
++    return true;
++  } catch (err) {
++    log().warn(
++      { err: err instanceof Error ? err.message : String(err) },
++      "@livekit/local-inference is not installed; local VAD/EOT paths disabled"
++    );
++    return false;
++  }
++}
+ function _getLocalInferenceModule() {
+   return getNative();
+ }
+ export {
+-  _getLocalInferenceModule
++  _getLocalInferenceModule,
++  _localInferenceResolvable
+ };
+ //# sourceMappingURL=_warmup.js.map
+\ No newline at end of file
+diff --git a/dist/worker.cjs b/dist/worker.cjs
+index c76343abb557cd3443896ed6ffbc0f48edf43c61..b4cbb447582545770d57e9131e9d0a74b47e56db 100644
+--- a/dist/worker.cjs
++++ b/dist/worker.cjs
+@@ -60,7 +60,7 @@ function maybeRegisterLocalEotRunner() {
+   if (localEotRunnerRegistered) return;
+   localEotRunnerRegistered = true;
+   if (import_inference_runner.InferenceRunner.registeredRunners[import_runner.EOT_INFERENCE_METHOD]) return;
+-  if ((0, import_warmup._getLocalInferenceModule)() === void 0) {
++  if (!(0, import_warmup._localInferenceResolvable)()) {
+     (0, import_log.log)().warn(
+       "@livekit/local-inference native binding unavailable; local audio EOT disabled (predictions will degrade to a positive default). cloud EOT and other turn detection modes are unaffected."
+     );
+diff --git a/dist/worker.js b/dist/worker.js
+index a5c1b61cee16b2acbb7552775d70057a84db725a..f05c7cdbe9debf01f72eea4e12e0ba009fc776e3 100644
+--- a/dist/worker.js
++++ b/dist/worker.js
+@@ -15,7 +15,7 @@ import { APIStatusError } from "./_exceptions.js";
+ import { ATTRIBUTE_AGENT_NAME } from "./constants.js";
+ import { getCpuMonitor } from "./cpu.js";
+ import { HTTPServer } from "./http_server.js";
+-import { _getLocalInferenceModule } from "./inference/_warmup.js";
++import { _localInferenceResolvable } from "./inference/_warmup.js";
+ import { EOT_INFERENCE_METHOD } from "./inference/eot/runner.js";
+ import { InferenceRunner } from "./inference_runner.js";
+ import { InferenceProcExecutor } from "./ipc/inference_proc_executor.js";
+@@ -34,7 +34,7 @@ function maybeRegisterLocalEotRunner() {
+   if (localEotRunnerRegistered) return;
+   localEotRunnerRegistered = true;
+   if (InferenceRunner.registeredRunners[EOT_INFERENCE_METHOD]) return;
+-  if (_getLocalInferenceModule() === void 0) {
++  if (!_localInferenceResolvable()) {
+     log().warn(
+       "@livekit/local-inference native binding unavailable; local audio EOT disabled (predictions will degrade to a positive default). cloud EOT and other turn detection modes are unaffected."
+     );
