@@ -18,13 +18,14 @@
  * unaware which. Failures to export are logged and never affect the call.
  */
 import { Context, Effect, Layer, Redacted } from "effect";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import { LangfuseClient } from "@langfuse/client";
 import { LangfuseSpanProcessor } from "@langfuse/otel";
 import { propagateAttributes, setLangfuseTracerProvider, startActiveObservation, startObservation } from "@langfuse/tracing";
 import type { ScoreDataType } from "@feather-lite/domain";
 import { AppConfig } from "../config.js";
+import { Metrics } from "./Metrics.js";
 
 /** The model call inside a turn. Absent for the scripted decider, which never calls a model. */
 export interface GenerationRecord {
@@ -111,6 +112,14 @@ export interface TracingShape {
   readonly judge: (j: JudgeRecord) => Effect.Effect<void>;
   /** Mirror one score onto the conversation's session (or its turn's observation). */
   readonly score: (s: ScoreTrace) => Effect.Effect<void>;
+  /**
+   * Send the scores buffered so far and read the answer (O7).
+   *
+   * Separate from `flush` because scores are written after a call has ended — the EVALUATION and
+   * JUDGE outbox jobs run post-close — so the conversation's own flush has already happened by the
+   * time they exist. This is the seam `Scores.recordMany` calls when its batch is complete.
+   */
+  readonly flushScores: () => Effect.Effect<void>;
   readonly flush: () => Effect.Effect<void>;
 }
 
@@ -124,6 +133,7 @@ const noop: TracingShape = {
   turnLatency: () => Effect.void,
   finalize: () => Effect.void,
   score: () => Effect.void,
+  flushScores: () => Effect.void,
   flush: () => Effect.void,
 };
 
@@ -186,6 +196,30 @@ export type ScoreTarget = { readonly traceId: string; readonly observationId: st
 export const scoreTarget = (conversationId: string, span: ScoreSpanRef | undefined): ScoreTarget =>
   span === undefined ? { sessionId: conversationId } : { traceId: span.traceId, observationId: span.observationId };
 
+/**
+ * What Langfuse said about a batch of scores we sent it (O7).
+ *
+ * Pure, so the failure path is testable without a Langfuse. The SDK's own
+ * `score.create` + `score.flush` cannot report this: `handleFlush` wraps every batch in
+ * `.catch(err => this.logger.error(...))` and inspects `res.errors` only to log them, so `flush()`
+ * resolves cleanly whatever happened. That is not an oversight to work around with a logger hook —
+ * `LoggerConfig` in `@langfuse/core` 5.10.1 accepts a level, a prefix and a timestamp flag, and no
+ * sink — so the only way to see an ingestion failure is to make the call ourselves and read the
+ * answer.
+ *
+ * Both shapes matter. A rejected promise is the transport failing; a resolved response carrying
+ * `errors` is Langfuse refusing the batch, which is exactly what happened for weeks when every
+ * per-turn score named an `observationId` without its `traceId` and came back 400 (ADR 0009).
+ */
+export const langfuseIngestionProblems = (
+  response: { readonly errors?: ReadonlyArray<{ readonly id?: string; readonly status?: number; readonly message?: string | null }> } | null,
+  thrown: unknown,
+): ReadonlyArray<string> => {
+  if (thrown !== null && thrown !== undefined) return [`score ingestion failed: ${String(thrown)}`];
+  const errors = response?.errors ?? [];
+  return errors.map((e) => `score ${e.id ?? "(no id)"} rejected${e.status === undefined ? "" : ` with ${String(e.status)}`}${e.message ? `: ${e.message}` : ""}`);
+};
+
 const scoreId = (s: ScoreTrace): string =>
   createHash("sha256").update(`${s.conversationId}|${s.turnId ?? ""}|${s.name}|${s.source}`).digest("hex").slice(0, 32);
 
@@ -196,7 +230,7 @@ interface Pending {
   latency: WorkerTurnLatency | null;
 }
 
-export const LangfuseTracingLive: Layer.Layer<Tracing, never, AppConfig> = Layer.scoped(
+export const LangfuseTracingLive: Layer.Layer<Tracing, never, AppConfig | Metrics> = Layer.scoped(
   Tracing,
   Effect.gen(function* () {
     const cfg = yield* AppConfig;
@@ -226,6 +260,38 @@ export const LangfuseTracingLive: Layer.Layer<Tracing, never, AppConfig> = Layer
       publicKey: cfg.langfuse.publicKey,
       secretKey: Redacted.value(cfg.langfuse.secretKey),
       baseUrl: cfg.langfuse.baseUrl,
+    });
+    const metrics = yield* Metrics;
+
+    /**
+     * Scores are batched here rather than in `client.score`, so that sending them is something this
+     * process does and can therefore observe (O7). See `langfuseIngestionProblems` for why the
+     * SDK's own queue cannot report a failure.
+     */
+    const pendingScores: Array<{ readonly id: string; readonly name: string; readonly [k: string]: unknown }> = [];
+
+    const flushScores = Effect.gen(function* () {
+      if (pendingScores.length === 0) return;
+      const batch = pendingScores.splice(0, pendingScores.length).map((body) => ({
+        id: randomUUID(),
+        type: "score-create" as const,
+        timestamp: new Date().toISOString(),
+        body,
+      }));
+      // `catch` passes the cause through: the default wrapper turns "fetch failed" into
+      // "An unknown error occurred in Effect.tryPromise", which is a message about Effect rather
+      // than about Langfuse and would have made the ring useless for the thing it exists for.
+      const result = yield* Effect.tryPromise({ try: () => client.api.ingestion.batch({ batch: batch as never }), catch: (e) => e }).pipe(
+        Effect.map((res) => ({ res: res as { errors?: ReadonlyArray<{ id?: string; status?: number; message?: string | null }> }, thrown: null as unknown })),
+        Effect.catchAll((e) => Effect.succeed({ res: null, thrown: e as unknown })),
+      );
+      const problems = langfuseIngestionProblems(result.res, result.thrown);
+      for (const message of problems) {
+        // Counted *and* kept: a count says how much is failing, the ring says what the failure was,
+        // and it was the absence of the second that let a 400 hide for weeks.
+        yield* metrics.providerEvent({ provider: "langfuse", kind: "error", stage: "observability", message, conversationId: null });
+      }
+      if (problems.length > 0) yield* Effect.logWarning(`langfuse rejected ${String(problems.length)} of ${String(batch.length)} score(s): ${problems[0] ?? ""}`);
     });
     // Captured here because the narrowing of `cfg.langfuse` above does not survive into the
     // closures below.
@@ -439,7 +505,7 @@ export const LangfuseTracingLive: Layer.Layer<Tracing, never, AppConfig> = Layer
           // session, with the turn named in the comment, so the measurement is never lost.
           const orphanedTurn = s.turnId !== null && span === undefined;
           const comment = orphanedTurn ? `turn ${s.turnId}${s.comment ? ` — ${s.comment}` : ""}` : s.comment;
-          client.score.create({
+          pendingScores.push({
             id: scoreId(s),
             ...scoreTarget(s.conversationId, span),
             name: s.name,
@@ -457,9 +523,18 @@ export const LangfuseTracingLive: Layer.Layer<Tracing, never, AppConfig> = Layer
       flush: () =>
         Effect.gen(function* () {
           yield* guard(emitAllPending);
-          yield* Effect.promise(() => processor.forceFlush()).pipe(Effect.ignore);
-          yield* Effect.promise(() => client.score.flush()).pipe(Effect.ignore);
+          // A span-export failure was silently ignored here. It is the same class of blindness the
+          // scores had: the exporter is the only thing that knows, and nothing asked it (O7).
+          yield* Effect.tryPromise({ try: () => processor.forceFlush(), catch: (e) => e }).pipe(
+            Effect.catchAll((e) =>
+              Effect.logWarning(`langfuse span flush failed: ${String(e)}`).pipe(
+                Effect.zipRight(metrics.providerEvent({ provider: "langfuse", kind: "error", stage: "observability", message: `span flush failed: ${String(e)}`, conversationId: null })),
+              ),
+            ),
+          );
+          yield* flushScores;
         }),
+      flushScores: () => flushScores,
     };
     return shape;
   }),

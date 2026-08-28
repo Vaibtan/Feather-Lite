@@ -50,6 +50,11 @@ export class Scores extends Effect.Service<Scores>()("@feather-lite/Scores", {
           });
           written += 1;
         }
+        // Send them now and read the answer (O7). Scores are written after the call has ended, so
+        // the conversation's own trace flush has already run; without this the batch would sit
+        // buffered until some unrelated call finished. Off the hot path by construction — this runs
+        // in the EVALUATION and JUDGE outbox jobs, not in a turn.
+        if (written > 0) yield* tracing.flushScores();
         return written;
       });
 

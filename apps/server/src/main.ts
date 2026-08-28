@@ -107,9 +107,12 @@ const MainLive = Layer.mergeAll(HttpLive, RootRoute, SchedulersLive).pipe(
   // both. Separate instances would each hold half the answer.
   //
   // (This comment used to say the orchestrator counted here as well. It never has — O14.)
-  Layer.provideMerge(Metrics.Default),
   Layer.provideMerge(LiveKitMediaPlaneLive),
   Layer.provideMerge(LangfuseTracingLive),
+  // Below the tracing layer, not above it: `provideMerge` supplies downward, and the Langfuse
+  // exporter now counts its own ingestion failures (O7). Still merged upward, so the decider and
+  // the HTTP edge see the same single instance.
+  Layer.provideMerge(Metrics.Default),
   Layer.provideMerge(DatabaseLive),
   Layer.provideMerge(AppConfigLive),
   Layer.provide(NodeServerLive),

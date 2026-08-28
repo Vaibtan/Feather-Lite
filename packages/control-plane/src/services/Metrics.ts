@@ -30,7 +30,8 @@ export interface ProviderEvent {
   /** The vendor or plugin that failed, as it labels itself, e.g. `deepgram.STT`. */
   readonly provider: string;
   readonly kind: "error" | "retry" | "timeout";
-  readonly stage: "stt" | "tts" | "llm" | "media";
+  /** `observability` is the trace/score exporter itself failing — a vendor like any other (O7). */
+  readonly stage: "stt" | "tts" | "llm" | "media" | "observability";
   readonly message: string;
   readonly conversationId: string | null;
 }
