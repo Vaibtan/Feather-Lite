@@ -30,6 +30,16 @@ export interface CallEvaluation {
   readonly noProtectedBeforeRpc: boolean;
   /** Every recorded promise followed a read-back the borrower heard in full. `null` if no promise. */
   readonly noPromiseWithoutReadback: boolean | null;
+  /**
+   * How many promises the read-back check could and could not look at (O12).
+   *
+   * The check needs an `AGENT_TURN_PLAYOUT` event to know whether the borrower actually heard the
+   * read-back, and only a voice call produces one. Without these two numbers the Quality page shows
+   * a compliance row with n=2 beside a promise count of 5 and no way to tell a missing check from a
+   * failed one.
+   */
+  readonly promisesChecked: number;
+  readonly promisesWithoutPlayout: number;
 
   /* --- call facts --- */
   readonly rightPartyVerified: boolean;
@@ -102,11 +112,17 @@ export const evaluateCall = (events: ReadonlyArray<EventRecord>): CallEvaluation
 
   const recordedPromises = ordered.filter((e) => e.type === "TOOL_RESULT" && e.payload.name === "record_promise_to_pay");
   let noPromiseWithoutReadback: boolean | null = null;
+  let promisesChecked = 0;
+  let promisesWithoutPlayout = 0;
   for (const promise of recordedPromises) {
     const turnId = readBackTurnIdBefore(promise.sequence_no);
     const interrupted = turnId === undefined ? undefined : playouts.get(turnId);
     // No playout for that turn at all: a simulated call, which has no audio to have missed.
-    if (interrupted === undefined) continue;
+    if (interrupted === undefined) {
+      promisesWithoutPlayout += 1;
+      continue;
+    }
+    promisesChecked += 1;
     noPromiseWithoutReadback = (noPromiseWithoutReadback ?? true) && !interrupted;
   }
 
@@ -135,6 +151,8 @@ export const evaluateCall = (events: ReadonlyArray<EventRecord>): CallEvaluation
     miniMirandaFirst,
     noProtectedBeforeRpc,
     noPromiseWithoutReadback,
+    promisesChecked,
+    promisesWithoutPlayout,
     rightPartyVerified: rpcSeq !== null,
     voicemail,
     bargeInCount: ordered.filter((e) => e.type === "TURN_SUPERSEDED").length,
@@ -169,7 +187,23 @@ export const evaluationScores = (conversationId: string, evaluation: CallEvaluat
 
   bool("compliance.mini_miranda_first", evaluation.miniMirandaFirst, evaluation.miniMirandaFirst === false ? "first agent line does not carry the FDCPA disclosure" : undefined);
   bool("compliance.no_protected_before_rpc", evaluation.noProtectedBeforeRpc, evaluation.noProtectedBeforeRpc ? undefined : "account detail spoken before right-party confirmation");
-  bool("compliance.no_promise_without_readback", evaluation.noPromiseWithoutReadback, evaluation.noPromiseWithoutReadback === false ? "a promise was recorded after a read-back the borrower did not hear in full" : undefined);
+  /**
+   * The read-back check carries its own denominator (O12). A compliance row reading n=2 beside a
+   * promise count of 5 is unreadable without it: the reader cannot tell a check that failed from a
+   * check that had nothing to look at. Only a voice call emits `AGENT_TURN_PLAYOUT`, so a
+   * simulated one is silently unmeasurable here, and silently is the problem.
+   */
+  if (evaluation.noPromiseWithoutReadback !== null) {
+    const unchecked = evaluation.promisesWithoutPlayout;
+    out.push(
+      booleanScore(conversationId, "compliance.no_promise_without_readback", evaluation.noPromiseWithoutReadback, "EVALUATOR", {
+        comment: evaluation.noPromiseWithoutReadback
+          ? `${String(evaluation.promisesChecked)} promise(s) checked against a heard read-back${unchecked > 0 ? `; ${String(unchecked)} had no playout events (simulated call)` : ""}`
+          : "a promise was recorded after a read-back the borrower did not hear in full",
+        evidence: { promises_checked: evaluation.promisesChecked, promises_without_playout: unchecked },
+      }),
+    );
+  }
   bool("call.right_party_verified", evaluation.rightPartyVerified);
   bool("call.voicemail", evaluation.voicemail);
   num("call.barge_in_count", evaluation.bargeInCount);

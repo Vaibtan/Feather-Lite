@@ -163,6 +163,16 @@ const renderAgreement = (q: QualityReport) => {
   );
 };
 
+/**
+ * A compliance row's `n` is not the window's call count, and the gap is meaningful (O12).
+ *
+ * `compliance.no_promise_without_readback` needs an `AGENT_TURN_PLAYOUT` event to know whether the
+ * borrower heard the read-back, and only a voice call emits one — so on a window of simulated calls
+ * it reads n=2 beside a promise count of 5, and nothing distinguished "checked twice and passed"
+ * from "could not be checked three times". The footnote below says so where the number is.
+ */
+const READBACK_CHECK = "compliance.no_promise_without_readback";
+
 const renderScores = (q: QualityReport) =>
   q.scores.length === 0
     ? h("div", { class: "muted small" }, "No call-level scores in this window yet.")
@@ -187,6 +197,19 @@ const renderScores = (q: QualityReport) =>
           ),
         ),
       );
+
+/** Explains a compliance row whose `n` is short of the window, rather than leaving it to be read as a miss. */
+const renderScoresFootnote = (q: QualityReport) => {
+  const readback = q.scores.find((s) => s.name === READBACK_CHECK);
+  const promises = q.funnel.promise_to_pay;
+  if (readback === undefined || promises === 0 || readback.n >= promises) return null;
+  return h(
+    "p",
+    { class: "muted small", style: "margin-top:8px" },
+    `${READBACK_CHECK} was checked on ${String(readback.n)} of ${String(promises)} call(s) that recorded a promise. ` +
+      `It needs the playout events only a voice call produces, so a simulated call cannot be checked — the shortfall is missing evidence, not a failed check.`,
+  );
+};
 
 const PROMISE_CLASS: Record<string, string> = { PENDING: "neutral", DUE_TODAY: "warn", OVERDUE: "bad" };
 
@@ -297,6 +320,8 @@ export const qualityView = (root: HTMLElement, onStop: (fn: () => void) => void)
       promises.append(renderPromises(q));
       clear(scores);
       scores.append(renderScores(q));
+      const footnote = renderScoresFootnote(q);
+      if (footnote !== null) scores.append(footnote);
       clear(reliability);
       reliability.append(renderReliability(q));
     } catch (e) {

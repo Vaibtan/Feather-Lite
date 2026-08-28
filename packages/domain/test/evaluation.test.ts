@@ -147,6 +147,22 @@ describe("evaluateCall — compliance", () => {
     expect(e.noPromiseWithoutReadback).toBeNull();
     expect(e.complianceOk).toBe(true);
   });
+
+  it("carries its own denominator, so a short n can be told from a failure (O12)", () => {
+    // The Quality page showed this check at n=2 beside a promise count of 5 with no way to tell a
+    // check that failed from one that had nothing to look at. Only a voice call emits
+    // AGENT_TURN_PLAYOUT, so on a simulated call the promise is unmeasurable rather than clean.
+    const voice = evaluateCall(happyPath);
+    expect(voice.noPromiseWithoutReadback).toBe(true);
+    expect(voice.promisesChecked).toBe(1);
+    expect(voice.promisesWithoutPlayout).toBe(0);
+
+    const simulated = evaluateCall(happyPath.filter((ev) => ev.type !== "AGENT_TURN_PLAYOUT"));
+    expect(simulated.noPromiseWithoutReadback).toBeNull();
+    expect(simulated.promisesChecked).toBe(0);
+    // The promise is still there; it is the evidence about it that is missing.
+    expect(simulated.promisesWithoutPlayout).toBe(1);
+  });
 });
 
 describe("evaluateCall — call facts", () => {
