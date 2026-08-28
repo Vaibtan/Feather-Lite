@@ -6,6 +6,15 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: feather-lite-postgres
+    # `pg_stat_statements` must be preloaded at server start; it cannot be turned on by a migration.
+    # It is what turns "43 round trips per turn" into a ranked list of statements, so every D5
+    # change is a measured delta per statement rather than a wall-clock guess (spec D5b). The
+    # extension itself is created by migration 0006, which is a no-op without this line.
+    command: >
+      postgres
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.max=2000
+      -c pg_stat_statements.track=top
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres

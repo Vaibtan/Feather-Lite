@@ -286,6 +286,81 @@ const pgSampler = setInterval(() => {
 pgSampler.unref();
 
 /**
+ * The statement ranking (spec D5b): what the run actually asked Postgres to do, per statement.
+ *
+ * This is the instrument the D5 round-trip work is measured with. "43 statements per turn" is a
+ * count somebody made by reading code; `pg_stat_statements` is the same claim taken from the server,
+ * and it makes each fix a delta on a named line rather than a wall-clock difference that could be
+ * anything.
+ *
+ * Reset immediately before the load starts so the numbers describe this run and nothing else — the
+ * migrations, the fixture minting and any console tab left open all execute statements too.
+ */
+interface StatementStat {
+  readonly query: string;
+  readonly calls: number;
+  readonly total_ms: number;
+  readonly mean_ms: number;
+  readonly rows: number;
+}
+interface StatementReport {
+  readonly available: boolean;
+  readonly note?: string;
+  readonly total_calls?: number;
+  readonly total_ms?: number;
+  readonly top_by_total_time?: ReadonlyArray<StatementStat>;
+  readonly top_by_calls?: ReadonlyArray<StatementStat>;
+}
+const resetStatements = async (): Promise<boolean> => {
+  try {
+    await sql`SELECT pg_stat_statements_reset()`;
+    return true;
+  } catch {
+    return false;
+  }
+};
+const readStatements = async (available: boolean): Promise<StatementReport> => {
+  if (!available) {
+    return {
+      available: false,
+      note: "pg_stat_statements is not loaded. Add `-c shared_preload_libraries=pg_stat_statements` to the Postgres command and restart it; migration 0005 creates the extension.",
+    };
+  }
+  try {
+    const rows = await sql<Array<{ query: string; calls: string; total_ms: string; mean_ms: string; rows: string }>>`
+      SELECT query,
+             calls::text            AS calls,
+             total_exec_time::text  AS total_ms,
+             mean_exec_time::text   AS mean_ms,
+             rows::text             AS rows
+      FROM pg_stat_statements
+      WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+      ORDER BY total_exec_time DESC`;
+    // One line per statement, trimmed: the shape is what identifies it, not the whitespace the
+    // query builder emitted.
+    const norm = (r: (typeof rows)[number]): StatementStat => ({
+      query: r.query.replace(/\s+/g, " ").trim().slice(0, 220),
+      calls: Number(r.calls),
+      total_ms: Math.round(Number(r.total_ms) * 100) / 100,
+      mean_ms: Math.round(Number(r.mean_ms) * 1000) / 1000,
+      rows: Number(r.rows),
+    });
+    const all = rows.map(norm);
+    return {
+      available: true,
+      total_calls: all.reduce((a, r) => a + r.calls, 0),
+      total_ms: Math.round(all.reduce((a, r) => a + r.total_ms, 0) * 100) / 100,
+      top_by_total_time: all.slice(0, 10),
+      top_by_calls: [...all].sort((a, b) => b.calls - a.calls).slice(0, 10),
+    };
+  } catch (e) {
+    return { available: false, note: `pg_stat_statements read failed: ${String(e)}` };
+  }
+};
+const statementsAvailable = await resetStatements();
+if (!statementsAvailable) console.log("[tier1] pg_stat_statements is not loaded; the report will carry no statement ranking (see docs/loadtest/README.md)");
+
+/**
  * Open-loop arrival: a conversation is launched every `SCRIPT.length / RATE` seconds and the loop
  * does not wait for it. If the server falls behind, in-flight work piles up — which is the finding,
  * not a failure of the harness. The cap exists only so a genuinely wedged server cannot turn the
@@ -338,6 +413,7 @@ const runs =
       );
 const wallMs = Date.now() - wallStart;
 clearInterval(pgSampler);
+const statements = await readStatements(statementsAvailable);
 
 /* ------------------------- correctness assertions ---------------------- */
 
@@ -430,6 +506,16 @@ if (rateLimited > 0) {
   console.log(`                         for load runs; this run is not a baseline.`);
 }
 console.log(`  pg at peak             ${pg.peak ? `${pg.peak.backends} backends, ${pg.peak.active} active, ${pg.peak.idleInTransaction} idle-in-tx, ${pg.peak.waiting} lock-waiting (${pg.peak.samples} samples)` : "(not captured)"}`);
+if (statements.available && statements.top_by_total_time) {
+  const perTurn = okTurns.length > 0 ? (statements.total_calls ?? 0) / okTurns.length : 0;
+  console.log(`  pg statements          ${String(statements.total_calls ?? 0)} calls / ${String(statements.total_ms ?? 0)} ms total, ${perTurn.toFixed(1)} statements per completed turn`);
+  console.log(`    top by total time`);
+  for (const r of statements.top_by_total_time.slice(0, 8)) {
+    console.log(`      ${String(r.total_ms).padStart(9)} ms  ${String(r.calls).padStart(7)}x  ${r.mean_ms.toFixed(3)} ms  ${r.query.slice(0, 90)}`);
+  }
+} else if (statements.note) {
+  console.log(`  pg statements          ${statements.note}`);
+}
 if (startErrors.length) console.log(`  first start error      ${startErrors[0]}`);
 for (const v of verdicts.filter((x) => !x.correct).slice(0, 10)) console.log(`  INCORRECT #${v.index} ${v.conversationId ?? "-"}: ${v.failures.join("; ")}`);
 console.log(formatResourceReport(resources, budget));
@@ -462,6 +548,8 @@ const report = {
   latency_ms: { start: starts, ttft, turn_wall: wall },
   errors: { by_status: Object.fromEntries(errorsByStatus), start_errors: startErrors.slice(0, 20), rate_limited: rateLimited },
   pg_at_peak: pg.peak,
+  /** What this run asked Postgres to do, per statement (D5b). The denominator of every D5 claim. */
+  pg_statements: { ...statements, per_completed_turn: okTurns.length > 0 ? Math.round(((statements.total_calls ?? 0) / okTurns.length) * 100) / 100 : null },
   resources,
   per_core: budget,
   reference: { state_path: reference.actual_state_path, tools: reference.actual_tools, final_outcome: reference.final_outcome },
