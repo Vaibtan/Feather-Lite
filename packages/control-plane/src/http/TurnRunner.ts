@@ -14,14 +14,25 @@ import { Orchestrator, type TurnParams } from "../services/Orchestrator.js";
 type StartError = NotFound | ConversationCompleted | TurnInProgress;
 
 interface LiveTurn {
-  readonly frames: TurnFrame[];
+  /** Not readonly: `finish` replaces it with the frames worth keeping. */
+  frames: TurnFrame[];
   readonly subscribers: Set<Queue.Queue<TurnFrame | typeof END>>;
   done: boolean;
   finishedAt: number | null;
 }
 
 const END = Symbol.for("feather-lite/turn-end");
-const RETENTION_MS = 5 * 60_000;
+/**
+ * How long a finished turn's frames are kept for a reconnect (C1).
+ *
+ * Was five minutes, and at 30 turns/s that is nine thousand turns held at once — the soak's whole
+ * run, never collected. Sixty seconds instead, because this map is an **optimisation, not a
+ * correctness requirement**: a client that re-sends a `turn_id` after the entry has gone does not
+ * re-execute the turn. T1's idempotency check finds the recorded `DONE` row and replays its result
+ * from the ledger. What the map saves is a database round trip, and a reconnect that takes longer
+ * than a minute can afford one.
+ */
+const RETENTION_MS = Math.max(1, Number(process.env["TURN_RETENTION_SECONDS"] ?? 60)) * 1000;
 
 const startError = (cause: Cause.Cause<unknown>): StartError | null => {
   for (const f of Chunk.toReadonlyArray(Cause.failures(cause))) {
@@ -66,8 +77,19 @@ export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/Turn
         );
       });
 
+    /**
+     * Expire finished turns, at most once a second (C1).
+     *
+     * This used to run on **every** `run()`, walking the whole map to start one turn — O(n) per
+     * turn, O(n²) over a burst, and the map holds five minutes of them. A one-second guard makes
+     * the walk periodic without a fibre to own and tear down: the cost of being a second late to
+     * free a turn is a second of memory, and the cost of the alternative is a lifecycle.
+     */
+    let lastGcAt = 0;
     const gc = () => {
       const now = Date.now();
+      if (now - lastGcAt < 1000) return;
+      lastGcAt = now;
       for (const [k, t] of live) if (t.done && t.finishedAt !== null && now - t.finishedAt > RETENTION_MS) live.delete(k);
     };
 
@@ -98,6 +120,21 @@ export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/Turn
             }
             turn.done = true;
             turn.finishedAt = Date.now();
+            /**
+             * Deltas are dropped the moment the turn is over (C1).
+             *
+             * They exist to be streamed, and after `turn_end` there is nothing left to stream them
+             * to: a client attaching to a finished turn gets the replay and then the end, and
+             * `turn_end` already carries `agent_text` — the whole reply, deltas and says together.
+             * So the retained copy of every token was five minutes of memory holding a string the
+             * next frame also holds.
+             *
+             * **Only after the turn ends.** While it is live the deltas stay, so a reconnect
+             * mid-turn still receives the text it missed in order — which is the case the retention
+             * map exists for, and the one thing that would have broken if this were done at emit
+             * time.
+             */
+            turn.frames = turn.frames.filter((f) => f.type !== "delta");
             yield* broadcast(turn, END);
             turn.subscribers.clear();
           });

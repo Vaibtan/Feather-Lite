@@ -1,0 +1,369 @@
+{
+  "tier": "1-control-plane",
+  "api": "http://127.0.0.1:8080",
+  "label": "c1-before",
+  "mode": "soak",
+  "concurrency": null,
+  "ramp_seconds": null,
+  "soak": {
+    "rate_target_turns_per_second": 30,
+    "rate_achieved_turns_per_second": 30,
+    "duration_seconds": 300,
+    "launched": 3000,
+    "in_flight_peak": 3,
+    "arrival_cap_hits": 0,
+    "arrival_cap": 4000
+  },
+  "turn_decider": "scripted",
+  "script": [
+    "yes this is Jordan",
+    "I can pay 550 on Friday",
+    "yes"
+  ],
+  "wall_ms": 300032,
+  "conversations": {
+    "total": 3000,
+    "correct": 3000,
+    "incorrect": 0
+  },
+  "turns": {
+    "attempted": 9000,
+    "ok": 9000,
+    "throughput_per_second": 30
+  },
+  "latency_ms": {
+    "start": {
+      "n": 3000,
+      "p50": 27,
+      "p95": 38,
+      "p99": 45,
+      "max": 75,
+      "mean": 26
+    },
+    "ttft": {
+      "n": 9000,
+      "p50": 10,
+      "p95": 14,
+      "p99": 18,
+      "max": 31,
+      "mean": 10
+    },
+    "turn_wall": {
+      "n": 9000,
+      "p50": 34,
+      "p95": 45,
+      "p99": 56,
+      "max": 83,
+      "mean": 34
+    }
+  },
+  "errors": {
+    "by_status": {},
+    "start_errors": [],
+    "rate_limited": 0
+  },
+  "pg_at_peak": {
+    "backends": 8,
+    "active": 5,
+    "idleInTransaction": 1,
+    "waiting": 0,
+    "samples": 1472
+  },
+  "outbox_pending_at_start": 0,
+  "pg_statements": {
+    "available": true,
+    "total_calls": 389074,
+    "total_ms": 26371.34,
+    "top_by_total_time": [
+      {
+        "query": "INSERT INTO conversation_events (id, conversation_id, sequence_no, type, payload, created_at) SELECT $1, $2, COALESCE(MAX(sequence_no), $7) + $8, $3, $4, $5 FROM conversation_events WHERE conversation_id = $6 RETURNING s",
+        "calls": 74922,
+        "total_ms": 7714.27,
+        "mean_ms": 0.103,
+        "rows": 74922
+      },
+      {
+        "query": "SELECT id, call_attempt_id, borrower_id, agent_version_id, started_at, ended_at, final_outcome, final_outcome_metadata, channel, transfer_target, protected_context_unlocked, current_state, active_turn_id, pending_proposa",
+        "calls": 32896,
+        "total_ms": 3742.14,
+        "mean_ms": 0.114,
+        "rows": 32896
+      },
+      {
+        "query": "INSERT INTO conversation_scores (\"id\",\"conversation_id\",\"turn_id\",\"name\",\"value\",\"data_type\",\"string_value\",\"source\",\"comment\",\"evidence\",\"created_at\",\"updated_at\") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONF",
+        "calls": 35688,
+        "total_ms": 2905.02,
+        "mean_ms": 0.081,
+        "rows": 35688
+      },
+      {
+        "query": "SELECT id, conversation_id, sequence_no::int AS sequence_no, type, payload, created_at FROM conversation_events WHERE conversation_id = $1 ORDER BY conversation_events.sequence_no ASC",
+        "calls": 26922,
+        "total_ms": 1662.22,
+        "mean_ms": 0.062,
+        "rows": 371906
+      },
+      {
+        "query": "UPDATE conversations SET active_turn_id = $3 WHERE id = $1 AND active_turn_id = $2",
+        "calls": 9000,
+        "total_ms": 1448.88,
+        "mean_ms": 0.161,
+        "rows": 9000
+      },
+      {
+        "query": "SELECT b.name AS borrower_name, b.timezone AS borrower_timezone, a.workflow_execution_id, a.contact_point_id, w.workflow_type, w.current_attempt_no, cp.timezone_override, l.id AS loan_id, l.balance_due, l.due_date::text ",
+        "calls": 9000,
+        "total_ms": 875,
+        "mean_ms": 0.097,
+        "rows": 9000
+      },
+      {
+        "query": "UPDATE outbox_jobs SET status = $1, result = $2, error = $3, processed_at = $4, available_at = COALESCE($5, available_at), claimed_at = CASE WHEN $6 = $9 THEN $10 ELSE claimed_at END, payload = payload || $7, updated_at ",
+        "calls": 8922,
+        "total_ms": 724.3,
+        "mean_ms": 0.081,
+        "rows": 8922
+      },
+      {
+        "query": "INSERT INTO outbox_jobs (\"id\",\"conversation_id\",\"job_type\",\"available_at\",\"status\",\"payload\",\"result\") VALUES ($1,$2,$3,$4,$5,$6,$7)",
+        "calls": 9000,
+        "total_ms": 700.84,
+        "mean_ms": 0.078,
+        "rows": 9000
+      },
+      {
+        "query": "INSERT INTO conversation_turns (\"conversation_id\",\"turn_id\",\"user_text\",\"started_at\",\"status\") VALUES ($1,$2,$3,$4,$5)",
+        "calls": 9000,
+        "total_ms": 687.64,
+        "mean_ms": 0.076,
+        "rows": 9000
+      },
+      {
+        "query": "UPDATE conversations SET \"current_state\" = $1, \"final_outcome\" = $2, \"final_outcome_metadata\" = $3, \"ended_at\" = $4 WHERE id = $5",
+        "calls": 3000,
+        "total_ms": 583.48,
+        "mean_ms": 0.194,
+        "rows": 3000
+      }
+    ],
+    "top_by_calls": [
+      {
+        "query": "INSERT INTO conversation_events (id, conversation_id, sequence_no, type, payload, created_at) SELECT $1, $2, COALESCE(MAX(sequence_no), $7) + $8, $3, $4, $5 FROM conversation_events WHERE conversation_id = $6 RETURNING s",
+        "calls": 74922,
+        "total_ms": 7714.27,
+        "mean_ms": 0.103,
+        "rows": 74922
+      },
+      {
+        "query": "INSERT INTO conversation_scores (\"id\",\"conversation_id\",\"turn_id\",\"name\",\"value\",\"data_type\",\"string_value\",\"source\",\"comment\",\"evidence\",\"created_at\",\"updated_at\") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONF",
+        "calls": 35688,
+        "total_ms": 2905.02,
+        "mean_ms": 0.081,
+        "rows": 35688
+      },
+      {
+        "query": "SELECT id, call_attempt_id, borrower_id, agent_version_id, started_at, ended_at, final_outcome, final_outcome_metadata, channel, transfer_target, protected_context_unlocked, current_state, active_turn_id, pending_proposa",
+        "calls": 32896,
+        "total_ms": 3742.14,
+        "mean_ms": 0.114,
+        "rows": 32896
+      },
+      {
+        "query": "COMMIT",
+        "calls": 30407,
+        "total_ms": 22.49,
+        "mean_ms": 0.001,
+        "rows": 0
+      },
+      {
+        "query": "BEGIN",
+        "calls": 30407,
+        "total_ms": 18.32,
+        "mean_ms": 0.001,
+        "rows": 0
+      },
+      {
+        "query": "SELECT id, conversation_id, sequence_no::int AS sequence_no, type, payload, created_at FROM conversation_events WHERE conversation_id = $1 ORDER BY conversation_events.sequence_no ASC",
+        "calls": 26922,
+        "total_ms": 1662.22,
+        "mean_ms": 0.062,
+        "rows": 371906
+      },
+      {
+        "query": "UPDATE conversations SET active_turn_id = $3 WHERE id = $1 AND active_turn_id = $2",
+        "calls": 9000,
+        "total_ms": 1448.88,
+        "mean_ms": 0.161,
+        "rows": 9000
+      },
+      {
+        "query": "SELECT b.name AS borrower_name, b.timezone AS borrower_timezone, a.workflow_execution_id, a.contact_point_id, w.workflow_type, w.current_attempt_no, cp.timezone_override, l.id AS loan_id, l.balance_due, l.due_date::text ",
+        "calls": 9000,
+        "total_ms": 875,
+        "mean_ms": 0.097,
+        "rows": 9000
+      },
+      {
+        "query": "INSERT INTO outbox_jobs (\"id\",\"conversation_id\",\"job_type\",\"available_at\",\"status\",\"payload\",\"result\") VALUES ($1,$2,$3,$4,$5,$6,$7)",
+        "calls": 9000,
+        "total_ms": 700.84,
+        "mean_ms": 0.078,
+        "rows": 9000
+      },
+      {
+        "query": "INSERT INTO conversation_turns (\"conversation_id\",\"turn_id\",\"user_text\",\"started_at\",\"status\") VALUES ($1,$2,$3,$4,$5)",
+        "calls": 9000,
+        "total_ms": 687.64,
+        "mean_ms": 0.076,
+        "rows": 9000
+      }
+    ],
+    "per_completed_turn": 43.23
+  },
+  "resources": {
+    "platform": "win32",
+    "vcpus": 12,
+    "interval_ms": 1000,
+    "samples": 305,
+    "wall_ms": 309340,
+    "load_wall_ms": 301060,
+    "marked": true,
+    "roles": [
+      {
+        "role": "server",
+        "pids": [
+          22196
+        ],
+        "samples": 305,
+        "peak_rss_bytes": 486567936,
+        "peak_private_bytes": 502136832,
+        "cpu_seconds": 136.297,
+        "idle_rss_bytes": 142397440,
+        "last_rss_bytes": 486567936
+      },
+      {
+        "role": "server-launcher",
+        "pids": [
+          29008
+        ],
+        "samples": 305,
+        "peak_rss_bytes": 107540480,
+        "peak_private_bytes": 114184192,
+        "cpu_seconds": 0,
+        "idle_rss_bytes": 107339776,
+        "last_rss_bytes": 107503616
+      },
+      {
+        "role": "harness",
+        "pids": [
+          3860,
+          17836,
+          24076,
+          24672
+        ],
+        "samples": 305,
+        "peak_rss_bytes": 383459328,
+        "peak_private_bytes": 431087616,
+        "cpu_seconds": 20.422,
+        "idle_rss_bytes": 368312320,
+        "last_rss_bytes": 382255104
+      }
+    ],
+    "totals": {
+      "peak_rss_bytes": 976326656,
+      "peak_private_bytes": 1016184832,
+      "cpu_seconds": 156.719,
+      "idle_rss_bytes": 618049536
+    },
+    "subsets": {
+      "worker": {
+        "peak": 0,
+        "idle": 0,
+        "peak_private": 0,
+        "idle_private": 0,
+        "roles": [
+          "worker-main",
+          "worker-inference",
+          "worker-job",
+          "worker-launcher"
+        ]
+      },
+      "server": {
+        "peak": 594071552,
+        "idle": 249737216,
+        "peak_private": 616251392,
+        "idle_private": 261443584,
+        "roles": [
+          "server",
+          "server-launcher"
+        ]
+      }
+    },
+    "steady_state": {
+      "target_ms": 60000,
+      "full_window": false,
+      "worker": {
+        "cpu_seconds": 0,
+        "wall_ms": 60884
+      },
+      "server": {
+        "cpu_seconds": 28.828,
+        "wall_ms": 60837
+      }
+    },
+    "rss_slope_mb_per_min": 45.13,
+    "private_slope_mb_per_min": 46.25,
+    "containers": [
+      {
+        "name": "feather-lite-livekit",
+        "samples": 62,
+        "peak_mem_bytes": 29926359,
+        "peak_cpu_percent": 2.4,
+        "mean_cpu_percent": 0.6
+      },
+      {
+        "name": "feather-lite-postgres",
+        "samples": 62,
+        "peak_mem_bytes": 260990566,
+        "peak_cpu_percent": 88.7,
+        "mean_cpu_percent": 38.7
+      }
+    ],
+    "host": {
+      "total_mem_bytes": 16477151232,
+      "free_mem_bytes_start": 3931500544,
+      "free_mem_bytes_end": 3289927680
+    },
+    "unclassified_pids": 0,
+    "notes": []
+  },
+  "per_core": {
+    "cores_used": 0.474,
+    "cores_over_full_window": false,
+    "calls_per_vcpu": null,
+    "mb_per_call": null,
+    "mb_per_call_private": null,
+    "turns_per_s_per_core": 63.29,
+    "cpu_seconds_per_turn": 0.0151,
+    "cpu_seconds_per_call_minute": null,
+    "vcpus": 12,
+    "basis": "server+server-launcher"
+  },
+  "reference": {
+    "state_path": [
+      "GREETING",
+      "VERIFYING_IDENTITY",
+      "DISCUSSING_PAYMENT",
+      "CONFIRMING_OUTCOME",
+      "ENDING",
+      "COMPLETED"
+    ],
+    "tools": [
+      "confirm_right_party",
+      "propose_promise_to_pay",
+      "record_promise_to_pay"
+    ],
+    "final_outcome": "PROMISE_TO_PAY"
+  },
+  "incorrect": []
+}
