@@ -10,13 +10,15 @@
     "tracer:token": "tsx src/tracer/token-server.ts",
     "text-run": "tsx src/tracer/text-run.ts",
     "lk-smoke": "tsx src/tracer/lk-smoke.ts",
+    "build": "node ../../scripts/bundle.mjs apps/voice-worker/src/agent.ts apps/voice-worker/dist/agent.js",
     "dev": "tsx src/agent.ts dev",
-    "start": "tsx src/agent.ts start",
+    "start": "node dist/agent.js start",
     "fake-borrower": "tsx src/tracer/fake-borrower.ts",
     "fake-borrower-fleet": "tsx src/tracer/fake-borrower-fleet.ts",
     "chaos-orphan": "tsx src/tracer/chaos-orphan.ts"
   },
   "dependencies": {
+    "@effect/platform": "^0.97.1",
     "@feather-lite/contracts": "workspace:*",
     "@feather-lite/domain": "workspace:*",
     "@livekit/agents": "^1.6.4",

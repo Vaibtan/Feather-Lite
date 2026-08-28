@@ -93,7 +93,15 @@ export const classifyProcess = (commandLine: string, repoRoot: string = REPO_ROO
     return null;
   }
 
-  if (!inRepo) return null;
+  /**
+   * The bundled processes are launched from the repo root as `node apps/<app>/dist/<entry>.js`, so
+   * their command line carries no absolute path and `inRepo` cannot vouch for them. The
+   * app-qualified relative path is specific enough on its own — `apps/voice-worker/dist/agent.js`
+   * is not a name another project on this box is going to use — and it is why the root `start:*`
+   * scripts name the file that way rather than running `node dist/agent.js` from inside the app.
+   */
+  const qualified = /apps\/(voice-worker\/dist\/agent|server\/dist\/main)\.js/.test(c);
+  if (!inRepo && !qualified) return null;
   if (/(apps\/voice-worker\/)?src\/agent\.ts|dist\/agent\.js/.test(c)) return "worker-main";
   if (/(apps\/server\/)?src\/main\.ts|dist\/main\.js/.test(c)) return "server";
   return null;

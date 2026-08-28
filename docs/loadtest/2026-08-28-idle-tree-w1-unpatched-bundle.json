@@ -1,0 +1,173 @@
+{
+  "kind": "idle-tree",
+  "label": "w1-unpatched-bundle",
+  "seconds": 60,
+  "taken_at": "2026-08-28T08:46:53.709Z",
+  "resources": {
+    "platform": "win32",
+    "vcpus": 12,
+    "interval_ms": 1000,
+    "samples": 60,
+    "wall_ms": 61047,
+    "load_wall_ms": 60718,
+    "marked": false,
+    "roles": [
+      {
+        "role": "server",
+        "pids": [
+          27900
+        ],
+        "samples": 60,
+        "peak_rss_bytes": 135045120,
+        "peak_private_bytes": 140914688,
+        "cpu_seconds": 0.172,
+        "idle_rss_bytes": 134471680,
+        "last_rss_bytes": 135045120
+      },
+      {
+        "role": "server-launcher",
+        "pids": [
+          15404
+        ],
+        "samples": 60,
+        "peak_rss_bytes": 108531712,
+        "peak_private_bytes": 115879936,
+        "cpu_seconds": 0,
+        "idle_rss_bytes": 108531712,
+        "last_rss_bytes": 108531712
+      },
+      {
+        "role": "worker-main",
+        "pids": [
+          17592
+        ],
+        "samples": 60,
+        "peak_rss_bytes": 910639104,
+        "peak_private_bytes": 854786048,
+        "cpu_seconds": 0.313,
+        "idle_rss_bytes": 910024704,
+        "last_rss_bytes": 910290944
+      },
+      {
+        "role": "worker-inference",
+        "pids": [
+          23904
+        ],
+        "samples": 60,
+        "peak_rss_bytes": 961286144,
+        "peak_private_bytes": 871043072,
+        "cpu_seconds": 0.016,
+        "idle_rss_bytes": 961245184,
+        "last_rss_bytes": 961286144
+      },
+      {
+        "role": "worker-job",
+        "pids": [
+          6152,
+          21704,
+          23968,
+          26448
+        ],
+        "samples": 60,
+        "peak_rss_bytes": 642662400,
+        "peak_private_bytes": 514756608,
+        "cpu_seconds": 0.047,
+        "idle_rss_bytes": 642449408,
+        "last_rss_bytes": 642580480
+      },
+      {
+        "role": "worker-launcher",
+        "pids": [
+          21568
+        ],
+        "samples": 60,
+        "peak_rss_bytes": 108638208,
+        "peak_private_bytes": 115142656,
+        "cpu_seconds": 0,
+        "idle_rss_bytes": 108638208,
+        "last_rss_bytes": 108584960
+      },
+      {
+        "role": "harness",
+        "pids": [
+          3808,
+          19352,
+          25804
+        ],
+        "samples": 60,
+        "peak_rss_bytes": 229535744,
+        "peak_private_bytes": 261980160,
+        "cpu_seconds": 0.125,
+        "idle_rss_bytes": 228573184,
+        "last_rss_bytes": 208441344
+      }
+    ],
+    "totals": {
+      "peak_rss_bytes": 3095240704,
+      "peak_private_bytes": 2873188352,
+      "cpu_seconds": 0.673,
+      "idle_rss_bytes": 3093934080
+    },
+    "subsets": {
+      "worker": {
+        "peak": 2623082496,
+        "idle": 2622357504,
+        "peak_private": 2355216384,
+        "idle_private": 2354839552,
+        "roles": [
+          "worker-main",
+          "worker-inference",
+          "worker-job",
+          "worker-launcher"
+        ]
+      },
+      "server": {
+        "peak": 243576832,
+        "idle": 243003392,
+        "peak_private": 256794624,
+        "idle_private": 256000000,
+        "roles": [
+          "server",
+          "server-launcher"
+        ]
+      }
+    },
+    "steady_state": {
+      "target_ms": 60000,
+      "full_window": false,
+      "worker": {
+        "cpu_seconds": 0.375,
+        "wall_ms": 60718
+      },
+      "server": {
+        "cpu_seconds": 0.172,
+        "wall_ms": 60718
+      }
+    },
+    "rss_slope_mb_per_min": 0.7,
+    "private_slope_mb_per_min": -0.98,
+    "containers": [
+      {
+        "name": "feather-lite-livekit",
+        "samples": 12,
+        "peak_mem_bytes": 29370614,
+        "peak_cpu_percent": 2.2,
+        "mean_cpu_percent": 0.8
+      },
+      {
+        "name": "feather-lite-postgres",
+        "samples": 12,
+        "peak_mem_bytes": 314363085,
+        "peak_cpu_percent": 0,
+        "mean_cpu_percent": 0
+      }
+    ],
+    "host": {
+      "total_mem_bytes": 16477151232,
+      "free_mem_bytes_start": 1552969728,
+      "free_mem_bytes_end": 1548881920
+    },
+    "unclassified_pids": 1,
+    "notes": []
+  }
+}

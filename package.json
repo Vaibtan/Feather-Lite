@@ -27,16 +27,18 @@
     "dev:server": "pnpm --filter @feather-lite/server dev",
     "dev:worker": "pnpm --filter @feather-lite/voice-worker dev",
     "dev:console": "pnpm --filter @feather-lite/console dev",
-    "start:server": "pnpm --filter @feather-lite/server start",
-    "start:worker": "pnpm --filter @feather-lite/voice-worker start",
+    "build": "pnpm --filter @feather-lite/server build && pnpm --filter @feather-lite/voice-worker build",
+    "start:server": "pnpm --filter @feather-lite/server build && node apps/server/dist/main.js",
+    "start:worker": "pnpm --filter @feather-lite/voice-worker build && node apps/voice-worker/dist/agent.js start",
     "console:build": "pnpm --filter @feather-lite/console build",
     "deploy:console": "pnpm console:build && npx wrangler pages deploy apps/console/dist --project-name feather-lite-console",
     "tunnel": "cloudflared tunnel --url http://127.0.0.1:8080"
   },
   "devDependencies": {
-    "typescript": "^5.9.2",
-    "vitest": "^3.2.4",
     "@effect/vitest": "^0.30.0",
-    "tsx": "^4.20.5"
+    "esbuild": "^0.28.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
   }
 }

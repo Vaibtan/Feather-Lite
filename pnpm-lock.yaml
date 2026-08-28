@@ -15,6 +15,9 @@ importers:
       '@effect/vitest':
         specifier: ^0.30.0
         version: 0.30.0(effect@3.22.1)(vitest@3.2.7(@types/node@22.20.1)(lightningcss@1.33.0)(tsx@4.23.12))
+      esbuild:
+        specifier: ^0.28.2
+        version: 0.28.2
       tsx:
         specifier: ^4.20.5
         version: 4.23.12
@@ -74,6 +77,9 @@ importers:
       '@effect/platform-node':
         specifier: ^0.108.1
         version: 0.108.1(@effect/cluster@0.60.2(@effect/platform@0.97.1(effect@3.22.1))(@effect/rpc@0.76.2(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/sql@0.52.1(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/workflow@0.19.1(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(@effect/rpc@0.76.2(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(@effect/rpc@0.76.2(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/sql@0.52.1(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(effect@3.22.1)
+      '@effect/sql':
+        specifier: ^0.52.1
+        version: 0.52.1(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1)
       '@effect/sql-pg':
         specifier: ^0.53.0
         version: 0.53.0(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(@effect/sql@0.52.1(@effect/experimental@0.61.1(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(@effect/platform@0.97.1(effect@3.22.1))(effect@3.22.1))(effect@3.22.1)
@@ -86,12 +92,39 @@ importers:
       '@feather-lite/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@langfuse/client':
+        specifier: ^5.10.1
+        version: 5.10.1(@opentelemetry/api@1.9.1)
+      '@langfuse/otel':
+        specifier: ^5.10.1
+        version: 5.10.1(@opentelemetry/api@1.9.1)(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/exporter-trace-otlp-http@0.221.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.10.0(@opentelemetry/api@1.9.1))
+      '@langfuse/tracing':
+        specifier: ^5.10.1
+        version: 5.10.1(@opentelemetry/api@1.9.1)
+      '@opentelemetry/resources':
+        specifier: ^2.10.0
+        version: 2.10.0(@opentelemetry/api@1.9.1)
+      '@opentelemetry/sdk-trace-node':
+        specifier: ^2.10.0
+        version: 2.10.0(@opentelemetry/api@1.9.1)
+      '@prometheus-io/client':
+        specifier: ^0.16.1
+        version: 0.16.1
       dotenv:
         specifier: ^17.2.1
         version: 17.4.2
       effect:
         specifier: ^3.22.1
         version: 3.22.1
+      livekit-server-sdk:
+        specifier: ^2.17.0
+        version: 2.17.0
+      openai:
+        specifier: ^6.49.0
+        version: 6.49.0(ws@8.21.3)(zod@3.25.76)
+      pg:
+        specifier: ^8.23.0
+        version: 8.23.0
     devDependencies:
       '@types/node':
         specifier: ^22.17.0
@@ -105,6 +138,9 @@ importers:
 
   apps/voice-worker:
     dependencies:
+      '@effect/platform':
+        specifier: ^0.97.1
+        version: 0.97.1(effect@3.22.1)
       '@feather-lite/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
