@@ -51,6 +51,20 @@ export const OUTCOME_CLASS: Record<string, string> = {
   FAILED: "bad",
 };
 
+/**
+ * The SLO window's verdict, as a badge. Two pages render it and both used to render only two of
+ * the three states — `insufficient` is neither a pass nor a failure, and a green badge over a
+ * window nobody could judge was the most flattering thing either page could say (review #12).
+ *
+ * A lookup rather than a ternary chain at each site, for the same reason `OUTCOME_CLASS` is one:
+ * a fourth state, or a wording change, should be one edit and not four.
+ */
+export const SLO_VERDICT_BADGE: Record<"pass" | "breach" | "insufficient", { readonly text: string; readonly headline: string; readonly kind: string }> = {
+  pass: { text: "MEETING TARGET", headline: "SLO MET", kind: "good" },
+  breach: { text: "BREACHED", headline: "SLO BREACHED", kind: "bad" },
+  insufficient: { text: "NOT ENOUGH DATA", headline: "NOT ENOUGH DATA", kind: "muted" },
+};
+
 export const badge = (text: string | null | undefined, kind?: string) =>
   h("span", { class: `badge ${kind ?? (text ? (OUTCOME_CLASS[text] ?? "neutral") : "muted")}` }, text ?? "IN PROGRESS");
 

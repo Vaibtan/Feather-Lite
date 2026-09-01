@@ -3,7 +3,7 @@
  * (API base URL, bearer token) and the demo seed/reset controls.
  */
 import { api, apiBase, apiToken, setApiBase, setApiToken, type SystemStatus } from "../api.js";
-import { ago, badge, clear, h, pre } from "../dom.js";
+import { ago, badge, clear, h, pre, SLO_VERDICT_BADGE } from "../dom.js";
 import { renderLatencyAggregate } from "./latency.js";
 
 export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) => {
@@ -225,7 +225,7 @@ export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) 
           { class: "row", style: "align-items:center;gap:10px;margin-bottom:10px" },
           // Three states, three badges. "SLO MET" over a window where nothing was measured was the
           // most flattering thing this page could say, and it said it on a fresh database.
-          badge(s.slo.verdict === "pass" ? "SLO MET" : s.slo.verdict === "breach" ? "SLO BREACHED" : "NOT ENOUGH DATA", s.slo.verdict === "pass" ? "good" : s.slo.verdict === "breach" ? "bad" : "muted"),
+          badge(SLO_VERDICT_BADGE[s.slo.verdict].headline, SLO_VERDICT_BADGE[s.slo.verdict].kind),
           // The segment and its size, because "SLO MET over 0 calls" and "SLO MET over 50" are the
           // same badge and very different claims (O2).
           h(

@@ -15,7 +15,7 @@
  */
 import { isVerdictScore } from "@feather-lite/domain";
 import { api, type QualityReport } from "../api.js";
-import { badge, clear, h } from "../dom.js";
+import { badge, clear, h, SLO_VERDICT_BADGE } from "../dom.js";
 
 const pct = (v: number | null): string => (v === null ? "—" : `${(v * 100).toFixed(1)}%`);
 const num = (v: number | null, suffix = ""): string => (v === null ? "—" : `${v}${suffix}`);
@@ -83,10 +83,7 @@ const renderSlo = (q: QualityReport) => {
     h(
       "div",
       { class: "row", style: "align-items:center;gap:10px" },
-      badge(
-        q.slo.verdict === "pass" ? "MEETING TARGET" : q.slo.verdict === "breach" ? "BREACHED" : "NOT ENOUGH DATA",
-        q.slo.verdict === "pass" ? "good" : q.slo.verdict === "breach" ? "bad" : "muted",
-      ),
+      badge(SLO_VERDICT_BADGE[q.slo.verdict].text, SLO_VERDICT_BADGE[q.slo.verdict].kind),
       // A green badge over a window nobody could judge is the failure mode this line prevents.
       shortfall > 0 ? badge(`${shortfall} UNJUDGED`, "warn") : null,
       h("span", { class: "muted small" }, `${facets.length > 0 ? facets.join(", ") : "all calls"} — ${q.window.conversations} call(s) in window`),
