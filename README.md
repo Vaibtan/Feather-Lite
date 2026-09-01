@@ -147,8 +147,11 @@ pnpm start:worker                # node apps/voice-worker/dist/agent.js start  (
 pnpm stack:quiet                 # stop Langfuse, find stray workers, report free memory
 ```
 
-`stack:quiet` exits non-zero under 3 GB free, which is the line a fleet run needs. It will not close
-your browser or run `wsl --shutdown` — both are yours — but it names them when they are the problem.
+`stack:quiet` exits non-zero under 3 GB free, which is the line a fleet run needs, **and on a stray
+host voice worker** — the failure where the run looks fine and the numbers belong to a process
+nobody is watching. `--allow-worker` is the escape when that worker is yours and deliberate. It will
+not close your browser or run `wsl --shutdown` — both are yours — but it names them when they are
+the problem.
 
 **On Windows, WSL keeps the memory it has taken.** `vmmemWSL` has been seen holding 5.8 GB with every
 container stopped. `wsl --shutdown` returns it, and `autoMemoryReclaim=gradual` under

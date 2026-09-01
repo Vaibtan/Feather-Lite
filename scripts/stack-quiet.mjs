@@ -12,9 +12,26 @@
  * silently killed either would be worse than a checklist.
  *
  * Postgres and the SFU are left running — they are the stack a measurement needs, not noise.
+ *
+ * **It exits non-zero when the box is not ready** (review #19). It used to find a stray worker,
+ * print it and exit 0 — so `pnpm stack:quiet && pnpm loadtest:tier2` walked straight into the
+ * zombie-worker trap the script exists to prevent, with the checklist ticked. `--allow-worker` is
+ * the escape for the one case where a running worker is deliberate.
+ *
+ * The stray-worker check looks for **host** node processes, which since 2026-09-01 makes it a
+ * native-comparison-run check only: the measured stack runs in containers, where the worker has its
+ * own PID namespace and nothing here can see it. A containerised worker shows up under
+ * `containers up` instead.
  */
 import { execFileSync } from "node:child_process";
 import { freemem, totalmem } from "node:os";
+
+/**
+ * The one case where a running worker is not a zombie: a native comparison run, started on purpose
+ * by whoever is about to measure it. Every other time it is the failure mode this script exists
+ * for — the run looks fine and the numbers belong to a process nobody is watching.
+ */
+const allowWorker = process.argv.includes("--allow-worker");
 
 const mb = (bytes) => Math.round(bytes / 1024 / 1024);
 const run = (cmd, args) => {
@@ -42,11 +59,14 @@ const workers =
         "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object { $_.CommandLine -match 'agent\\.(ts|js)' } | ForEach-Object { \"$($_.ProcessId)  $($_.CommandLine.Substring([Math]::Max(0,$_.CommandLine.Length-70)))\" }",
       ]) ?? "")
     : (run("bash", ["-lc", "ps -eo pid,args | grep -E 'agent\\.(ts|js)' | grep -v grep"]) ?? "");
+let strayWorker = false;
 if (workers.length > 0) {
-  console.log("[quiet] voice worker process(es) still running — stop them before a control-plane run:");
+  strayWorker = !allowWorker;
+  console.log(`[quiet] voice worker process(es) still running on the host${allowWorker ? " (allowed by --allow-worker)" : ""}:`);
   for (const line of workers.split("\n")) console.log(`[quiet]   ${line.trim()}`);
+  if (strayWorker) console.log("[quiet]   Stop them, or pass --allow-worker if this one is yours and deliberate.");
 } else {
-  console.log("[quiet] no voice worker is running");
+  console.log("[quiet] no voice worker is running on the host");
 }
 
 const containers = run("docker", ["ps", "--format", "{{.Names}}"]) ?? "";
@@ -76,9 +96,22 @@ console.log(`[quiet] free memory: ${String(free)} MB of ${String(mb(totalmem()))
  * locally-computed stage 3-5x slower started with well under 3 GB free, and the 5/5 runs that
  * followed started above it.
  */
-if (free < 3000) {
+const lowMemory = free < 3000;
+if (lowMemory) {
   console.log("[quiet]   WARNING: under 3 GB free. A tier-2 fleet run needs about 2.5 GB for the worker tree");
   console.log("[quiet]   alone. Close the browser — it has been 7 GB on this box — and re-check.");
+}
+
+/**
+ * One verdict, and the exit code is it (review #19).
+ *
+ * Both findings are disqualifying, and for the same reason: a run that starts against either
+ * produces numbers that belong to something other than what is being measured. Which one failed
+ * matters more than the code, because the two have different fixes.
+ */
+if (lowMemory || strayWorker) {
+  const why = [strayWorker ? "a stray voice worker" : null, lowMemory ? "not enough free memory" : null].filter(Boolean).join(" and ");
+  console.log(`[quiet] NOT quiet enough to measure on: ${why}.`);
   process.exitCode = 1;
 } else {
   console.log("[quiet] the box is quiet enough to measure on.");
