@@ -70,7 +70,32 @@ if (workers.length > 0) {
 }
 
 const containers = run("docker", ["ps", "--format", "{{.Names}}"]) ?? "";
-console.log(`[quiet] containers up: ${containers.split("\n").filter(Boolean).join(", ") || "(none)"}`);
+const containerNames = containers.split("\n").map((n) => n.trim()).filter(Boolean);
+console.log(`[quiet] containers up: ${containerNames.join(", ") || "(none)"}`);
+
+/**
+ * How much memory the **worker tree** can still get, which since 2026-09-01 is usually not a
+ * question about Windows.
+ *
+ * The verdict below has always been about one thing: can a fleet run's worker tree have the ~2.5 GB
+ * it needs. On the host that was `freemem()`. In containers it is not: on Windows the containers
+ * live in the WSL VM, and memory the VM has taken looks **used** to Windows even when the VM itself
+ * has it free — `vmmemWSL` at 6.5 GB with 1.1 GB actually in use is the ordinary case, not a
+ * pathology. Reading `freemem()` there and refusing the run is the same shape of error the
+ * stray-worker check had: a host-side instrument answering a question that has moved into a
+ * container.
+ *
+ * So the rule keeps its meaning and changes its subject: it is applied to whichever side the worker
+ * tree will actually live on. Both figures are printed either way, because the borrower harness
+ * still runs on the host and a host with nothing left is still a bad place to measure from.
+ */
+const vmAvailableMb = (() => {
+  const probe = containerNames[0];
+  if (probe === undefined) return null;
+  const meminfo = run("docker", ["exec", probe, "cat", "/proc/meminfo"]);
+  const m = meminfo === null ? null : /MemAvailable:\s+(\d+) kB/.exec(meminfo);
+  return m === null ? null : Math.round(Number(m[1]) / 1024);
+})();
 
 /**
  * WSL does not return memory to Windows unless `.wslconfig` asks it to, so `vmmemWSL` can sit on
@@ -81,7 +106,10 @@ if (process.platform === "win32") {
   const vmmem = Number(run("powershell", ["-NoProfile", "-Command", "[int]((Get-Process vmmemWSL -EA SilentlyContinue | Select-Object -First 1).WorkingSet64 / 1MB)"]) ?? 0);
   if (vmmem > 0) {
     console.log(`[quiet] vmmemWSL working set: ${String(vmmem)} MB`);
-    if (vmmem > 3000) {
+    // Only when nothing is running in it. With the containers up this number is *supposed* to be
+    // large — it is the memory the worker tree is using — and warning about it there would send
+    // someone to `wsl --shutdown` to fix the stack they are about to measure.
+    if (vmmem > 3000 && containerNames.length === 0) {
       console.log("[quiet]   WARNING: over 3 GB with the stack stopped. `wsl --shutdown` returns it,");
       console.log("[quiet]   and `autoMemoryReclaim=gradual` under [experimental] in %USERPROFILE%\\.wslconfig");
       console.log("[quiet]   stops it building up. Both are yours to run; this script will not.");
@@ -90,16 +118,20 @@ if (process.platform === "win32") {
 }
 
 const free = mb(freemem());
-console.log(`[quiet] free memory: ${String(free)} MB of ${String(mb(totalmem()))} MB`);
+console.log(`[quiet] free memory (host): ${String(free)} MB of ${String(mb(totalmem()))} MB`);
+if (vmAvailableMb !== null) console.log(`[quiet] free memory (container VM, where the worker tree lives): ${String(vmAvailableMb)} MB`);
+
 /**
  * The threshold is from measurement, not taste: the N=5 fleet run that came back 3/5 with every
  * locally-computed stage 3-5x slower started with well under 3 GB free, and the 5/5 runs that
- * followed started above it.
+ * followed started above it. It is 2.5 GB for the worker tree plus room to breathe.
  */
-const lowMemory = free < 3000;
+const judged = vmAvailableMb ?? free;
+const lowMemory = judged < 3000;
 if (lowMemory) {
-  console.log("[quiet]   WARNING: under 3 GB free. A tier-2 fleet run needs about 2.5 GB for the worker tree");
-  console.log("[quiet]   alone. Close the browser — it has been 7 GB on this box — and re-check.");
+  console.log(`[quiet]   WARNING: under 3 GB available ${vmAvailableMb === null ? "on the host" : "in the container VM"}. A tier-2 fleet run needs`);
+  console.log("[quiet]   about 2.5 GB for the worker tree alone. Close the browser — it has been 7 GB on this");
+  console.log("[quiet]   box — and re-check.");
 }
 
 /**
@@ -110,7 +142,7 @@ if (lowMemory) {
  * matters more than the code, because the two have different fixes.
  */
 if (lowMemory || strayWorker) {
-  const why = [strayWorker ? "a stray voice worker" : null, lowMemory ? "not enough free memory" : null].filter(Boolean).join(" and ");
+  const why = [strayWorker ? "a stray voice worker" : null, lowMemory ? `not enough free memory ${vmAvailableMb === null ? "on the host" : "in the container VM"}` : null].filter(Boolean).join(" and ");
   console.log(`[quiet] NOT quiet enough to measure on: ${why}.`);
   process.exitCode = 1;
 } else {
