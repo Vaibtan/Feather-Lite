@@ -149,6 +149,80 @@ so a plain counter briefly counted one job twice. Over-counting refuses early ra
 was never dangerous, but the ceiling is claimed to be exact, so `admitting` became a set of job ids
 and `in_flight` a union.
 
+### W11 — the native VAD was implemented, measured, and reverted
+
+`inference.VAD` was to replace `silero.VAD.load()`: the same Silero model, in the same napi addon
+the end-of-turn detector already lives in, taking `onnxruntime-node` — 513 MB of prebuilt binaries,
+336 MB of it a CUDA provider nothing here can use — out of the tree along with the Dockerfile's
+hand-prune. On CPU per second of audio it is the win the efficiency spec recorded: 0.69 ms against
+Silero-ONNX's 4.4-6.3.
+
+**The swap works and the fleet run failed 0/5.** Every call: `NO_ANSWER`, zero turns of fifteen
+attempted, WER 1.000. The worker log says why, once per job process:
+
+```
+job process exceeded  memoryUsageMB 1907.3  memoryLimitMB 800  baselineMemoryMB 160.3  growthMemoryMB 1747
+```
+
+Job processes were killed by the per-job memory limit W7 set, mid-call, on every call. `worker-job`
+peaked at **6 524 MB across 9 pids** as the pool recycled the corpses.
+
+**The VAD itself is fine.** Fed a cached borrower line off the SFU entirely, `inference.VAD` detects
+speech correctly and its silence window behaves: at the native default of 250 ms it reports two
+utterances, at the plugin's 550 ms it merges them into one. That is the detector doing its job.
+
+**What fails is where the model runs.** `pnpm --filter @feather-lite/voice-worker vad-cost`, on a
+bare process:
+
+| | RSS |
+|---|---:|
+| node baseline | 44 MB |
+| after loading `@livekit/local-inference` | 385 MB |
+| after `createVad()` | 388 MB |
+| after 1 predict | **517 MB** |
+| after 551 predicts | 517 MB |
+| after a second detector | 517 MB |
+| after `global.gc()` | 517 MB |
+
+~450 MB of native memory, once per process, flat across detectors and predicts, and not reclaimable
+— none of it is JS heap. Under `tsx` the same total arrives in one step at load instead of split
+across load and first predict; where it is attributed varies, the size does not.
+
+**So W11's premise is the thing that is wrong, and only the measurement shows it.** "The same addon
+the EOU model already lives in" is true, and it is why the swap looked free — but the EOU model runs
+in the **shared inference process**, once for the whole worker (it is the 914 MB `worker-inference`
+row in the idle tree). `inference.VAD` runs its predicts wherever the stream is opened, and that is
+the **job process**: one per concurrent call. The swap does not move a cost that is already paid; it
+buys a second copy of it, times `WORKER_MAX_JOBS`.
+
+The arithmetic, against the sizing the same phase just made honest:
+
+| | with the plugin | with `inference.VAD` |
+|---|---:|---:|
+| job process, idle | ~160 MB | ~160 MB (the addon loads on first predict) |
+| job process, on a call | ~500 MB | ~950 MB+ (measured 900-1 900) |
+| per-job limit (W7) | 800 MB | **exceeded on every call** |
+| 4 concurrent calls | ~2.4 GB | ~4.2 GB |
+| compose `mem_limit` | 3 GB | would need ~5 GB for four |
+
+Raising the per-job limit does not rescue it: the compose worker is sized at 3 GB for four calls, and
+four job processes at 950 MB is past that before the main and inference processes are counted.
+
+**Reverted, and the revert recorded** — the ground rule is that a change failing a gate is reverted
+and the revert written down, and this one failed the equivalence gate outright (0/5) and the WER
+gate (1.000 against 0.20). The reverted tree was re-run and is green: 2/2 equivalent, agent hung up
+on both, `worker-job` peak 1 158 MB for two concurrent calls.
+
+What survives: `vad-cost.ts` is committed so the number can be retaken on another platform, and the
+Phase 0 change that moved the plugin's import into `prewarm` stays — the main process still has no
+reason to load a plugin only `prewarm` uses.
+
+**This does not close W11 on other hardware.** Everything above is win32-x64 with
+`@livekit/local-inference` 0.2.6. A Linux build may allocate differently, and the deployment target
+is Linux; the probe is committed so that is one command to find out rather than a fleet run to
+discover. What it does close is "W11 is a free win because the addon is already loaded" — on this
+box that is measurably false, and the direction of the error is the whole budget.
+
 ### Tier 2 — N=5, real calls, on the corrected tree
 
 `2026-09-01-tier2-n5.json`. `WORKER_MAX_JOBS=8`, four warm slots, borrowers in a forked child.

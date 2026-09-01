@@ -17,7 +17,8 @@
     "fake-borrower": "tsx src/tracer/fake-borrower.ts",
     "fake-borrower-fleet": "tsx src/tracer/fake-borrower-fleet.ts",
     "chaos-orphan": "tsx src/tracer/chaos-orphan.ts",
-    "shed-probe": "tsx src/tracer/shed-probe.ts"
+    "shed-probe": "tsx src/tracer/shed-probe.ts",
+    "vad-cost": "tsx src/tracer/vad-cost.ts"
   },
   "dependencies": {
     "@effect/platform": "^0.97.1",
