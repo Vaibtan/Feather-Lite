@@ -106,6 +106,151 @@ CPU-seconds per turn is 9 %.
   differently from the one being described.
 - **`JUDGE_ENABLED=false`.** A C=50 run would otherwise enqueue fifty reasoning-model calls.
 
+## 2026-09-01 — the N=10 acceptance run, and the first SLO verdict that means anything
+
+The efficiency spec's acceptance bar (its Phase 9), due since Q8 said it runs after Phase 0 + W11
+rather than after Phase 4. Run on the corrected instruments and the containerised stack.
+
+**It does not pass.** Three of the four gates are met and the fourth — the SLO verdict — reads
+`breach`. That is the first time it has been able to read anything: 30 turns against
+`SLO_MIN_SAMPLE` 20, where every previous run had 15 and the honest answer was `insufficient`.
+
+Box: quiet (browser closed, `pnpm stack:quiet` green), Langfuse down, `JUDGE_ENABLED=false`,
+`TURN_DECIDER=openai`, `RATE_LIMIT_BYPASS_TOKEN` on both sides, `aura-2-orion-en`,
+`LIVEKIT_NODE_IP=192.168.1.4`. Everything in containers except the borrower harness.
+`2026-09-01-tier2-n10.json`.
+
+### The first attempt, and why a ceiling of ten does not serve ten
+
+The run was configured `WORKER_MAX_JOBS=10` — the spec's own figure — and came back **8/10 with
+the WER gate breached**. Diagnosed before anything was changed:
+
+| evidence | reading |
+|---|---|
+| worker log: **9 `job started` lines for 10 calls**, and no refusal | the tenth call never reached the worker |
+| call07 ledger: `FAILED / NEVER_SERVED`, zero turns, `CALL_CONTROL HANGUP reason NEVER_SERVED` | the sweeper finalized a call no worker ever claimed |
+| `loadFunc` = `activeJobs / WORKER_MAX_JOBS`, SFU stops at `load >= WORKER_LOAD_THRESHOLD` (0.75) | nine active calls report 0.9, and the SFU stops assigning |
+
+`WORKER_MAX_JOBS` is the **denominator of the load the worker reports**, not the concurrency the
+SFU will hand over. `agent.ts` says so beside the constant — "the admitted concurrency is
+`floor(MAX_JOBS * THRESHOLD)` — 6 at the defaults, not 8 … reaching [ten] means raising
+`WORKER_MAX_JOBS`" — and the acceptance run walked into it anyway. Only the 2.5 s staleness in the
+reported load let the ninth call through at all.
+
+Two things worth keeping from a run that was thrown away:
+
+- **The shed path is correct.** A call the SFU would not assign finalized `NEVER_SERVED` with zero
+  turns, not a hang, and the borrower is not blocked. That is the behaviour the spec asked to see
+  if a refusal occurred, observed rather than assumed.
+- **The per-call memory term is exact.** 2 917 MB peak with nine concurrent calls on a 755 MB idle
+  tree is `(2917 - 755) / 9 = 240 MB` a call — the figure `docker-compose.yml` has carried since
+  W11, confirmed at N=9 rather than extrapolated from N=5.
+
+The WER "breach" was an artefact: the harness scored the never-served call's three lines at 1.000,
+because a call nobody answered has no transcript. Worth knowing before reading a WER gate on any
+run where a call is shed.
+
+Re-run at `WORKER_MAX_JOBS=14` (14 × 0.75 = 10.5, so ten are assigned and an eleventh would be
+shed) with `mem_limit` at 5 GB to cover the ceiling rather than the bar.
+
+### N=10, ten calls, all served
+
+| | 2026-09-01 N=5 | **2026-09-01 N=10** |
+|---|---:|---:|
+| calls served | 5/5 | **10/10** |
+| agent hung up | 5/5 | **10/10** |
+| equivalence | 5/5 | **10/10 green** |
+| STT WER p50 / p95 | 0.000 / 0.000 | **0.000 / 0.000** (gate 0.20) |
+| worst line | 0.000 | 0.111 (the barge-in, structural) |
+| silent playouts | 0 of 15 | **0 of 30** |
+| turn latency p50 / p95 (harness) | 3 115 / 4 501 ms | **2 961 / 3 495 ms** |
+| TTS TTFB p50 / p95 | 391 / 417 ms | 385 / 406 ms |
+| worker container peak | 2 018–2 095 MB | 3 144 MB |
+| CPU-seconds per call-minute | 6.74–6.85 | 4.51 |
+
+Ten concurrent calls, every one served, every one equivalent to the simulation scenario, and the
+median turn **faster** than at N=5. The 2026-08-21 finding — that N=10 was this laptop's CPU
+ceiling natively, 10/10 then 9/10 — does not reproduce on the container stack with the native VAD.
+That was the prior this run existed to test, and the answer is that it no longer holds.
+
+### The waterfall, and the gate that fails
+
+`/api/system/latency?calls=10`, the same 30 turns:
+
+| stage | p50 | p95 | target | vs N=5 p95 |
+|---|---:|---:|---:|---|
+| `eou_delay_ms` | 578 | 647 | 700 | 582 → 647 |
+| `transcription_delay_ms` | 522 | **645** | 600 | 555 → 645 **breach** |
+| `ttft_ms` | 975 | 1 489 | 1 500 | 2 321 → 1 489 |
+| `tts_ttfb_ms` | 385 | 406 | 600 | 417 → 406 |
+| `total_ms` | **2 440** | **2 933** | 2 500 | 3 696 → 2 933 **breach** |
+
+**`total_ms` p50 is 2 440 against N=5's 2 441.** Doubling the concurrency did not move the median
+turn by a millisecond. What moved is the tail, and it moved *down*: `ttft_ms` p95 went 2 321 → 1 489
+because OpenAI's tail happened to be calmer, which ADR 0008 already records as a thing that varies
+0.8–4.6 s on identical prompts and is not ours to control.
+
+`/api/system/quality?calls=10`, the verdict:
+
+```
+verdict: "breach", pass: false, calls_found: 10, min_sample: 20
+  total_ms                target 2500  p95 2933  n 30  breach
+  eou_delay_ms            target  700  p95  647  n 30  pass
+  transcription_delay_ms  target  600  p95  645  n 30  breach
+  ttft_ms                 target 1500  p95 1489  n 30  pass
+  tts_ttfb_ms             target  600  p95  406  n 30  pass
+```
+
+**This is not a regression.** `total_ms` p95 has been over 2 500 on every run ever recorded here —
+the 2026-09-01 N=5 read 3 696 against the same target — and the verdict could not say so, because
+15 turns is below the minimum sample and `insufficient` is the honest answer at that size. Phase 0
+made the verdict tri-state and this run is the first with enough turns for it to be `pass` or
+`breach` at all. It is `breach`, and it always was; the instrument just could not reach it.
+
+`transcription_delay_ms` is the one thing that genuinely degraded with load: 555 → 645 ms p95,
+from 448 → 522 at p50. That is Deepgram's finalisation under ten concurrent streams rather than
+five, and it is a 45 ms overshoot of a 600 ms target.
+
+`latency.slo_pass` per call reads **0.7** — seven of ten calls had no turn over any component's
+target.
+
+### The four gates
+
+| gate | result |
+|---|---|
+| voice/sim equivalence | **10/10 pass** (`harness.equivalence_pass` 1.0) |
+| WER ≤ 0.20 | **pass** — p95 0.000, worst line 0.111 |
+| SLO verdict, voice + openai | **breach** — `total_ms` and `transcription_delay_ms` |
+| compliance scores | **pass** — `mini_miranda_first`, `no_promise_without_readback`, `no_protected_before_rpc` all 1.0 over 10 calls |
+
+Plus: zero silent playouts in 30 turns, no refusals, and the funnel reads 10 attempts → 10
+connected → 10 right-party → 10 promises.
+
+### Resources
+
+```
+container feather-lite-worker    idle  739 MB, peak 3144 MB, cpu peak 381.2% mean 67.3%, 145.3 CPU s
+container feather-lite-server    idle  163 MB, peak  473 MB, cpu peak 169.5% mean 88.3%, 185.1 CPU s
+container feather-lite-postgres  idle  276 MB, peak  301 MB, cpu peak 141.7% mean 91.7%, 187.7 CPU s
+container feather-lite-livekit   idle   27 MB, peak   77 MB, cpu peak  22.4% mean  5.7%,  13.6 CPU s
+per-core (containers: feather-lite-worker)  MB/call 240.5 rss, CPU s/call-min 4.51
+```
+
+3 144 MB peak against the 5 GB cap and against the 4 453 MB the ceiling of fourteen is sized for.
+The worker is **not** the constraint at N=10 — `feather-lite-server` and `feather-lite-postgres`
+each ran hotter on average (88 % and 92 % of a core) than the worker did (67 %), which is the
+opposite of the shape at N=5 and the first thing to look at if N=20 is ever asked for.
+
+### What this run says to do next
+
+- The acceptance bar is **not met**, on latency alone, and the miss is a standing one rather than
+  anything this session changed. Nothing was reverted, because nothing regressed.
+- `total_ms` is a sum, and at N=10 no single stage owns it: 578 + 522 + 975 + 385 = 2 460 at p50
+  against a 2 500 target. Meeting it means taking time out of two stages, not one — which is what
+  issue #1's D2 fast path (a rules turn that skips `ttft_ms` entirely) and D5's knobs are for.
+- `transcription_delay_ms` under concurrency is a new, specific finding and belongs in D5's A/B
+  list rather than being absorbed.
+
 ## 2026-09-01 — Phase 0, the instruments straightened
 
 Eleven fixes from `docs/reviews/2026-08-30-efficiency-spec-phases-0-6-review.md`, and then every
