@@ -1,6 +1,6 @@
 # ADR 0010 — Patch the worker, shed load at the worker, and measure before cutting
 
-- Status: accepted (2026-08-28)
+- Status: accepted (2026-08-28); Decision 8 added 2026-09-01 (Phase C1)
 - Amends: [ADR 0005](0005-typescript-effect-not-go.md) (language), and settles the language question
   the user reopened on 2026-08-27
 - Related: [ADR 0006](0006-self-hosted-livekit-for-local-dev.md),
@@ -8,7 +8,9 @@
   [ADR 0009](0009-scores-in-postgres-a-binary-judge-and-the-honesty-line.md);
   spec `docs/plans/2026-08-27-efficiency-and-observability-hardening-spec.md`,
   audit `docs/plans/2026-08-27-efficiency-audit-findings.md`,
-  numbers `docs/loadtest/README.md` (2026-08-28)
+  numbers `docs/loadtest/README.md` (2026-08-28, and 2026-09-01 for Decision 8's context),
+  review `docs/reviews/2026-08-30-efficiency-spec-phases-0-6-review.md` and the spec that closes it,
+  `docs/plans/2026-09-01-handoff-review-cleanup-and-resume-spec.md`
 
 ## Context
 
@@ -189,6 +191,45 @@ different memory shape (sessions as threads, ≈ 0.5 GB for the whole worker; no
 per-job memory limit, GIL exposure). It is triggered only by an N=10 acceptance failing on a *memory*
 ceiling, which has not happened, and the worker is 698 lines behind an HTTP/SSE contract that the
 equivalence harness validates for any implementation.
+
+## Decision 8 — the 2026-08-30 review's ledger, closed: built or recorded, never neither
+
+The review in `docs/reviews/2026-08-30-efficiency-spec-phases-0-6-review.md` found twenty-five
+defects and, separately, thirteen spec items that were **neither built nor recorded** — which is the
+state this ADR's Decision 6 exists to make impossible. Phase 0 fixed eleven of the defects and built
+O9; Phase C1 (2026-09-01) fixed five more and built the CI image job. Everything below is the
+remainder, and it is recorded here rather than left implicit. The user's decision on 2026-09-01 was
+explicit: of the ten deferred §3 items, **build the CI image job and record the rest**.
+
+Recorded is not the same as rejected. Decision 6's rule holds — a thing is measured before it is
+cut — and each line below says what would have to be true for it to be worth doing.
+
+### §3 items, not built
+
+| Item | Why not now |
+|---|---|
+| **Incremental replay** (D5, review #8) | The largest remaining D5 item and the only one with a real cost: T2 re-reads the whole ledger and `executeTool` replays a third time, so per-turn database work is O(events) twice, and "no growth with call length" is still false. Not built because the calls it would help are longer than any call this system has taken — a collections call is three to six turns — and the fold-equals-replay property test it needs is a larger piece of work than the saving. **Trigger: a call length where `total_ms` grows with turn index.** |
+| **Memoise `toolSpecsFor`** (D5, C4) | `prompts.ts` builds a JSON schema per tool per turn. It has never appeared in a CPU profile: the profile that settled `listEventsUnchecked` put *all* Effect schema work at ~2.4 % of busy time with no hot spot. Trigger: a profile where it does appear. |
+| **`--max-semi-space-size` A/B** (D5) | GC is 6.2 % of the profile, which is the least suspicious number in it. Trigger: a soak whose RSS slope survives the retention fix (review #16, Phase C1). |
+| **Prepared-statement experiment** (D5, C8) | The spec said "record the answer either way", so this line is that record: it was not run. The statement count per turn came down 43.6 → 31.7 by removing round trips, which is the same axis a prepared statement moves and the cheaper end of it. Trigger: a `pg_stat_statements` ranking where parse time is visible. |
+| **SSE encode / delta coalescing** (D5, C6) | `handlers.ts` still `Schema.encodeSync`s every frame. At three to six turns a call and one client per call the volume is nothing; the number that would justify it is a fleet where the server's CPU is the ceiling, and at N=5 it is not. Trigger: the N=10 run implicating the server rather than the worker. |
+| **HOT ratio and `n_dead_tup` in the load report** (D5b) | Migration 0005's core claim (`n_tup_hot_upd / n_tup_upd > 0.9`) is still unverified. Phase 0 added the report line the review asked for; the *reading* it produces has not been taken on a run large enough to mean anything. Trigger: the N=10 acceptance run, where it should be read and written down. |
+| **bytes/turn and bytes/call in the loadtest README** (D5b) | Same shape: the numbers are obtainable and nobody has needed them. Trigger: a storage question, or a Langfuse retention decision that needs a volume. |
+| **`pg_stat_user_indexes.idx_scan` check** (D5b) | Never run. Two indexes were added on evidence (migration 0006) and none has been checked for disuse since. Trigger: any further index, or a table whose write cost is being investigated. |
+| **Langfuse retention / ClickHouse TTL, and the Redis `maxmemory`** (D6, review #20) | No retention settings, no TTL, and Redis runs `noeviction` with no `--maxmemory` under a 64 MB cgroup — so it grows past the limit, is OOM-killed, and `restart: always` loops. Not built because the Langfuse stack is a **local development instance** that is stopped before every measurement (`pnpm lf:down`), so the failure costs a restart and no data anyone relies on. **This is the one recorded item that becomes urgent the moment Langfuse is not local**, and it should be the first thing done if it is ever run continuously. |
+| **`/readyz` Langfuse-flush check, worker heartbeat RSS of the inference and job processes** (D3) | The heartbeat half is already justified in a comment: the framework does not expose the pids of the inference or job processes, so the tree-wide figures are the resource sampler's job and guessing at them in the worker would be worse than not having them. The `/readyz` half would make readiness depend on an optional exporter, which is the wrong direction for a liveness signal. |
+| **The W1 upstream issue** (`patches/README.md`) | Still not filed. All three `@livekit/agents` patches are worth one issue between them, with the memory table attached. Not a blocker for anything here; it is a debt to the ecosystem rather than to this repo. |
+
+### Review defects, not fixed
+
+| # | Why not now |
+|---|---|
+| **#14** — the outbox's "jobs belong to different conversations" comment is false; `enqueuePostCall` inserts a conversation's whole set with one `available_at`, so siblings run concurrently against a ledger snapshot taken before the transaction | Benign **today** only because no reducer reads `OUTBOX_PROCESSED`. That is an invariant nothing states or tests, which is exactly the kind of thing this ADR is for. Recorded rather than fixed because the fix (claim per conversation) changes the work-conserving claim that took the drain from 283 jobs in 74 s to 103 in 4 s. **Trigger: the first post-call job that writes an event another post-call job reads.** |
+| **#21** — `initializeProcessTimeout` is still 60 s; W3 said reduce it toward 10 s once cold start shrank | This is the record W3 asked for. Cold start is 1 834 ms bundled, so 60 s is twenty times the headroom needed — but the timeout only costs anything when a job process is already failing, and a shorter one turns a slow prewarm on a loaded box into a killed slot. Trigger: a run where a job process hangs in `initialize` and 60 s of a borrower's call is spent waiting. |
+| **#22** — the sweeper books a worker that claims and crashes inside its first 10 s heartbeat window as `NEVER_SERVED` | It uses the heartbeat, not the claim, as the "was served" signal, so a genuine orphan is excluded from `orphan_detect_ms`. The window is ten seconds wide and the effect is to *under*-report a latency, not to lose a call. Trigger: an orphan-detection number that has to be exact. |
+| **#23** — the 20 ms event-loop sampling floor is subtracted from `max` as well as from the quantiles, under a raw-lateness series name | A scraper comparing with `nodejs_eventloop_lag_max_seconds` sees a systematically low maximum. Nothing scrapes it that way yet; the fix is either "subtract from quantiles only" or "rename the series as adjusted", and the choice belongs with whoever builds the dashboard. |
+| **#24** — the resource sampler takes `idle` from `series[0]` before the pool is warm, keys CPU by pid without start time, and reports `mb_per_call` in MB against a heartbeat in MiB | Three small biases in the same direction — they flatter `mb_per_call` and `calls_per_vcpu`. The pid-recycling half is a **win32 problem**, and the measured stack is containers now, which is where the sampler reads `cpu.stat` per container instead. Trigger: a per-core budget quoted to more precision than it deserves; the unit mismatch should be fixed the next time that file is opened. |
+| **#25** — stale comments and docs | **Partly done.** Phase C1 corrected the ones next to the code it changed (`stack:quiet`'s README line) and Phase C2 corrects `shed-probe.ts`, `scripts/bundle.mjs`, PROGRESS row 12 and the README's measured-run section. What remains is the smaller set the review lists — `handlers.ts:145`, `main.ts:88`, `Outbox.ts:320-326` (which is #14's comment, and goes with it), `pnpm-workspace.yaml:17` — each to be corrected in the commit that next touches that code, which is the review's own rule. |
 
 ## Consequences
 
