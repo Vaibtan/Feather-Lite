@@ -6,7 +6,7 @@
  * T1 failures (NotFound / ConversationCompleted / TurnInProgress) surface as Effect errors
  * BEFORE any frame is streamed, so the API can answer 404/409 with a normal body.
  */
-import { Cause, Chunk, Deferred, Effect, Queue, Stream } from "effect";
+import { Cause, Chunk, Clock, Deferred, Duration, Effect, Queue, Schedule, Stream } from "effect";
 import type { TurnFrame } from "@feather-lite/contracts";
 import { ConversationCompleted, NotFound, TurnInProgress } from "../errors.js";
 import { Orchestrator, type TurnParams } from "../services/Orchestrator.js";
@@ -18,6 +18,8 @@ interface LiveTurn {
   frames: TurnFrame[];
   readonly subscribers: Set<Queue.Queue<TurnFrame | typeof END>>;
   done: boolean;
+  /** When the turn was claimed. The only bound on an entry whose fiber never finishes (review #16). */
+  readonly startedAt: number;
   finishedAt: number | null;
 }
 
@@ -33,6 +35,33 @@ const END = Symbol.for("feather-lite/turn-end");
  * than a minute can afford one.
  */
 const RETENTION_MS = Math.max(1, Number(process.env["TURN_RETENTION_SECONDS"] ?? 60)) * 1000;
+
+/**
+ * The bound on an entry whose fiber never finishes (review #16).
+ *
+ * `finishedAt` is stamped by `finish`, so a turn that never reaches it has no expiry at all: a
+ * wedged decider stream held its deltas for the life of the process, and the soak's RSS slope could
+ * not tell that from real growth. Five minutes is far past any turn this system produces — the
+ * whole waterfall is under four seconds at p95, and the orphan sweeper gives up on a *call* in
+ * forty — so nothing legitimate is evicted, and what is evicted was never going to finish.
+ *
+ * Eviction is from the index only. The fiber keeps its reference and its subscribers keep theirs,
+ * so a turn dropped here still streams to whoever is already attached; what it loses is the ability
+ * to be re-attached to by turn id, which is an optimisation (see `RETENTION_MS`) and not
+ * correctness — T1 replays a recorded turn from the ledger.
+ */
+const MAX_LIFETIME_MS = Math.max(1, Number(process.env["TURN_MAX_LIFETIME_SECONDS"] ?? 300)) * 1000;
+
+/**
+ * How often the map is swept.
+ *
+ * Ten seconds is a tenth of the shortest thing being expired and costs one walk of a map that holds
+ * at most a minute of turns. The number that matters is not the interval but that a sweep happens
+ * **at all when nothing is running** — which is the defect: expiry used to be driven from `run()`,
+ * so the last turns of a run were retained until the next run, and `feather_lite_live_turns` never
+ * came back to zero on an idle process.
+ */
+const SWEEP_INTERVAL = Duration.seconds(10);
 
 const startError = (cause: Cause.Cause<unknown>): StartError | null => {
   for (const f of Chunk.toReadonlyArray(Cause.failures(cause))) {
@@ -52,7 +81,7 @@ export let liveTurnCount: () => number = () => 0;
 export let subscriberCount: () => number = () => 0;
 
 export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/TurnRunner", {
-  effect: Effect.gen(function* () {
+  scoped: Effect.gen(function* () {
     const orch = yield* Orchestrator;
     const live = new Map<string, LiveTurn>();
     // Published for the process gauges (D3). C1 in the audit is that this map retains every turn
@@ -78,30 +107,43 @@ export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/Turn
       });
 
     /**
-     * Expire finished turns, at most once a second (C1).
+     * Expire what the map is no longer keeping for anyone (C1, review #16).
      *
-     * This used to run on **every** `run()`, walking the whole map to start one turn — O(n) per
-     * turn, O(n²) over a burst, and the map holds five minutes of them. A one-second guard makes
-     * the walk periodic without a fibre to own and tear down: the cost of being a second late to
-     * free a turn is a second of memory, and the cost of the alternative is a lifecycle.
+     * Two rules, because there are two ways an entry stops being worth holding. A **finished** turn
+     * is held for `RETENTION_MS` so a reconnect re-attaches instead of asking the database. A turn
+     * that never finished has no such moment, so it is held no longer than `MAX_LIFETIME_MS` from
+     * when it was claimed — otherwise a wedged decider stream keeps its deltas for the life of the
+     * process, which is exactly what the soak measured and could not attribute.
      */
-    let lastGcAt = 0;
-    const gc = () => {
-      const now = Date.now();
-      if (now - lastGcAt < 1000) return;
-      lastGcAt = now;
-      for (const [k, t] of live) if (t.done && t.finishedAt !== null && now - t.finishedAt > RETENTION_MS) live.delete(k);
+    const gc = (now: number) => {
+      for (const [k, t] of live) {
+        const expired = t.done && t.finishedAt !== null ? now - t.finishedAt > RETENTION_MS : now - t.startedAt > MAX_LIFETIME_MS;
+        if (expired) live.delete(k);
+      }
     };
+
+    /**
+     * And it runs on its own fibre, scoped to the service (review #16).
+     *
+     * It used to run from `run()`, throttled to once a second — which meant the map was only ever
+     * swept while turns were arriving. **At idle nothing swept at all**, so the last turns of a
+     * fleet run stayed until the next run began, `feather_lite_live_turns` never returned to zero,
+     * and the one gauge that would show a retention leak showed a plateau instead.
+     *
+     * `forkScoped`, not `forkDaemon`: the fibre belongs to the layer that built this service, so a
+     * test or a shutdown that closes the scope takes the sweeper with it rather than leaving it
+     * running against a map nobody reads.
+     */
+    yield* Effect.forkScoped(Clock.currentTimeMillis.pipe(Effect.map(gc), Effect.repeat(Schedule.spaced(SWEEP_INTERVAL))));
 
     /** Start (or attach to) a turn. Fails with the T1 error if the turn cannot start. */
     const run = (params: TurnParams): Effect.Effect<Stream.Stream<TurnFrame>, StartError> =>
       Effect.gen(function* () {
-        gc();
         const key = keyOf(params);
         const existing = live.get(key);
         if (existing) return yield* subscribe(existing);
 
-        const turn: LiveTurn = { frames: [], subscribers: new Set(), done: false, finishedAt: null };
+        const turn: LiveTurn = { frames: [], subscribers: new Set(), done: false, startedAt: yield* Clock.currentTimeMillis, finishedAt: null };
         live.set(key, turn);
         const started = yield* Deferred.make<void, StartError>();
 
@@ -119,7 +161,7 @@ export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/Turn
               yield* broadcast(turn, extra);
             }
             turn.done = true;
-            turn.finishedAt = Date.now();
+            turn.finishedAt = yield* Clock.currentTimeMillis;
             /**
              * Deltas are dropped the moment the turn is over (C1).
              *
