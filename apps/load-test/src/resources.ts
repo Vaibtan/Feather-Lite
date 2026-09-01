@@ -145,8 +145,20 @@ export interface ContainerResources {
   readonly name: string;
   readonly samples: number;
   readonly peak_mem_bytes: number;
+  readonly idle_mem_bytes: number;
   readonly peak_cpu_percent: number;
   readonly mean_cpu_percent: number;
+  /**
+   * CPU actually consumed, from the container's own cgroup accounting rather than integrated from
+   * `docker stats`' percentages.
+   *
+   * `docker stats` reports an instantaneous rate; summing rates across a 5 s poll is an estimate,
+   * and every per-unit-of-work figure in this file divides by work done precisely so it is not an
+   * estimate. `/sys/fs/cgroup/cpu.stat`'s `usage_usec` is a monotonic counter, so last minus first
+   * is exact for the window. Null when the container could not be read (a cgroup v1 host, or a
+   * container that was not running).
+   */
+  readonly cpu_seconds: number | null;
 }
 
 export interface ResourceReport {
@@ -241,7 +253,21 @@ export interface ResourceSamplerOptions {
   readonly log?: (message: string) => void;
 }
 
-const DEFAULT_CONTAINERS = ["feather-lite-livekit", "feather-lite-postgres"] as const;
+/**
+ * Every container the stack can run, because a containerised run has no host processes to measure.
+ *
+ * The two application containers were absent until 2026-09-01, which was harmless while the server
+ * and worker ran natively and fatal the moment they did not: a `--profile app` run reported
+ * `cores used n/a` and no worker memory at all, and the per-core budget — the whole point of D1 —
+ * was silently unavailable. `docker stats` ignores names that are not running, so listing all five
+ * costs nothing when only some are up.
+ */
+const DEFAULT_CONTAINERS = ["feather-lite-livekit", "feather-lite-postgres", "feather-lite-server", "feather-lite-worker"] as const;
+
+/** The containers that carry the worker tree, for the per-core budget of a containerised run. */
+export const WORKER_CONTAINERS = ["feather-lite-worker"] as const;
+/** The containers that carry the control plane. Postgres is its own row, never folded in here. */
+export const SERVER_CONTAINERS = ["feather-lite-server"] as const;
 
 /** The spec's "steady-state minute" (D1). One minute, because that is what the definition says. */
 export const STEADY_STATE_TARGET_MS = 60_000;
@@ -322,7 +348,7 @@ export const startResourceSampler = (opts: ResourceSamplerOptions = {}): Resourc
   const startedAt = Date.now();
   const freeStart = freemem();
 
-  const containerStats = new Map<string, { samples: number; peakMem: number; peakCpu: number; cpuSum: number }>();
+  const containerStats = new Map<string, { samples: number; peakMem: number; idleMem: number; peakCpu: number; cpuSum: number; firstCpuUsec: number | null; lastCpuUsec: number | null }>();
 
   let child: ChildProcess | null = null;
   let procfsTimer: NodeJS.Timeout | null = null;
@@ -405,6 +431,19 @@ export const startResourceSampler = (opts: ResourceSamplerOptions = {}): Resourc
   /* ---------------------------- containers ---------------------------- */
 
   let containerLoop: NodeJS.Timeout | null = null;
+  /**
+   * Cumulative CPU from the container's own cgroup, in microseconds.
+   *
+   * Read per poll rather than only at the ends so a container that starts or stops mid-run still
+   * yields a usable window, and so a failure to read is visible as a null rather than as a zero.
+   */
+  const readCgroupCpuUsec = async (name: string): Promise<number | null> => {
+    const out = await runCommand("docker", ["exec", name, "cat", "/sys/fs/cgroup/cpu.stat"]).catch(() => null);
+    if (out === null) return null;
+    const line = out.split("\n").find((l) => l.startsWith("usage_usec"));
+    const value = Number(line?.split(/\s+/)[1]);
+    return Number.isFinite(value) ? value : null;
+  };
   const pollContainers = async (): Promise<void> => {
     if (containers.length === 0) return;
     const out = await runCommand("docker", ["stats", "--no-stream", "--format", "{{.Name}}\t{{.MemUsage}}\t{{.CPUPerc}}", ...containers]).catch(() => null);
@@ -415,12 +454,17 @@ export const startResourceSampler = (opts: ResourceSamplerOptions = {}): Resourc
       const bytes = parseDockerBytes(mem.split("/")[0]?.trim() ?? "");
       const pct = Number.parseFloat(cpu.replace("%", ""));
       if (bytes === null || Number.isNaN(pct)) continue;
-      const prev = containerStats.get(name) ?? { samples: 0, peakMem: 0, peakCpu: 0, cpuSum: 0 };
+      const usec = await readCgroupCpuUsec(name);
+      const prev = containerStats.get(name) ?? { samples: 0, peakMem: 0, idleMem: bytes, peakCpu: 0, cpuSum: 0, firstCpuUsec: usec, lastCpuUsec: usec };
       containerStats.set(name, {
         samples: prev.samples + 1,
         peakMem: Math.max(prev.peakMem, bytes),
+        // The first reading, which for a sampler started before the load is the idle tree.
+        idleMem: prev.samples === 0 ? bytes : prev.idleMem,
         peakCpu: Math.max(prev.peakCpu, pct),
         cpuSum: prev.cpuSum + pct,
+        firstCpuUsec: prev.firstCpuUsec ?? usec,
+        lastCpuUsec: usec ?? prev.lastCpuUsec,
       });
     }
   };
@@ -529,8 +573,10 @@ export const startResourceSampler = (opts: ResourceSamplerOptions = {}): Resourc
         name,
         samples: s.samples,
         peak_mem_bytes: s.peakMem,
+        idle_mem_bytes: s.idleMem,
         peak_cpu_percent: Number(s.peakCpu.toFixed(1)),
         mean_cpu_percent: Number((s.cpuSum / Math.max(1, s.samples)).toFixed(1)),
+        cpu_seconds: s.firstCpuUsec === null || s.lastCpuUsec === null ? null : Number(((s.lastCpuUsec - s.firstCpuUsec) / 1e6).toFixed(3)),
       })),
       host: { total_mem_bytes: totalmem(), free_mem_bytes_start: freeStart, free_mem_bytes_end: freemem() },
       unclassified_pids: unclassified,
@@ -681,6 +727,16 @@ export const perCoreBudget = (
     readonly turns?: number;
     /** Total call time carried, for tier 2's CPU-seconds per call-minute. */
     readonly callMinutes?: number;
+    /**
+     * The containers carrying the same tree, used when the host roles found nothing.
+     *
+     * A `--profile app` run has no host processes to classify: the worker is a container, and every
+     * per-role figure is empty. Before this the report simply said `cores used n/a` and the per-core
+     * budget — the point of D1 — was quietly unavailable for exactly the runs the acceptance bar is
+     * defined on. The container's own cgroup accounting answers the same questions, and `basis`
+     * says which of the two a number came from so the two are never read as interchangeable.
+     */
+    readonly containers?: readonly string[];
   },
 ): PerCoreBudget => {
   // Total CPU over the whole load window: the numerator of the per-unit-of-work figures, which
@@ -700,6 +756,34 @@ export const perCoreBudget = (
   const coresUsed = report.samples === 0 || wallSeconds <= 0 || steadyCpu <= 0 ? null : Number((steadyCpu / wallSeconds).toFixed(3));
   const peak = subset ? subset.peak : sumRoles(report, input.roles, (r) => r.peak_rss_bytes);
   const idle = subset ? subset.idle : sumRoles(report, input.roles, (r) => r.idle_rss_bytes);
+
+  /**
+   * Nothing on the host answered, so ask the containers. Only when the host found nothing at all:
+   * a run with both would be measuring one tree twice.
+   */
+  const named = (input.containers ?? []).map((n) => report.containers.find((c) => c.name === n)).filter((c): c is ContainerResources => c !== undefined && c.samples > 0);
+  if (cpu <= 0 && named.length > 0) {
+    const containerCpu = named.every((c) => c.cpu_seconds !== null) ? named.reduce((a, c) => a + (c.cpu_seconds ?? 0), 0) : null;
+    const containerPeak = named.reduce((a, c) => a + c.peak_mem_bytes, 0);
+    const containerIdle = named.reduce((a, c) => a + c.idle_mem_bytes, 0);
+    const wall = report.load_wall_ms / 1000;
+    const cores = containerCpu === null || wall <= 0 ? null : Number((containerCpu / wall).toFixed(3));
+    return {
+      cores_used: cores,
+      // The container path has no steady-state window of its own; the figure spans the load.
+      cores_over_full_window: true,
+      calls_per_vcpu: cores && input.calls ? Number((input.calls / cores).toFixed(2)) : null,
+      mb_per_call: input.calls && containerPeak > containerIdle ? Number(((containerPeak - containerIdle) / 1e6 / input.calls).toFixed(1)) : null,
+      // A container reports one memory number, not RSS and private separately.
+      mb_per_call_private: null,
+      turns_per_s_per_core: cores && input.turnsPerSecond ? Number((input.turnsPerSecond / cores).toFixed(2)) : null,
+      cpu_seconds_per_turn: containerCpu !== null && input.turns ? Number((containerCpu / input.turns).toFixed(4)) : null,
+      cpu_seconds_per_call_minute: containerCpu !== null && input.callMinutes ? Number((containerCpu / input.callMinutes).toFixed(2)) : null,
+      vcpus: report.vcpus,
+      basis: `containers: ${named.map((c) => c.name).join("+")}`,
+    };
+  }
+
   return {
     cores_used: coresUsed,
     cores_over_full_window: report.steady_state.full_window,
@@ -854,7 +938,9 @@ export const formatResourceReport = (report: ResourceReport, budget?: PerCoreBud
   );
   if (report.rss_slope_mb_per_min !== null) lines.push(`    slope MB/min        rss ${report.rss_slope_mb_per_min}, private ${report.private_slope_mb_per_min ?? "n/a"}`);
   for (const c of report.containers) {
-    lines.push(`    container ${c.name.padEnd(26)} peak ${mb(c.peak_mem_bytes)} MB, cpu peak ${c.peak_cpu_percent}% mean ${c.mean_cpu_percent}%`);
+    // CPU seconds from the cgroup counter, not integrated from the percentages beside it.
+    const cpu = c.cpu_seconds === null ? "" : `, ${c.cpu_seconds.toFixed(1)} CPU s`;
+    lines.push(`    container ${c.name.padEnd(26)} idle ${mb(c.idle_mem_bytes)} MB, peak ${mb(c.peak_mem_bytes)} MB, cpu peak ${c.peak_cpu_percent}% mean ${c.mean_cpu_percent}%${cpu}`);
   }
   lines.push(`    host free MB        ${mb(report.host.free_mem_bytes_start)} at start -> ${mb(report.host.free_mem_bytes_end)} at end (of ${mb(report.host.total_mem_bytes)})`);
   if (budget) {

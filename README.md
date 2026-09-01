@@ -43,7 +43,9 @@ v1 came first and was rewritten after the review in `docs/reviews/`; it is gone 
 | **STT word error rate**, measured by the voice harness against the exact text it spoke, normalised explicitly (contractions, number words, currency, spoken digit runs) and **gated in the fleet run** (`--max-wer`, default 0.20 from measurement) | done — **harness only** | 23 normaliser table tests; measured 0.000 on all three scripted lines, worst single reading 0.111 under barge-in. A production call has no ground truth, so there is no production WER and the console says so |
 | **TTS signal**: zero-audio playouts counted (excluding turns the borrower superseded before the agent replied — those look identical and are not failures), and characters-per-second flagged as an outlier beyond ±40% of the window's own median | done — **heuristic, not a quality score** | there is no MOS model here: UTMOS/NISQA are Python-only and were left unbuilt rather than faked. These answer "did any audio come out" and "was this turn spoken at a rate unlike the rest", and nothing about how the speech sounded (ADR 0009) |
 | **Reliability**: provider error/retry/timeout counters per vendor with a last-error ring, the six failure counts ADR 0008 found, and an **orphaned-call sweeper** (worker liveness + LiveKit confirmation, ~35–40 s) | done | chaos script under `apps/voice-worker/src/tracer/`; a killed worker's call is finalized FAILED/ORPHANED and the borrower is callable again |
-| **Shippable images**: multi-stage `node:22-bookworm-slim` Dockerfiles for both services, `pnpm deploy --prod` runtime trees, non-root, health checks, and an `app` compose profile | done (amd64 run, arm64 checked not built) | server **505 MB**, worker **780 MB**; both started and verified — the server migrates and answers `/readyz`, the worker registers with the SFU and warms four job slots (1.2 GB resident before a call). arm64 promised only because all three native packages publish `linux-arm64-gnu`. A container-to-container *call* is **not** verified: the SFU advertises `--node-ip 127.0.0.1` |
+| **Shippable images**: multi-stage `node:22-bookworm-slim` Dockerfiles for both services, `pnpm deploy --prod` runtime trees, non-root, health checks, and an `app` compose profile | done (amd64 run, arm64 checked not built) | server **505 MB**, worker **724 MB**; both started and verified. arm64 promised only because the native packages publish `linux-arm64-gnu` |
+| **Calls through the containerised stack** — Postgres, SFU, server and worker all in Docker, only the borrower harness on the host | done (measured on the simulated fleet) | N=5 **twice**, 5/5 equivalence both times, WER 0.000, zero silent playouts, **6.74-6.85 CPU-seconds per call-minute**. It needed the SFU to stop advertising `127.0.0.1` (`LIVEKIT_NODE_IP`) and the resource sampler to learn about the application containers — before that a `--profile app` run reported no worker resources at all |
+| **Native VAD** (`inference.VAD`, the Silero model in the addon the EOU detector already uses) | done on Linux; **unusable on Windows** | `onnxruntime-node` and `@livekit/agents-plugin-silero` are out of the tree, the Dockerfile's 513 MB hand-prune is deleted, the worker image is 781 → **724 MB** and the idle worker tree 1 651 → **1 093 MB**. `eou_delay_ms` p95 unchanged (580 vs 582). On win32 the addon costs ~450 MB of non-reclaimable native memory **per process that predicts**, which killed every call of an N=5; on linux/x64 the same probe reads 37 MB. `pnpm --filter @feather-lite/voice-worker vad-cost` re-takes it |
 | **Process metrics**: event-loop delay, RSS/heap, GC, pg-pool depth, per-loop liveness and CPU-seconds on `/api/system/status` and on `GET /metrics` in Prometheus format; `/readyz` fails when a background loop stops ticking | done | one snapshot serves both surfaces, so they cannot disagree; the server also profiles itself on demand (`PROFILE_SECONDS`) because `node --cpu-prof` cannot be used on Windows |
 | **Trace redaction**: `TRACE_REDACT_ACCOUNT_DATA` (on by default) masks amounts, dates, delinquency counts and long digit runs in every exported span body — the turn span, the generation's prompt, the judge's transcript | done | installed on the span processor, not per call site; 19 domain + 6 boundary tests, including that latency metadata is never touched |
 | **Per-core budget, measured**: control plane **~0.015 CPU-seconds per turn** (≈ 65-100 turns/s per core); voice worker **~10-12 CPU-seconds per call-minute**, **~300 MB per call**, **3.3-3.9 calls per vCPU** at N=5 | done | `docs/loadtest/README.md`, 2026-08-28 section. Twelve vCPU laptop (Ryzen 5 5600H); N=10 acceptance not yet run |
@@ -161,8 +163,11 @@ docker compose --profile livekit --profile app up -d --build
 Both images are `node:22-bookworm-slim`, non-root, health-checked, and built from the repo root so
 the pnpm workspace is intact. `docker buildx build --platform linux/amd64,linux/arm64` works for
 both — every native package the worker needs publishes a `linux-arm64-gnu` build — though only
-amd64 has been run here. A container-to-container **call** additionally needs the SFU's advertised
-node IP to be reachable from the worker container; see the note in `docker-compose.yml`.
+amd64 has been run here. A container-to-container **call** needs the SFU's advertised node IP to be
+reachable from the worker container: set `LIVEKIT_NODE_IP` to a host address both sides can reach
+(the default `127.0.0.1` is for the browser demo and means "this container" to a containerised
+worker). With that set, calls through the containerised worker are verified — see
+`docs/loadtest/README.md`, 2026-09-01.
 
 ### Voice with no cloud account (self-hosted LiveKit)
 
@@ -241,14 +246,6 @@ console takes the API URL and bearer token from `?api=…#token=…`.
   with the observability stack down, and the worker's admitted concurrency is a configured number
   (`WORKER_MAX_JOBS`) rather than a measured one. The per-vCPU figures in the table above come from
   N=5 and say so.
-- **A call through the containerised worker.** Both images run and the worker registers with the
-  SFU, but the local SFU advertises its media address as `127.0.0.1` for the browser path, which a
-  worker in another container cannot reach. Named in `docker-compose.yml` rather than assumed away.
-- **Native VAD** (`inference.VAD`, the same addon the EOU model lives in). Measured at 0.69 ms of
-  CPU per second of audio against Silero-ONNX's 4.4-6.3, and it would take `onnxruntime-node` —
-  **513 MB of prebuilt binaries, 336 MB of which is a CUDA provider this deployment cannot use** —
-  out of the tree entirely. Not done because it changes barge-in timing, which needs the equivalence
-  and WER gates run against it.
 - **MOS-class TTS quality** (UTMOS/NISQA). Python-only; deliberately not approximated. What is
   measured instead is labelled a heuristic everywhere it appears — see ADR 0009.
 - **Production word error rate.** There is no ground truth for a live call; WER is a harness metric

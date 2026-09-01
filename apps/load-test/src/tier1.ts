@@ -34,7 +34,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { harnessBypassConfigured, harnessJsonHeaders } from "./harness-http.js";
-import { formatResourceReport, perCoreBudget, SERVER_ROLES, startResourceSampler, validateReport } from "./resources.js";
+import { formatResourceReport, perCoreBudget, SERVER_CONTAINERS, SERVER_ROLES, startResourceSampler, validateReport } from "./resources.js";
 
 /* ------------------------------- config ------------------------------- */
 
@@ -563,7 +563,8 @@ const startErrors = runs.filter((r) => r.startError).map((r) => r.startError!);
 const correct = verdicts.filter((v) => v.correct).length;
 
 const throughput = Number((okTurns.length / (wallMs / 1000)).toFixed(2));
-const budget = perCoreBudget(resources, { roles: SERVER_ROLES, turnsPerSecond: throughput, turns: okTurns.length });
+// `containers` is the fallback for a `--profile app` run, where the server is not a host process.
+const budget = perCoreBudget(resources, { roles: SERVER_ROLES, containers: SERVER_CONTAINERS, turnsPerSecond: throughput, turns: okTurns.length });
 const achievedRate = MODE === "soak" && soak.lastAt > soak.firstAt ? Number((((soak.launched - 1) * SCRIPT.length) / ((soak.lastAt - soak.firstAt) / 1000)).toFixed(1)) : null;
 
 console.log("");

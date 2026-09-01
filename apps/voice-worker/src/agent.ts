@@ -2,7 +2,7 @@
  * Feather-Lite voice worker (LiveKit Agents). Registers with LiveKit Cloud under LIVEKIT_AGENT_NAME
  * and, per dispatched job:
  *   1. reads conversation/mode/opening from the room metadata written by POST /api/voice/sessions
- *   2. starts an AgentSession (STT/TTS via LiveKit Inference, silero VAD, audio-native EOT,
+ *   2. starts an AgentSession (STT/TTS via LiveKit Inference, native VAD, audio-native EOT,
  *      preemptive generation OFF, speech during non-interruptible segments buffered)
  *   3. browser mode: waits for the participant, speaks the opening, then every user turn is a
  *      control-plane turn (FeatherAgent.llmNode)
@@ -14,21 +14,13 @@
 import { availableParallelism } from "node:os";
 import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
-import { type AgentServer, type JobContext, type JobProcess, ServerOptions, cli, defineAgent, voice } from "@livekit/agents";
+import { type AgentServer, inference, type JobContext, type JobProcess, ServerOptions, cli, defineAgent, voice } from "@livekit/agents";
 import { RoomServiceClient, SipClient } from "livekit-server-sdk";
 import { createAdmissionController } from "./admission.js";
 import { ControlPlaneClient } from "./control-plane-client.js";
 import { FeatherAgent } from "./feather-agent.js";
 import { buildSpeechStack } from "./speech.js";
 import { RemoteOrchestratorLLM } from "./tracer/remote-orchestrator-llm.js";
-/**
- * Type-only, deliberately (review #6). The value import pulled `onnxruntime-node` — a native addon —
- * in at module scope, and this module's top level runs in **every** process: the main worker and
- * each forked job process, because `job_proc_lazy_main` imports the file for its default export.
- * Measured at +73.8 MB RSS per process, for a module only `prewarm` uses. Same class of defect W1
- * removed for `@livekit/local-inference`; the import moved into `prewarm`, below.
- */
-import type * as silero from "@livekit/agents-plugin-silero";
 
 loadEnv({ path: fileURLToPath(new URL("../../../.env", import.meta.url)) });
 
@@ -92,6 +84,31 @@ const WORKER_IDLE_PROCESSES = Math.max(0, Number(process.env["WORKER_IDLE_PROCES
 process.env["UV_THREADPOOL_SIZE"] ??= String(Math.min(12, availableParallelism()));
 
 /**
+ * Voice activity detection (W11).
+ *
+ * `inference.VAD` runs the **same Silero model** as the plugin it replaces (`model: "silero"` is the
+ * only one it accepts), in the same napi addon the end-of-turn detector already lives in
+ * (`@livekit/local-inference`, `agents/dist/inference/vad.js:84-93`). What leaves with the plugin is
+ * `onnxruntime-node`: 513 MB of prebuilt binaries, 336 MB of it a CUDA execution provider nothing in
+ * this deployment can use, hand-pruned in the worker Dockerfile until now.
+ *
+ * **`minSilenceDuration` is set, and set to the value it had.** The plugin's default is 550 ms; the
+ * native VAD's is 250 ms, chosen upstream "so the default satisfies the audio end-of-turn detector's
+ * silence-window requirement out of the box" (`inference/vad.js:8-9`). 300 ms is a barge-in and
+ * end-of-speech timing change, and this commit is a change of engine, not of timing — every
+ * interruption number this project has taken was taken at 550. Lowering it is a knob with its own
+ * A/B, next to `interruption.minDuration` and `unlikelyThreshold`.
+ *
+ * `activationThreshold` is 0.5 on both. `deactivationThreshold` has no plugin equivalent — the
+ * plugin has a single threshold — so it takes the native default (`activation - 0.15` = 0.35), which
+ * is a hysteresis the plugin did not have and cannot be matched to it.
+ */
+const VAD_OPTIONS = {
+  activationThreshold: Number(process.env["WORKER_VAD_ACTIVATION_THRESHOLD"] ?? 0.5),
+  minSilenceDuration: Number(process.env["WORKER_VAD_MIN_SILENCE_MS"] ?? 550),
+} as const;
+
+/**
  * Per-job memory bounds (W7).
  *
  * These were both 0, which did not mean "no monitoring": `supervised_proc` polls `pidusage` for
@@ -122,10 +139,11 @@ const parseMeta = (raw: string | undefined): RoomMeta => {
 };
 
 export default defineAgent({
-  prewarm: async (proc: JobProcess) => {
-    // The one place the addon is needed, and it runs only in a job process.
-    const { VAD } = await import("@livekit/agents-plugin-silero");
-    proc.userData.vad = await VAD.load();
+  prewarm: (proc: JobProcess) => {
+    // Synchronous: there is no model file to fetch and no ONNX session to build. The plugin's
+    // `VAD.load()` was async because it mapped a `.onnx` file; the native VAD asks the addon for a
+    // detector when a stream is opened.
+    proc.userData.vad = new inference.VAD(VAD_OPTIONS);
   },
   entry: async (ctx: JobContext) => {
     const log = (msg: string, extra: Record<string, unknown> = {}) => console.log(`[feather] ${msg} ${Object.keys(extra).length ? JSON.stringify(extra) : ""}`);
@@ -207,7 +225,7 @@ export default defineAgent({
       stt: speech.stt,
       llm: new RemoteOrchestratorLLM(),
       tts: speech.tts,
-      vad: ctx.proc.userData.vad as silero.VAD,
+      vad: ctx.proc.userData.vad as inference.VAD,
       turnHandling: {
         // No `turnDetection` and no `endpointing` on purpose. Leaving turnDetection undefined makes
         // the session auto-provision the audio-native inference.TurnDetector (turn-detector-v1-mini,

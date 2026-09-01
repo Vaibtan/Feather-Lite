@@ -1,0 +1,120 @@
+{
+  "kind": "idle-tree",
+  "label": "w11-containers",
+  "seconds": 60,
+  "taken_at": "2026-09-01T11:38:41.064Z",
+  "resources": {
+    "platform": "win32",
+    "vcpus": 12,
+    "interval_ms": 1000,
+    "samples": 60,
+    "wall_ms": 61025,
+    "load_wall_ms": 59971,
+    "marked": false,
+    "roles": [
+      {
+        "role": "harness",
+        "pids": [
+          11136,
+          19920,
+          22060
+        ],
+        "samples": 60,
+        "peak_rss_bytes": 243269632,
+        "peak_private_bytes": 292945920,
+        "cpu_seconds": 0.438,
+        "idle_rss_bytes": 242769920,
+        "last_rss_bytes": 215388160
+      }
+    ],
+    "totals": {
+      "peak_rss_bytes": 243269632,
+      "peak_private_bytes": 292945920,
+      "cpu_seconds": 0.438,
+      "idle_rss_bytes": 242769920
+    },
+    "subsets": {
+      "worker": {
+        "peak": 0,
+        "idle": 0,
+        "peak_private": 0,
+        "idle_private": 0,
+        "roles": [
+          "worker-main",
+          "worker-inference",
+          "worker-job",
+          "worker-launcher"
+        ]
+      },
+      "server": {
+        "peak": 0,
+        "idle": 0,
+        "peak_private": 0,
+        "idle_private": 0,
+        "roles": [
+          "server",
+          "server-launcher"
+        ]
+      }
+    },
+    "steady_state": {
+      "target_ms": 60000,
+      "full_window": true,
+      "worker": {
+        "cpu_seconds": 0,
+        "wall_ms": 59971
+      },
+      "server": {
+        "cpu_seconds": 0,
+        "wall_ms": 59971
+      }
+    },
+    "rss_slope_mb_per_min": null,
+    "private_slope_mb_per_min": null,
+    "containers": [
+      {
+        "name": "feather-lite-livekit",
+        "samples": 12,
+        "peak_mem_bytes": 50111447,
+        "idle_mem_bytes": 49524244,
+        "peak_cpu_percent": 0.1,
+        "mean_cpu_percent": 0.1,
+        "cpu_seconds": 0.469
+      },
+      {
+        "name": "feather-lite-postgres",
+        "samples": 12,
+        "peak_mem_bytes": 243689062,
+        "idle_mem_bytes": 243689062,
+        "peak_cpu_percent": 0.3,
+        "mean_cpu_percent": 0.2,
+        "cpu_seconds": 0.573
+      },
+      {
+        "name": "feather-lite-server",
+        "samples": 12,
+        "peak_mem_bytes": 141767475,
+        "idle_mem_bytes": 141243187,
+        "peak_cpu_percent": 8.9,
+        "mean_cpu_percent": 2.5,
+        "cpu_seconds": 0.657
+      },
+      {
+        "name": "feather-lite-worker",
+        "samples": 12,
+        "peak_mem_bytes": 1094142919,
+        "idle_mem_bytes": 1093069177,
+        "peak_cpu_percent": 8.8,
+        "mean_cpu_percent": 2.4,
+        "cpu_seconds": 0.604
+      }
+    ],
+    "host": {
+      "total_mem_bytes": 16477151232,
+      "free_mem_bytes_start": 4612800512,
+      "free_mem_bytes_end": 5320056832
+    },
+    "unclassified_pids": 1,
+    "notes": []
+  }
+}

@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
 import type { TurnLatencyRow } from "@feather-lite/contracts";
 import { percentile, ttsAggregate } from "@feather-lite/domain";
-import { formatResourceReport, perCoreBudget, startResourceSampler, validateReport, WORKER_ROLES, type Role } from "@feather-lite/load-test/resources";
+import { formatResourceReport, perCoreBudget, startResourceSampler, validateReport, WORKER_CONTAINERS, WORKER_ROLES, type Role } from "@feather-lite/load-test/resources";
 import { checkEquivalence, loadScenarioReference, type EquivalenceResult } from "./equivalence.js";
 import { buildHarnessScores, postHarnessScores, summariseWer } from "./harness-scores.js";
 import type { ScriptedCallResult } from "./scripted-call.js";
@@ -222,7 +222,8 @@ const { results, speech: speechDescribe, dispose: disposeBorrowers } = await run
 const resources = await sampler.stop();
 disposeBorrowers();
 const callMinutes = results.reduce((a, r) => a + r.durationMs, 0) / 60_000;
-const budget = perCoreBudget(resources, { roles: WORKER_ROLES, calls: CALLS, callMinutes });
+// `containers` is the fallback for a `--profile app` run, where the worker is not a host process.
+const budget = perCoreBudget(resources, { roles: WORKER_ROLES, containers: WORKER_CONTAINERS, calls: CALLS, callMinutes });
 
 const equivalences: Array<{ call: ScriptedCallResult; eq: EquivalenceResult | null; eqError: string | null }> = [];
 for (const call of results) {

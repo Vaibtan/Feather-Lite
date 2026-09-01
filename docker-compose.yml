@@ -61,7 +61,18 @@ services:
     image: livekit/livekit-server:v1.13.5
     container_name: feather-lite-livekit
     profiles: ["livekit"]
-    command: --config /etc/livekit.yaml --node-ip 127.0.0.1
+    # The address the SFU advertises as its ICE candidate, which decides who can reach the media.
+    #
+    # `127.0.0.1` is right for the browser demo and **wrong for anything in a container**: a worker
+    # in another container that dials 127.0.0.1 reaches itself. That is why "a container-to-container
+    # voice call is not verified" has been on the README's Not-built list — signalling and dispatch
+    # worked, media could not.
+    #
+    # Set `LIVEKIT_NODE_IP` to a host address that both sides can reach — the machine's LAN address
+    # works from the host directly and from inside Docker Desktop's VM, because the media ports are
+    # published on the host. Then a containerised worker and a harness on either side of the boundary
+    # both get a usable candidate. Default unchanged, so the demo path is untouched.
+    command: --config /etc/livekit.yaml --node-ip ${LIVEKIT_NODE_IP:-127.0.0.1}
     # Measured at 53 MB and 15 % of a core at N=5, so neither number is a squeeze. `cpus` is the
     # one that matters: media forwarding is latency-critical and must not be the thing a runaway
     # job process starves, so it gets two of the twelve reserved from the other direction.
@@ -101,10 +112,15 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-false}
       JUDGE_ENABLED: ${JUDGE_ENABLED:-false}
-      LIVEKIT_URL: ${LIVEKIT_URL:-}
+      # Signalling over the compose network, not from `.env`: the repo-root value is
+      # `ws://127.0.0.1:7880` for a native run, and inside this container that is this container.
+      # The server only needs the SFU to create rooms and dispatch agents; the participant token it
+      # hands back carries no URL, so the caller still connects on whatever address it can reach.
+      LIVEKIT_URL: ws://livekit:7880
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
       RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-120}
+      RATE_LIMIT_BYPASS_TOKEN: ${RATE_LIMIT_BYPASS_TOKEN:-}
       DAILY_TURN_CAP: ${DAILY_TURN_CAP:-5000}
     mem_limit: 768m
     ports:
@@ -122,12 +138,11 @@ services:
         condition: service_healthy
     environment:
       CONTROL_PLANE_URL: http://server:8080
-      # Signalling to the SFU over the compose network. **Media is a separate question**: the SFU is
-      # started with `--node-ip 127.0.0.1` for the browser path, so it advertises its media address
-      # as the host's loopback, which a worker in another container cannot reach. Registration and
-      # dispatch work as they are — verified — and a container-to-container *call* needs the SFU's
-      # node IP set to something both sides can reach. Do that before the N=10 container run, not by
-      # assuming it works.
+      # Signalling to the SFU over the compose network. **Media is a separate question** and it is
+      # answered by `LIVEKIT_NODE_IP` on the `livekit` service above: with the default `127.0.0.1`
+      # the SFU advertises a candidate that this container cannot reach, and the call connects and
+      # then hears nothing. Set it to a host address both sides can reach before running anything
+      # through here.
       LIVEKIT_URL: ws://livekit:7880
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
@@ -135,22 +150,32 @@ services:
       STT_TTS_PROVIDER: ${STT_TTS_PROVIDER:-plugins}
       DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:-}
       DEEPGRAM_TTS_MODEL: ${DEEPGRAM_TTS_MODEL:-aura-2-asteria-en}
-      # Four, not the worker's own default of eight. The comment below sizes this container for
-      # four concurrent calls and the default said eight, which is 4.4 GB against a 3 GB cgroup:
-      # the kernel would kill the worker and every call on it under exactly the N=10 load the
-      # efficiency spec's acceptance bar names. `apps/load-test/test/composeLimits.test.ts` asserts
-      # the inequality, so the two numbers cannot drift apart again silently.
-      WORKER_MAX_JOBS: ${WORKER_MAX_JOBS:-4}
+      # Eight, and 3 GB genuinely carries eight — but only since W11.
+      #
+      # It was briefly four. The arithmetic then came from host measurements of a worker running the
+      # Silero plugin (a warm slot 194 MB, a call adding 300), which put eight calls at 4.4 GB
+      # against a 3 GB cgroup: the kernel would have killed the worker and every call on it under
+      # exactly the N=10 load the acceptance bar names. With the native VAD, measured *in this
+      # container*, the same eight fit. `apps/load-test/test/composeLimits.test.ts` asserts the
+      # inequality from the container numbers, so the two cannot drift apart silently again.
+      WORKER_MAX_JOBS: ${WORKER_MAX_JOBS:-8}
       WORKER_IDLE_PROCESSES: ${WORKER_IDLE_PROCESSES:-4}
-    # The arithmetic, from measurements taken in this image:
+      WORKER_JOB_MEMORY_WARN_MB: ${WORKER_JOB_MEMORY_WARN_MB:-400}
+      WORKER_JOB_MEMORY_LIMIT_MB: ${WORKER_JOB_MEMORY_LIMIT_MB:-800}
+      RATE_LIMIT_BYPASS_TOKEN: ${RATE_LIMIT_BYPASS_TOKEN:-}
+    # The arithmetic, from `docker stats` on this container rather than from host processes — which
+    # is the only honest source now that the worker only ever runs here (2026-09-01, W11):
     #
-    #   main 192 MB + inference 235 MB                          =  427 MB  fixed
-    #   a warm job slot ~194 MB, and a call on it adds ~300 MB   =  494 MB  per concurrent call
-    #   427 + 4 x 494                                            = 2403 MB  at WORKER_MAX_JOBS=4
+    #   idle, four warm slots, native VAD                        = 1093 MB  fixed
+    #   a concurrent call, measured at N=5 (2018-2095 peak)      =  ~200 MB  per call
+    #   with a 20 % margin on the per-call figure                =   240 MB
+    #   1093 + 8 x 240                                           = 3013 MB  at WORKER_MAX_JOBS=8
     #
-    # 3 GB carries that with ~600 MB of headroom. Raising WORKER_MAX_JOBS means raising this too:
-    # eight would need ~4.4 GB and ten ~5.4 GB, and per-job limits do not help, because eight jobs
-    # at the 800 MB ceiling is already past 3 GB on their own.
+    # 3 GB carries eight, with the margin already inside the number. Ten would need ~3.5 GB, so the
+    # N=10 acceptance run raises this deliberately and the test says so by failing.
+    #
+    # The fixed term is the whole reason W11 mattered: with the Silero plugin the same idle tree was
+    # 1651 MB, and `onnxruntime-node` was 513 MB of binaries hand-pruned in the Dockerfile.
     mem_limit: 3g
 
 volumes:

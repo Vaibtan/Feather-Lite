@@ -24,7 +24,6 @@
     "@effect/platform": "^0.97.1",
     "@livekit/agents": "^1.6.4",
     "@livekit/agents-plugin-deepgram": "1.6.4",
-    "@livekit/agents-plugin-silero": "^1.6.4",
     "@livekit/rtc-node": "^0.13.33",
     "dotenv": "^17.2.1",
     "effect": "^3.22.1",

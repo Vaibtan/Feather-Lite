@@ -13,10 +13,12 @@
 #
 #   @livekit/local-inference  -> @livekit/local-inference-linux-arm64-gnu   (optional dep, published)
 #   @livekit/rtc-node         -> @livekit/rtc-ffi-bindings-linux-arm64-gnu  (optional dep, published)
-#   onnxruntime-node          -> bin/napi-v6/linux/arm64                    (in-package, all arches)
 #
-# `bookworm-slim`, never Alpine: all three of those are glibc builds, and `-linux-arm64-gnu` says so
-# in its own name. On musl the addon simply does not resolve.
+# `bookworm-slim`, never Alpine: both are glibc builds, and `-linux-arm64-gnu` says so in its own
+# name. On musl the addon simply does not resolve.
+#
+# `onnxruntime-node` was a third entry here until W11; it came in with
+# `@livekit/agents-plugin-silero`, which the native VAD replaced.
 
 FROM node:22-bookworm-slim AS base
 ENV PNPM_HOME=/pnpm
@@ -50,20 +52,14 @@ RUN pnpm --filter @feather-lite/voice-worker build
 
 RUN pnpm deploy --filter @feather-lite/voice-worker --prod --legacy /out
 
-# `onnxruntime-node` ships **513 MB** of prebuilt binaries for every platform it supports, and 336 MB
-# of that is one file: `libonnxruntime_providers_cuda.so` in the linux/x64 set. This container has no
-# GPU and Silero's VAD session asks for the CPU provider, so the CUDA and TensorRT providers are
-# dead weight — as are the macOS and Windows binaries and the arch this image is not being built for.
+# There used to be a block here that hand-pruned `onnxruntime-node` — 513 MB of prebuilt binaries,
+# 336 MB of it a CUDA execution provider this container has no GPU for. It was a transitive
+# dependency of `@livekit/agents-plugin-silero` and there was no supported way to ask for less.
 #
-# Pruned rather than avoided, because it is a transitive dependency of
-# `@livekit/agents-plugin-silero` and there is no supported way to ask for a smaller download.
-# **Verified, not assumed**: the image is started and a call is placed through it; a VAD that could
-# not load its runtime would fail at session start, loudly.
-#
-# The whole package leaves the tree when W11 replaces Silero with the native VAD in the same addon
-# the EOU model already lives in — at which point this block goes with it.
-ARG TARGETARCH
-RUN set -eu;     ORT="$(find /out/node_modules -type d -path '*/onnxruntime-node/bin/napi-v6' -print -quit)";     if [ -n "$ORT" ]; then       KEEP="$([ "${TARGETARCH:-amd64}" = "arm64" ] && echo arm64 || echo x64)";       rm -rf "$ORT/darwin" "$ORT/win32";       find "$ORT/linux" -mindepth 1 -maxdepth 1 -type d ! -name "$KEEP" -exec rm -rf {} +;       rm -f "$ORT/linux/$KEEP/libonnxruntime_providers_cuda.so" "$ORT/linux/$KEEP/libonnxruntime_providers_tensorrt.so";       du -sh "$ORT";     fi
+# W11 deleted the need for it: the VAD is now `inference.VAD`, the same Silero model in the same
+# napi addon the end-of-turn detector already lives in, so the plugin and its ONNX runtime are gone
+# from the tree entirely. A prune that has nothing to prune is a prune that will one day be wrong
+# about something else.
 
 # -------------------------------------------------------------- runtime ----
 FROM node:22-bookworm-slim AS runtime

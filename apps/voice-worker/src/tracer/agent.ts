@@ -7,7 +7,7 @@
  *  4. Barge-in truncation is observable via `conversation_item_added` (interrupted assistant item)
  *  5. `userAwayTimeout` -> `user_state_changed: away`
  *  6. `preemptiveGeneration` disabled so `llmNode` runs once per confirmed turn
- *  7. LiveKit Inference STT/TTS on the Build plan; silero VAD; audio-native turn detector
+ *  7. LiveKit Inference STT/TTS on the Build plan; native VAD; audio-native turn detector
  *
  * Kept runnable, not frozen. The turn detector it originally used — the text-based
  * `MultilingualModel` from `@livekit/agents-plugin-livekit` — was dropped from the production agent
@@ -29,7 +29,6 @@ import {
   inference,
   voice,
 } from "@livekit/agents";
-import * as silero from "@livekit/agents-plugin-silero";
 import { RemoteOrchestratorLLM } from "./remote-orchestrator-llm.js";
 import { TracerAgent } from "./tracer-agent.js";
 
@@ -38,8 +37,10 @@ loadEnv({ path: fileURLToPath(new URL("../../../../.env", import.meta.url)) });
 const AGENT_NAME = process.env["LIVEKIT_AGENT_NAME"] ?? "feather-lite-tracer";
 
 export default defineAgent({
-  prewarm: async (proc: JobProcess) => {
-    proc.userData.vad = await silero.VAD.load();
+  prewarm: (proc: JobProcess) => {
+    // Same VAD as `src/agent.ts` (W11): the Silero model in the addon the EOU detector already
+    // lives in, at the plugin's old 550 ms silence window so the tracer and the worker hear alike.
+    proc.userData.vad = new inference.VAD({ minSilenceDuration: 550 });
   },
   entry: async (ctx: JobContext) => {
     console.log(`[tracer] job for room=${ctx.room.name} metadata=${ctx.room.metadata ?? ""}`);
@@ -49,7 +50,7 @@ export default defineAgent({
       // Placeholder LLM: our Agent overrides llmNode; RemoteOrchestratorLLM.chat() throws if ever reached.
       llm: new RemoteOrchestratorLLM(),
       tts: new inference.TTS({ model: "cartesia/sonic-3", voice: "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc" }),
-      vad: ctx.proc.userData.vad as silero.VAD,
+      vad: ctx.proc.userData.vad as inference.VAD,
       turnHandling: {
         // No `turnDetection` and no `endpointing`, for the reason `src/agent.ts` gives at length:
         // leaving both unset makes the session auto-provision the audio-native turn detector and

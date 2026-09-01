@@ -45,11 +45,17 @@ const memLimitMb = (block: string): number => {
 };
 
 /**
- * Measured in this image and written beside the limit in `docker-compose.yml`. Kept here as the
- * one place the arithmetic lives, so the comment and the assertion cannot disagree.
+ * Measured on the worker **container** and written beside the limit in `docker-compose.yml`. Kept
+ * here as the one place the arithmetic lives, so the comment and the assertion cannot disagree.
+ *
+ * Container numbers, not host ones (2026-09-01): the worker only ever runs in this container, and
+ * the earlier host figures described a different VAD on a different platform. `docker stats` on an
+ * idle worker with four warm slots reads 1 093 MB; five concurrent calls peaked at 2 018-2 095 MB,
+ * so a call costs ~200 MB above idle. The 20 % margin is on the per-call term, where the variance
+ * is, rather than on the fixed one, which is a warm pool that does not move.
  */
-const FIXED_MB = 192 + 235; // main worker + the shared inference process
-const PER_CALL_MB = 194 + 300; // a warm job slot, and what a call on it adds
+const FIXED_MB = 1093; // idle: main + inference + four warm job slots, native VAD
+const PER_CALL_MB = 240; // ~200 MB measured, +20 %
 
 describe("docker-compose worker sizing", () => {
   it("gives the worker enough memory for the calls it is configured to carry", () => {
@@ -66,7 +72,8 @@ describe("docker-compose worker sizing", () => {
   });
 
   it("fails when the ceiling and the concurrency disagree — which is the case it exists for", () => {
-    // The state the file was actually in: eight calls under a 3 GB cgroup.
-    expect(FIXED_MB + 8 * PER_CALL_MB).toBeGreaterThan(3 * 1024);
+    // Ten is the efficiency spec's acceptance bar and it does not fit in 3 GB. That run has to raise
+    // `mem_limit` deliberately, and this is what tells it so.
+    expect(FIXED_MB + 10 * PER_CALL_MB).toBeGreaterThan(3 * 1024);
   });
 });

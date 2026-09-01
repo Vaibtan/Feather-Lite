@@ -149,79 +149,102 @@ so a plain counter briefly counted one job twice. Over-counting refuses early ra
 was never dangerous, but the ceiling is claimed to be exact, so `admitting` became a set of job ids
 and `in_flight` a union.
 
-### W11 — the native VAD was implemented, measured, and reverted
+### W11 — the native VAD, which failed on Windows and shipped on Linux
 
-`inference.VAD` was to replace `silero.VAD.load()`: the same Silero model, in the same napi addon
-the end-of-turn detector already lives in, taking `onnxruntime-node` — 513 MB of prebuilt binaries,
+`inference.VAD` replaces `silero.VAD.load()`: the same Silero model, in the same napi addon the
+end-of-turn detector already lives in, taking `onnxruntime-node` — 513 MB of prebuilt binaries,
 336 MB of it a CUDA provider nothing here can use — out of the tree along with the Dockerfile's
-hand-prune. On CPU per second of audio it is the win the efficiency spec recorded: 0.69 ms against
-Silero-ONNX's 4.4-6.3.
+hand-prune.
 
-**The swap works and the fleet run failed 0/5.** Every call: `NO_ANSWER`, zero turns of fifteen
-attempted, WER 1.000. The worker log says why, once per job process:
+**On the Windows dev box it failed 0/5.** Every call `NO_ANSWER`, zero turns of fifteen, WER 1.000,
+and the worker log said why once per job process:
 
 ```
 job process exceeded  memoryUsageMB 1907.3  memoryLimitMB 800  baselineMemoryMB 160.3  growthMemoryMB 1747
 ```
 
-Job processes were killed by the per-job memory limit W7 set, mid-call, on every call. `worker-job`
-peaked at **6 524 MB across 9 pids** as the pool recycled the corpses.
-
-**The VAD itself is fine.** Fed a cached borrower line off the SFU entirely, `inference.VAD` detects
-speech correctly and its silence window behaves: at the native default of 250 ms it reports two
-utterances, at the plugin's 550 ms it merges them into one. That is the detector doing its job.
-
-**What fails is where the model runs.** `pnpm --filter @feather-lite/voice-worker vad-cost`, on a
-bare process:
+`pnpm --filter @feather-lite/voice-worker vad-cost` localises it. On win32-x64 with
+`@livekit/local-inference` 0.2.6:
 
 | | RSS |
 |---|---:|
 | node baseline | 44 MB |
-| after loading `@livekit/local-inference` | 385 MB |
+| after loading the addon | 385 MB |
 | after `createVad()` | 388 MB |
 | after 1 predict | **517 MB** |
 | after 551 predicts | 517 MB |
 | after a second detector | 517 MB |
 | after `global.gc()` | 517 MB |
 
-~450 MB of native memory, once per process, flat across detectors and predicts, and not reclaimable
-— none of it is JS heap. Under `tsx` the same total arrives in one step at load instead of split
-across load and first predict; where it is attributed varies, the size does not.
+~450 MB of native memory, once per process, flat across detectors and predicts, and not reclaimable.
+That matters because of *where the model runs*: the EOU model runs in the **shared inference
+process**, once per worker, but `inference.VAD` predicts wherever the stream is opened, which is the
+**job process** — one per concurrent call. On Windows the swap does not move a cost already paid; it
+buys a copy of it per call.
 
-**So W11's premise is the thing that is wrong, and only the measurement shows it.** "The same addon
-the EOU model already lives in" is true, and it is why the swap looked free — but the EOU model runs
-in the **shared inference process**, once for the whole worker (it is the 914 MB `worker-inference`
-row in the idle tree). `inference.VAD` runs its predicts wherever the stream is opened, and that is
-the **job process**: one per concurrent call. The swap does not move a cost that is already paid; it
-buys a second copy of it, times `WORKER_MAX_JOBS`.
+**On Linux the same probe reads 37 MB.** Inside the worker image (`linux/x64`, node 22):
 
-The arithmetic, against the sizing the same phase just made honest:
+| | RSS |
+|---|---:|
+| node baseline | 45 MB |
+| after importing `_warmup` | 78 MB |
+| after loading the addon | **78 MB** |
+| after `createVad()` | 79 MB |
+| after 551 predicts | 81 MB |
+| after `global.gc()` | 82 MB |
 
-| | with the plugin | with `inference.VAD` |
+The 450 MB arena is a **win32 artefact**, not a property of the native VAD, and the deployment
+target is Linux. So W11 was implemented, reverted on the evidence of one platform, and then
+re-measured on the platform that ships — which is why everything below runs in containers.
+
+**Containerised N=5, twice, both green:**
+
+| | run 1 | run 2 |
 |---|---:|---:|
-| job process, idle | ~160 MB | ~160 MB (the addon loads on first predict) |
-| job process, on a call | ~500 MB | ~950 MB+ (measured 900-1 900) |
-| per-job limit (W7) | 800 MB | **exceeded on every call** |
-| 4 concurrent calls | ~2.4 GB | ~4.2 GB |
-| compose `mem_limit` | 3 GB | would need ~5 GB for four |
+| equivalence | **5/5** | **5/5** |
+| agent hung up | 5/5 | 5/5 |
+| STT WER p50 / p95 | 0.000 / 0.000 | 0.000 / 0.111 |
+| silent playouts | 0 of 15 | 0 of 15 |
+| TTS TTFB p50 / p95 | 382 / 407 ms | — |
+| worker container peak | 2 018 MB | 2 095 MB |
+| CPU-seconds per call-minute | **6.74** | **6.85** |
 
-Raising the per-job limit does not rescue it: the compose worker is sized at 3 GB for four calls, and
-four job processes at 950 MB is past that before the main and inference processes are counted.
+`eou_delay_ms` p50 578 / **p95 580**, against the Phase 0 baseline's 579 / **582** — unchanged, which
+is the gate and also the expectation: end-of-turn is the audio-native detector's job, not the VAD's.
+CPU per call-minute is **6.74-6.85 against 8.1** on the host with the plugin, though the two are not
+a controlled comparison — platform, container and VAD all changed at once.
 
-**Reverted, and the revert recorded** — the ground rule is that a change failing a gate is reverted
-and the revert written down, and this one failed the equivalence gate outright (0/5) and the WER
-gate (1.000 against 0.20). The reverted tree was re-run and is green: 2/2 equivalent, agent hung up
-on both, `worker-job` peak 1 158 MB for two concurrent calls.
+**The idle tree, which is the number the sizing rests on:**
 
-What survives: `vad-cost.ts` is committed so the number can be retaken on another platform, and the
-Phase 0 change that moved the plugin's import into `prewarm` stays — the main process still has no
-reason to load a plugin only `prewarm` uses.
+| | worker tree, idle, 4 warm slots |
+|---|---:|
+| host, Silero plugin (main 128 + inference 914 + jobs 609) | 1 651 MB |
+| container, native VAD (`docker stats`) | **1 093 MB** |
 
-**This does not close W11 on other hardware.** Everything above is win32-x64 with
-`@livekit/local-inference` 0.2.6. A Linux build may allocate differently, and the deployment target
-is Linux; the probe is committed so that is one command to find out rather than a fleet run to
-discover. What it does close is "W11 is a free win because the addon is already loaded" — on this
-box that is measurably false, and the direction of the error is the whole budget.
+and the worker image drops from **781 MB to 724 MB** with `onnxruntime-node` and
+`@livekit/agents-plugin-silero` gone — a smaller number than the 513 MB the package weighs, because
+the Dockerfile was already hand-pruning most of it. The win is that there is no longer a prune to
+maintain, and no addon to be wrong about across architectures.
+
+That fixed term is what lets `docker-compose.yml` carry `WORKER_MAX_JOBS=8` in 3 GB: 1 093 idle plus
+eight calls at ~200 MB each (240 with margin) is 3 013 MB. With the plugin the same eight demanded
+~4.4 GB, which is why the sizing fix earlier in this phase had to set it to four.
+
+**What is now measured in containers, and what that changed.** The application runs entirely in
+Docker — Postgres, the SFU, the server and the worker — and only the borrower harness is on the host,
+because it is the caller. Two things had to be fixed before any of it worked:
+
+- **The SFU advertised an unreachable media address.** `--node-ip 127.0.0.1` is right for the browser
+  demo and means "this container" to a containerised worker, which is why "a container-to-container
+  voice call is not verified" sat on the README's Not-built list. It is `LIVEKIT_NODE_IP` now,
+  default unchanged; set to a host address both sides can reach, media flows and the call completes.
+  **That item is now verified rather than assumed.**
+- **The resource sampler could not see the application containers.** It knew about `livekit` and
+  `postgres` only, so a `--profile app` run reported `cores used n/a` and no worker memory at all —
+  the per-core budget, which is the whole of D1, was silently unavailable for exactly the runs the
+  acceptance bar is defined on. It now samples all four, takes CPU from each container's
+  `cpu.stat` counter rather than integrating `docker stats` percentages, and `per_core.basis` says
+  `containers: feather-lite-worker` so a container figure is never read as a host one.
 
 ### Tier 2 — N=5, real calls, on the corrected tree
 

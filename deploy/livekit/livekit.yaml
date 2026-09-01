@@ -7,8 +7,11 @@
 # UDP port range (publishing 10k ports through the NAT is a nonstarter). Instead:
 #   - rtc.udp_port    single-port UDP mux, published as 7882/udp
 #   - rtc.tcp_port    ICE/TCP fallback, published as 7881
-#   - --node-ip       forced to 127.0.0.1 in docker-compose.yml so the advertised ICE candidate is
-#                     host-reachable instead of the container's internal bridge address
+#   - --node-ip       `LIVEKIT_NODE_IP` in docker-compose.yml, default 127.0.0.1 so the advertised
+#                     ICE candidate is host-reachable for the browser demo. A **containerised**
+#                     worker cannot use that -- 127.0.0.1 inside a container is that container -- so
+#                     a container run sets it to a host address both sides can reach (the machine's
+#                     LAN address; the media ports are published on the host).
 port: 7880
 bind_addresses:
   - 0.0.0.0
