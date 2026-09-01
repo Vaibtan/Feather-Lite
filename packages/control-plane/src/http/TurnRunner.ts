@@ -145,9 +145,13 @@ export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/Turn
            * own: the failure branch below logs from the *handler*, outside that effect, and that
            * line — "turn failed after start" — is precisely the one an operator needs joined to a
            * call (D3).
+           *
+           * **And it has to wrap `matchCauseEffect`, not sit inside it** (review #5). Piped before
+           * it, the annotation applied only to `processTurn` — which already annotates itself — and
+           * the one line this comment exists for logged with `annotations: []`. Under load, on the
+           * failure of one of a hundred interleaved calls, that line said nothing about which call.
            */
           orch.processTurn(params, emit).pipe(
-            Effect.annotateLogs({ conversation_id: params.conversationId, turn_id: params.turnId }),
             Effect.matchCauseEffect({
               onSuccess: () => finish(null),
               onFailure: (cause) =>
@@ -165,6 +169,7 @@ export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/Turn
                   yield* finish({ type: "error", turn_id: params.turnId, code: err?._tag ?? "INTERNAL", message: Cause.pretty(cause).slice(0, 500) });
                 }),
             }),
+            Effect.annotateLogs({ conversation_id: params.conversationId, turn_id: params.turnId }),
           ),
         );
         yield* Deferred.await(started);
