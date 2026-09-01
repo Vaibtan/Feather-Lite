@@ -14,9 +14,10 @@
 import { availableParallelism } from "node:os";
 import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
-import { type AgentServer, type JobContext, type JobProcess, type JobRequest, ServerOptions, cli, defineAgent, voice } from "@livekit/agents";
+import { type AgentServer, type JobContext, type JobProcess, ServerOptions, cli, defineAgent, voice } from "@livekit/agents";
 import * as silero from "@livekit/agents-plugin-silero";
 import { RoomServiceClient, SipClient } from "livekit-server-sdk";
+import { createAdmissionController } from "./admission.js";
 import { ControlPlaneClient } from "./control-plane-client.js";
 import { FeatherAgent } from "./feather-agent.js";
 import { buildSpeechStack } from "./speech.js";
@@ -310,51 +311,24 @@ export default defineAgent({
  */
 let server: AgentServer | null = null;
 let lastBeatAt = 0;
-/**
- * Jobs this worker has said yes to but which are not yet running.
- *
- * `activeJobs` counts child processes with a `runningJob`, and that flag is set at `launchJob` —
- * *after* the accept has been sent and the SFU has answered with an assignment. Between those two
- * points the job is this worker's responsibility and invisible to every count of it, which is why
- * three simultaneous requests were all accepted against `activeJobs === 0`.
- */
-let admitting = 0;
-const inFlight = (): number => (server?.activeJobs.length ?? 0) + admitting;
 
 /**
- * Admission control, which is the half of load shedding the load function cannot do.
+ * The ceiling, enforced where the answer to a job request is actually given.
  *
- * **Measured on 2026-08-28**: with `WORKER_MAX_JOBS=2` and three calls started at once, all three
- * were served. `loadFunc` shapes what the *SFU* believes about this worker, and it is republished
- * only every 2.5 s (`UPDATE_LOAD_INTERVAL`), so a burst that arrives inside one interval is routed
- * against a status that still says "idle" — no threshold, however low, can catch it. The framework's
- * default `requestFunc` then accepts everything it is offered.
- *
- * So the ceiling is enforced here, where the answer is given, and it is exact. `WORKER_MAX_JOBS` is
- * the hard limit; the threshold below it remains what it always was — the point at which this
- * worker asks the SFU to prefer someone else, which matters when there is a someone else.
- *
- * A rejected job is not a lost call. The conversation row stays open with no worker claim, and the
- * sweeper finalizes it as `NEVER_SERVED` — a call that never had a worker, distinct from one that
- * lost hers (O4). That is the honest record of shed load.
+ * `WORKER_MAX_JOBS` is the hard limit; the threshold below it remains what it always was — the
+ * point at which this worker asks the SFU to prefer someone else, which matters when there is a
+ * someone else. Why the load function alone is not enough, and why the accept is not awaited, is
+ * in `admission.ts`; the decision is there so it can be tested without a websocket.
  */
-const requestFunc = async (req: JobRequest): Promise<void> => {
-  const busy = inFlight();
-  if (busy >= WORKER_MAX_JOBS) {
-    // The one line that must exist: a refused job is otherwise indistinguishable, from outside,
-    // from a call the SFU never offered.
-    console.log(`[feather] refusing job ${req.id}: at capacity (${String(server?.activeJobs.length ?? 0)} running + ${String(admitting)} admitting of ${String(WORKER_MAX_JOBS)})`);
-    await req.reject();
-    return;
-  }
-  admitting += 1;
-  try {
-    // Resolves once the job is launched, at which point `activeJobs` has taken it over.
-    await req.accept();
-  } finally {
-    admitting -= 1;
-  }
-};
+const admission = createAdmissionController({
+  maxJobs: WORKER_MAX_JOBS,
+  activeJobIds: () => (server?.activeJobs ?? []).map((j) => j.job.id),
+  log: (message, extra) => console.log(`[feather] ${message} ${JSON.stringify(extra)}`),
+});
+// `AgentServer.close()` tears down the process pool and then awaits the admission poll, so a job
+// admitted seconds before a SIGTERM would hold the shutdown open for the whole assignment timeout.
+// The framework's own SIGINT/SIGTERM handlers are `once` listeners; these are additional.
+for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, admission.abandonWaits);
 
 const loadFunc = async (w: AgentServer): Promise<number> => {
   server = w;
@@ -385,7 +359,7 @@ const loadFunc = async (w: AgentServer): Promise<number> => {
       max_jobs: WORKER_MAX_JOBS,
       load_threshold: WORKER_LOAD_THRESHOLD,
       active_jobs: w.activeJobs.length,
-      admitting,
+      admitting: admission.admitting(),
       load: Math.round(load * 1000) / 1000,
       idle_processes: WORKER_IDLE_PROCESSES,
       // The parent's value. `fork` passes `process.env` through unless told otherwise, so this is
@@ -409,7 +383,7 @@ cli.runApp(
   new ServerOptions({
     agent: fileURLToPath(import.meta.url),
     agentName: AGENT_NAME,
-    requestFunc,
+    requestFunc: admission.requestFunc,
     loadFunc,
     loadThreshold: WORKER_LOAD_THRESHOLD,
     numIdleProcesses: WORKER_IDLE_PROCESSES,
