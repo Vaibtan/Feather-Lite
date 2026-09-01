@@ -170,18 +170,29 @@ services:
     #   a concurrent call, measured at N=5 (2018-2095 peak)      =  ~200 MB  per call
     #   with a 20 % margin on the per-call figure                =   240 MB
     #   1093 + 8 x 240                                           = 3013 MB  at WORKER_MAX_JOBS=8
-    #   1093 + 10 x 240                                          = 3493 MB  at WORKER_MAX_JOBS=10
+    #   1093 + 14 x 240                                          = 4453 MB  at WORKER_MAX_JOBS=14
     #
-    # **4 GB, because ten is the bar this is measured against.** The efficiency spec's acceptance
-    # run is `WORKER_MAX_JOBS=10`, and it does not fit in 3 GB — `composeLimits.test.ts` carried
-    # that as a counterexample until 2026-09-01, when the run came due and the counterexample became
-    # a limit to raise. The default concurrency stays **8**: the acceptance run overrides it, and
-    # what ten calls do on this box is what that run is for. `mem_limit` is a cap and not a
-    # reservation, so the headroom costs nothing until it is used.
+    # **5 GB, because serving ten calls means a ceiling of fourteen.** `WORKER_MAX_JOBS` is not the
+    # concurrency the SFU will actually assign: `loadFunc` reports `activeJobs / WORKER_MAX_JOBS`
+    # and the SFU stops assigning at `load >= WORKER_LOAD_THRESHOLD` (0.75), so the ceiling and the
+    # served concurrency differ by the margin the threshold exists for. `agent.ts` says so beside
+    # the constant — "the admitted concurrency is floor(MAX_JOBS * THRESHOLD) — 6 at the defaults,
+    # not 8 … reaching [ten] means raising WORKER_MAX_JOBS".
+    #
+    # **Measured, on the first N=10 attempt (2026-09-01):** `WORKER_MAX_JOBS=10` started **nine**
+    # jobs for ten calls. The tenth was never assigned — nine active reports a load of 0.9 — and it
+    # finalized `FAILED / NEVER_SERVED`, which is the shed path working correctly against a ceiling
+    # that was set too low. The same run confirmed the per-call term exactly: 2 917 MB peak with
+    # nine calls on a 755 MB idle tree is (2917 - 755) / 9 = 240 MB a call.
+    #
+    # The default concurrency stays **8**: the acceptance run overrides it, and what ten calls do on
+    # this box is what that run is for. `mem_limit` is a cap and not a reservation, so the headroom
+    # costs nothing until it is used — but it has to cover the ceiling the worker will actually
+    # accept, or the ceiling is a number that OOM-kills the container it was supposed to protect.
     #
     # The fixed term is the whole reason W11 mattered: with the Silero plugin the same idle tree was
     # 1651 MB, and `onnxruntime-node` was 513 MB of binaries hand-pruned in the Dockerfile.
-    mem_limit: 4g
+    mem_limit: 5g
 
 volumes:
   feather_lite_pg:

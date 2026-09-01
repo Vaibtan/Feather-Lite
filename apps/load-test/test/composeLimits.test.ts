@@ -55,7 +55,19 @@ const memLimitMb = (block: string): number => {
  * is, rather than on the fixed one, which is a warm pool that does not move.
  */
 const FIXED_MB = 1093; // idle: main + inference + four warm job slots, native VAD
-const PER_CALL_MB = 240; // ~200 MB measured, +20 %
+const PER_CALL_MB = 240; // ~200 MB measured, +20 %; confirmed exactly at N=9: (2917 - 755) / 9 = 240
+
+/**
+ * The acceptance bar, and the ceiling it needs.
+ *
+ * These are not the same number, which is the finding of the first N=10 attempt. `WORKER_MAX_JOBS`
+ * is the denominator of the load the worker reports to the SFU, and the SFU stops assigning at
+ * `WORKER_LOAD_THRESHOLD` — so a ceiling of ten is a *served* concurrency of eight or nine, and the
+ * run's tenth call finalized `NEVER_SERVED` without the worker ever seeing it.
+ */
+const ACCEPTANCE_CALLS = 10;
+const LOAD_THRESHOLD = 0.75; // `WORKER_LOAD_THRESHOLD`'s default, in `agent.ts`
+const ACCEPTANCE_CEILING = 14; // 14 x 0.75 = 10.5, so ten are assigned and the eleventh is shed
 
 describe("docker-compose worker sizing", () => {
   it("gives the worker enough memory for the calls it is configured to carry", () => {
@@ -71,15 +83,23 @@ describe("docker-compose worker sizing", () => {
     expect(envDefault(block, "WORKER_IDLE_PROCESSES")).toBeLessThanOrEqual(envDefault(block, "WORKER_MAX_JOBS"));
   });
 
-  it("carries the acceptance bar's ten calls, not only the default eight", () => {
-    // Ten is the efficiency spec's acceptance bar, and the run overrides `WORKER_MAX_JOBS` to reach
-    // it — so the *default* concurrency above is not what has to fit. This is.
+  it("carries the acceptance run's ceiling, which is not the same as its ten calls", () => {
+    // Ten is the efficiency spec's acceptance bar. **The ceiling that serves ten is fourteen**, and
+    // that distinction cost the first N=10 attempt a call.
     //
-    // Until 2026-09-01 this assertion was the counterexample instead: `1093 + 10 x 240 > 3 x 1024`,
-    // there to prove the arithmetic could fail and to tell the acceptance run it had a limit to
-    // raise. The run came due, the limit was raised to 4 GB, and the counterexample became the
-    // thing it was warning about. It is a live guard now rather than a demonstration.
+    // `loadFunc` reports `activeJobs / WORKER_MAX_JOBS` and the SFU stops assigning at
+    // `load >= WORKER_LOAD_THRESHOLD` — so the ceiling and the concurrency the SFU will actually
+    // hand over differ by the margin the threshold exists for. Measured 2026-09-01:
+    // `WORKER_MAX_JOBS=10` started **nine** jobs for ten calls, and the tenth finalized
+    // `NEVER_SERVED`. `agent.ts` says the same thing beside the constant.
+    //
+    // So what `mem_limit` has to cover is the ceiling the worker will *accept*, not the ten it is
+    // asked to serve — otherwise the ceiling is a number that OOM-kills the container it exists to
+    // protect. Until 2026-09-01 this assertion was the counterexample instead
+    // (`1093 + 10 x 240 > 3 x 1024`), there to prove the arithmetic could fail; the run came due and
+    // it became a live guard.
     const block = workerBlock();
-    expect(memLimitMb(block)).toBeGreaterThanOrEqual(FIXED_MB + 10 * PER_CALL_MB);
+    expect(ACCEPTANCE_CEILING * LOAD_THRESHOLD).toBeGreaterThanOrEqual(ACCEPTANCE_CALLS);
+    expect(memLimitMb(block)).toBeGreaterThanOrEqual(FIXED_MB + ACCEPTANCE_CEILING * PER_CALL_MB);
   });
 });
