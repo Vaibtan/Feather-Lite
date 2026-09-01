@@ -402,8 +402,9 @@ for (const { call, eq } of equivalences) {
       equivalenceComment: eq?.equivalent ? `matches scenario ${reference.scenarioId}` : (eq?.failures[0] ?? "no equivalence result"),
       werLines: call.werLines,
       turnLatencies: call.turnLatencies,
-      // The ledger's own turn ids, which this run already fetched for its TTS numbers (O8).
-      ledgerTurnIds: (rowsByConversation.get(call.conversationId) ?? []).map((r) => r.turn_id),
+      // The ledger's own turns, which this run already fetched for its TTS numbers (O8).
+      ledgerTurns: (rowsByConversation.get(call.conversationId) ?? []).map((r) => ({ turn_id: r.turn_id, startedAtMs: Date.parse(r.started_at) })),
+      log,
     }),
   );
 }

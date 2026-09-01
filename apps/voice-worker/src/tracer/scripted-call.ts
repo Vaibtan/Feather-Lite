@@ -137,6 +137,14 @@ export interface ScriptedCallOptions {
 export interface TurnLatency {
   /** Which scripted borrower line this reply answers. */
   readonly turn: string;
+  /**
+   * Wall clock when the borrower fell silent — the instant this measurement is anchored to.
+   *
+   * Carried so a score can be joined to the ledger's turn by *time* rather than by position
+   * (review #10). The turn row is created after this, when the worker posts the committed turn, so
+   * the matching turn is the first one that started at or after this.
+   */
+  readonly atMs: number;
   readonly ms: number;
   /**
    * Same interval, but measured to the first agent audio frame with speech-level RMS energy
@@ -151,6 +159,8 @@ export interface TurnLatency {
 /** One borrower line, what the STT made of it, and the error rate between them (D4). */
 export interface WerLine {
   readonly turn: string;
+  /** Wall clock when the line finished being spoken; `NaN` if it never did. See {@link TurnLatency.atMs}. */
+  readonly atMs: number;
   readonly reference: string;
   readonly hypothesis: string;
   /** null when the reference was empty — nothing to be wrong about. */
@@ -252,7 +262,12 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
    * Opened *before* the audio is played, since the first final can arrive while the borrower is
    * still speaking, and closed when the next line opens.
    */
-  let currentLine: { turn: string; reference: string; parts: string[] } | null = null;
+  /**
+   * `closedAt` is null until the line has finished being spoken. Null rather than 0, because a 0
+   * would sort before every ledger turn and silently join the wrong one; a null is a measurement
+   * that cannot be joined, which is a thing the score builder already handles honestly.
+   */
+  let currentLine: { turn: string; reference: string; parts: string[]; closedAt: number | null } | null = null;
   const unansweredTurns: Array<string> = [];
   /** Set when the borrower falls silent; cleared by the first delta of the next agent segment. */
   const awaiting: { reply: { turn: string; at: number; audioAt: number | null } | null } = { reply: null };
@@ -326,7 +341,7 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
             if (pending && openedAt >= pending.at) {
               const ms = Date.now() - pending.at;
               const audioMs = pending.audioAt !== null ? pending.audioAt - pending.at : null;
-              turnLatencies.push({ turn: pending.turn, ms, audioMs });
+              turnLatencies.push({ turn: pending.turn, atMs: pending.at, ms, audioMs });
               log(`response latency (${pending.turn}): ${ms}ms (first audio: ${audioMs === null ? "not seen" : `${audioMs}ms`})`);
               awaiting.reply = null;
             }
@@ -371,11 +386,12 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
     /** Score the line that just finished; its transcripts are complete once the next line starts. */
     const closeCurrentLine = () => {
       if (!currentLine) return;
-      const { turn, reference, parts } = currentLine;
+      const { turn, reference, parts, closedAt } = currentLine;
       currentLine = null;
       const hypothesis = parts.join(" ");
       const r = wordErrorRate(reference, hypothesis);
-      werLines.push({ turn, reference, hypothesis, wer: r.wer, substitutions: r.substitutions, insertions: r.insertions, deletions: r.deletions });
+      // A line abandoned mid-playout has no instant; `NaN` joins nothing, which is the honest answer.
+      werLines.push({ turn, atMs: closedAt ?? Number.NaN, reference, hypothesis, wer: r.wer, substitutions: r.substitutions, insertions: r.insertions, deletions: r.deletions });
       log(`stt wer (${turn}): ${r.wer === null ? "n/a" : r.wer.toFixed(3)} (S${r.substitutions} I${r.insertions} D${r.deletions} / N${r.referenceWords}, ${parts.length} final(s))`);
     };
 
@@ -383,13 +399,16 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       closeCurrentLine();
       // Opened before playout: the STT can emit a final for the first phrase while the rest is
       // still being spoken, and that phrase is part of this line, not a stray.
-      currentLine = { turn: label, reference: line.text, parts: [] };
+      currentLine = { turn: label, reference: line.text, parts: [], closedAt: null };
       log(`speaking: ${label}`);
       for (const f of line.frames) await source.captureFrame(f);
       await source.waitForPlayout();
       log(`finished: ${label}`);
+      // The line is over; both measurements about it are anchored to this instant.
+      const spokenAt = Date.now();
+      currentLine.closedAt = spokenAt;
       abandonPendingReply("before the next line"); // the script waited, timed out, and moved on
-      awaiting.reply = { turn: label, at: Date.now(), audioAt: null };
+      awaiting.reply = { turn: label, at: spokenAt, audioAt: null };
     };
     /** Wait until the agent has produced a final segment matching `pattern` (after index `from`). */
     const waitAgentSaid = async (pattern: RegExp, from: number, timeoutMs: number): Promise<number> => {

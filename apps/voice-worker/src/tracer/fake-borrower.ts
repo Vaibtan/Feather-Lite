@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
 import { initializeLogger } from "@livekit/agents";
 import { checkEquivalence, loadScenarioReference } from "./equivalence.js";
-import { buildHarnessScores, ledgerTurnIds, postHarnessScores, summariseWer } from "./harness-scores.js";
+import { buildHarnessScores, ledgerTurns, postHarnessScores, summariseWer } from "./harness-scores.js";
 import { loadScriptedLines, runScriptedCall } from "./scripted-call.js";
 
 loadEnv({ path: fileURLToPath(new URL("../../../../.env", import.meta.url)) });
@@ -100,7 +100,8 @@ await postHarnessScores(
     equivalenceComment: `state path + tools + outcome match scenario ${reference.scenarioId}`,
     werLines: result.werLines,
     turnLatencies: result.turnLatencies,
-    ledgerTurnIds: await ledgerTurnIds(CONTROL_PLANE_URL, result.conversationId),
+    ledgerTurns: await ledgerTurns(CONTROL_PLANE_URL, result.conversationId),
+    log,
   }),
   log,
 );
