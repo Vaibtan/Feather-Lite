@@ -483,7 +483,17 @@ export const SystemStatus = Schema.Struct({
     /** Null in a process with no database, so "not measured" is not reported as an empty pool. */
     pg_pool: Schema.NullOr(Schema.Struct({ size: Schema.Number, idle: Schema.Number, waiting: Schema.Number })),
     /** Each background loop and when it last ticked. A stale one fails `/readyz`. */
-    loops: Schema.Array(Schema.Struct({ name: Schema.String, last_tick_at: Schema.NullOr(Schema.String), interval_ms: Schema.Number, stale: Schema.Boolean })),
+    loops: Schema.Array(
+      Schema.Struct({
+        name: Schema.String,
+        /** Null when the loop is registered but has never completed a tick — which is itself stale. */
+        last_tick_at: Schema.NullOr(Schema.String),
+        interval_ms: Schema.Number,
+        stale: Schema.Boolean,
+        /** Ticks failed in a row. A live loop that errors every time reads fresh here and non-zero. */
+        consecutive_failures: Schema.Number,
+      }),
+    ),
     sse_streams: Schema.Number,
     live_turns: Schema.Number,
     rate_limit_buckets: Schema.Number,

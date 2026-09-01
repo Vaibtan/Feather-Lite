@@ -111,7 +111,11 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
           const stale = yield* processMetrics.staleLoops();
           if (stale.length > 0) {
             return yield* Effect.fail(
-              new ApiUnavailable({ message: `background loop(s) not ticking: ${stale.map((l) => `${l.name} (last ${l.lastTickAt ?? "never"})`).join(", ")}` }),
+              new ApiUnavailable({
+                message: `background loop(s) not ticking: ${stale
+                  .map((l) => `${l.name} (last ${l.lastTickAt ?? "never"}${l.consecutiveFailures > 0 ? `, ${String(l.consecutiveFailures)} consecutive failures` : ""})`)
+                  .join(", ")}`,
+              }),
             );
           }
           const loops = yield* processMetrics.snapshot().pipe(Effect.map((p) => p.loops.map((l) => l.name)));
@@ -172,7 +176,7 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
             process: yield* processMetrics.snapshot().pipe(
               Effect.map((p) => ({
                 ...p,
-                loops: p.loops.map((l) => ({ name: l.name, last_tick_at: l.lastTickAt, interval_ms: l.intervalMs, stale: l.stale })),
+                loops: p.loops.map((l) => ({ name: l.name, last_tick_at: l.lastTickAt, interval_ms: l.intervalMs, stale: l.stale, consecutive_failures: l.consecutiveFailures })),
               })),
             ),
             rate_limiting: {

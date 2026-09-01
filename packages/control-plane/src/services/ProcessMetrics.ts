@@ -20,10 +20,19 @@ import { cpuUsage, memoryUsage } from "node:process";
 /** A scheduler loop that is expected to tick, and when it last did. */
 export interface LoopLiveness {
   readonly name: string;
+  /** `null` when the loop has been registered but has never *completed* a tick. */
   readonly lastTickAt: string | null;
   /** How often it is expected to tick, so staleness is judged against its own cadence. */
   readonly intervalMs: number;
   readonly stale: boolean;
+  /**
+   * Ticks that have failed in a row since the last success.
+   *
+   * A loop erroring on every tick is not the same failure as a loop whose fiber has died, and the
+   * two used to be indistinguishable from outside — both showed as "not ticking". This separates
+   * them: a rising count with a fresh `lastTickAt` is a loop that is alive and failing.
+   */
+  readonly consecutiveFailures: number;
 }
 
 export interface ProcessSnapshot {
@@ -60,8 +69,21 @@ export interface ProcessMetricsSources {
 export class ProcessMetrics extends Effect.Tag("@feather-lite/ProcessMetrics")<
   ProcessMetrics,
   {
-    /** Record that a named loop just ticked. Cheap enough to call on every iteration. */
+    /**
+     * Declare that a loop is expected to tick, before its fiber is forked.
+     *
+     * Without this a loop that dies before completing its first tick — an outbox with bad
+     * credentials, a scheduler whose first claim throws — never entered the map at all, so
+     * `staleLoops()` was `[]` and `/readyz` reported `loops: []` and "ready" for the life of the
+     * process. Registration makes "expected but never seen" a state that can be reported, and a
+     * registered loop with no tick is stale after **one** of its own intervals: there is no slow
+     * first tick to be forgiving of when nothing has happened at all.
+     */
+    readonly register: (loop: string, intervalMs: number) => Effect.Effect<void>;
+    /** Record that a named loop just completed a tick. Cheap enough to call on every iteration. */
     readonly tick: (loop: string, intervalMs: number) => Effect.Effect<void>;
+    /** Record that a tick errored. Does **not** stamp the clock — a failing loop is not a live one. */
+    readonly tickFailed: (loop: string, intervalMs: number) => Effect.Effect<void>;
     readonly snapshot: () => Effect.Effect<ProcessSnapshot>;
     /**
      * Are the background loops alive? A loop that has not ticked in three of its own intervals has
@@ -103,20 +125,54 @@ export const makeProcessMetrics = (sources: ProcessMetricsSources) =>
       }),
     );
 
-    const ticks = new Map<string, { at: number; intervalMs: number }>();
+    /** `at` is null until the loop has completed a tick; `since` is when it was registered. */
+    interface Tick {
+      at: number | null;
+      readonly since: number;
+      intervalMs: number;
+      failures: number;
+    }
+    const ticks = new Map<string, Tick>();
+    /** The loop's row, created on first sight so a `tick` from an unregistered loop is not lost. */
+    const rowFor = (loop: string, intervalMs: number): Tick => {
+      const existing = ticks.get(loop);
+      if (existing) {
+        existing.intervalMs = intervalMs;
+        return existing;
+      }
+      const fresh: Tick = { at: null, since: Date.now(), intervalMs, failures: 0 };
+      ticks.set(loop, fresh);
+      return fresh;
+    };
 
     const loops = (): ReadonlyArray<LoopLiveness> => {
       const now = Date.now();
       return [...ticks].map(([name, t]) => ({
         name,
-        lastTickAt: new Date(t.at).toISOString(),
+        lastTickAt: t.at === null ? null : new Date(t.at).toISOString(),
         intervalMs: t.intervalMs,
-        stale: now - t.at > t.intervalMs * STALE_TICKS,
+        /**
+         * One interval for a loop that has never ticked, three for one that has. There is no slow
+         * first tick to forgive when nothing has completed at all, and a loop whose fiber died on
+         * its first iteration is precisely the case `/readyz` could not see.
+         */
+        stale: t.at === null ? now - t.since > t.intervalMs : now - t.at > t.intervalMs * STALE_TICKS,
+        consecutiveFailures: t.failures,
       }));
     };
 
     return {
-      tick: (loop: string, intervalMs: number) => Effect.sync(() => ticks.set(loop, { at: Date.now(), intervalMs })),
+      register: (loop: string, intervalMs: number) => Effect.sync(() => void rowFor(loop, intervalMs)),
+      tick: (loop: string, intervalMs: number) =>
+        Effect.sync(() => {
+          const row = rowFor(loop, intervalMs);
+          row.at = Date.now();
+          row.failures = 0;
+        }),
+      tickFailed: (loop: string, intervalMs: number) =>
+        Effect.sync(() => {
+          rowFor(loop, intervalMs).failures += 1;
+        }),
       staleLoops: () => Effect.sync(() => loops().filter((l) => l.stale)),
       snapshot: () =>
         Effect.sync(() => {

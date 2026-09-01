@@ -19,7 +19,7 @@ const snapshot = (over: Partial<ProcessSnapshot> = {}): ProcessSnapshot => ({
   memory_bytes: { rss: 168_000_000, heap_used: 40_000_000, heap_total: 60_000_000, external: 2_000_000 },
   gc: { total_pause_ms: 30, collections: 7 },
   pg_pool: { size: 10, idle: 8, waiting: 0 },
-  loops: [{ name: "outbox", lastTickAt: new Date(Date.now() - 4_000).toISOString(), intervalMs: 5_000, stale: false }],
+  loops: [{ name: "outbox", lastTickAt: new Date(Date.now() - 4_000).toISOString(), intervalMs: 5_000, stale: false, consecutiveFailures: 0 }],
   sse_streams: 2,
   live_turns: 5,
   rate_limit_buckets: 3,
@@ -81,9 +81,17 @@ describe("prometheus exposition", () => {
   });
 
   it("reports a stopped loop as stale, which is the same verdict /readyz reaches", async () => {
-    const text = await render({ loops: [{ name: "outbox", lastTickAt: new Date(Date.now() - 60_000).toISOString(), intervalMs: 5_000, stale: true }] });
+    const text = await render({ loops: [{ name: "outbox", lastTickAt: new Date(Date.now() - 60_000).toISOString(), intervalMs: 5_000, stale: true, consecutiveFailures: 0 }] });
     expect(text).toContain('feather_lite_loop_stale{loop="outbox"} 1');
     expect(text).toMatch(/feather_lite_loop_last_tick_age_seconds\{loop="outbox"} 6\d(\.\d+)?/);
+  });
+
+  it("separates a loop that is failing from one that has stopped", async () => {
+    // A loop erroring on every tick used to be indistinguishable from a healthy one, because the
+    // stamp was written on the error path too. Fresh age, non-zero failures: alive and failing.
+    const text = await render({ loops: [{ name: "outbox", lastTickAt: new Date(Date.now() - 1_000).toISOString(), intervalMs: 5_000, stale: false, consecutiveFailures: 4 }] });
+    expect(text).toContain('feather_lite_loop_consecutive_failures{loop="outbox"} 4');
+    expect(text).toContain('feather_lite_loop_stale{loop="outbox"} 0');
   });
 
   it("registers the counter family even with nothing counted yet, so an absent series is not read as a zero", async () => {

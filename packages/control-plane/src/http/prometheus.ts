@@ -111,10 +111,17 @@ export const prometheusText = async (input: ExpositionInput): Promise<string> =>
    */
   const loopAge = new Gauge({ name: "feather_lite_loop_last_tick_age_seconds", help: "Seconds since a background loop last completed a tick.", labelNames: ["loop"], registers });
   const loopStale = new Gauge({ name: "feather_lite_loop_stale", help: "1 when a background loop has missed three of its own intervals.", labelNames: ["loop"], registers });
+  /**
+   * The third: a loop that is alive and failing every tick reads fresh on `age` and non-zero here.
+   * Before this it was indistinguishable from a healthy loop, because the stamp was written on the
+   * error path too.
+   */
+  const loopFailures = new Gauge({ name: "feather_lite_loop_consecutive_failures", help: "Ticks a background loop has failed in a row since its last success.", labelNames: ["loop"], registers });
   const now = Date.now();
   for (const l of p.loops) {
     if (l.lastTickAt !== null) loopAge.set({ loop: l.name }, Math.max(0, Math.round((now - Date.parse(l.lastTickAt)) / 10) / 100));
     loopStale.set({ loop: l.name }, l.stale ? 1 : 0);
+    loopFailures.set({ loop: l.name }, l.consecutiveFailures);
   }
 
   gauge("feather_lite_sse_streams", "Open server-sent-event turn streams.", p.sse_streams);

@@ -367,12 +367,25 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
      * which the turn path gets the interval back whether or not the queue is clear.
      */
     const MAX_BATCHES_PER_TICK = 10;
-    const drain = (limit = 20) =>
+    /**
+     * `onBatch` exists so liveness is reported at the rate work is actually done (review #9).
+     *
+     * A full drain is up to 10 batches of 20, and with the judge on a single batch can wait tens of
+     * seconds on a model — longer than the 15 s staleness window `/readyz` allows. So the busier
+     * the outbox was, the more likely it was to be reported dead: the signal fired hardest when the
+     * fiber was healthiest. Stamping per batch means the loop says "still working" while it works,
+     * and the only thing that can go stale is a loop that has genuinely stopped.
+     *
+     * A callback rather than a `ProcessMetrics` dependency: this service knows when a batch is
+     * done, and nothing else about who is watching.
+     */
+    const drain = (limit = 20, onBatch?: Effect.Effect<void>) =>
       Effect.gen(function* () {
         let processed = 0;
         for (let i = 0; i < MAX_BATCHES_PER_TICK; i++) {
           const batch = yield* runOnce(limit);
           processed += batch.length;
+          if (onBatch) yield* onBatch;
           if (batch.length < limit) break;
           // Cooperative: a full batch means there is more, and the turn path is on this event loop.
           yield* Effect.yieldNow();

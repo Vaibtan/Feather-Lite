@@ -84,24 +84,44 @@ const SchedulersLive = Layer.scopedDiscard(
      * and `/readyz` fails — which is the point: a process with a dead outbox answers HTTP perfectly
      * and is not ready, and nothing could tell the difference before.
      *
-     * Stamped after the run, so a tick that throws does not claim to have happened. The error is
-     * already logged and swallowed below to keep the loop alive.
+     * **Two orderings here were wrong and both made the instrument lie in the direction of "fine"**
+     * (review #3). `catchAll` used to precede the stamp, so a loop that errored on *every* tick
+     * kept stamping `last_tick_at` and `/readyz` stayed green for ever — an outbox with bad
+     * credentials was invisible. And the loop only entered the map on its first completed tick, so
+     * one that died before that never appeared at all and `/readyz` reported `loops: []` and ready.
+     *
+     * So: register before forking, stamp only on the success path, and count the failures on the
+     * error path. A loop that is alive and failing now reads as a fresh tick with a rising
+     * `consecutive_failures`, which is a different fact from a loop that has stopped.
+     *
+     * `run` takes the stamp rather than being a plain `Effect` because one loop needs to report
+     * progress *inside* a tick: an outbox drain is up to ten batches and can outlast its own
+     * staleness window (review #9). Handing the stamp down is what lets the interval and the loop's
+     * name stay written once, here, instead of being repeated at the call site.
      */
-    const tick = <A, E, R>(name: string, run: Effect.Effect<A, E, R>, every: Duration.DurationInput) =>
-      run.pipe(
-        Effect.tapError((e) => Effect.logError(`${name} tick failed`, e)),
-        Effect.catchAll(() => Effect.void),
-        Effect.zipLeft(process.tick(name, Duration.toMillis(Duration.decode(every)))),
-        Effect.repeat(Schedule.spaced(every)),
-        Effect.forkScoped,
-      );
-    yield* tick("scheduled-actions", scheduling.runOnce(20), "15 seconds");
+    const tick = <A, E, R>(name: string, run: (onProgress: Effect.Effect<void>) => Effect.Effect<A, E, R>, every: Duration.DurationInput) =>
+      Effect.gen(function* () {
+        const intervalMs = Duration.toMillis(Duration.decode(every));
+        const stamp = process.tick(name, intervalMs);
+        yield* process.register(name, intervalMs);
+        return yield* run(stamp).pipe(
+          Effect.zipLeft(stamp),
+          Effect.tapError((e) => Effect.logError(`${name} tick failed`, e)),
+          Effect.tapError(() => process.tickFailed(name, intervalMs)),
+          Effect.catchAll(() => Effect.void),
+          Effect.repeat(Schedule.spaced(every)),
+          Effect.forkScoped,
+        );
+      });
+    yield* tick("scheduled-actions", () => scheduling.runOnce(20), "15 seconds");
     // `drain`, not `runOnce`: a full batch means there is more waiting, and a backlog should clear
-    // at the rate the work can be done rather than at the rate this loop polls (C2).
-    yield* tick("outbox", outbox.drain(20), "5 seconds");
+    // at the rate the work can be done rather than at the rate this loop polls (C2). The stamp is
+    // passed in so a long drain reports liveness per batch rather than only when it finishes —
+    // otherwise a *busy* outbox is what trips `/readyz` (review #9).
+    yield* tick("outbox", (onBatch) => outbox.drain(20, onBatch), "5 seconds");
     // Every 10 s, so worst-case detection is one heartbeat interval past the staleness window
     // (~40 s) and typical is ~35 s — the number D6 set.
-    yield* tick("sweeper", sweeper.runOnce(20), "10 seconds");
+    yield* tick("sweeper", () => sweeper.runOnce(20), "10 seconds");
     // Which media plane resolved matters: without LiveKit every sweep falls back to the long
     // unconfirmed window, which is a very different detection time than the ~35 s headline.
     yield* Effect.logInfo(`schedulers started (sweeper ${cfg.sweeperEnabled ? `on, ${sweeper.stalenessMs} ms staleness, confirming via ${media.name}` : "off"})`);

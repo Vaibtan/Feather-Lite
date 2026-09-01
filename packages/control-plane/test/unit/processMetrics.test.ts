@@ -50,6 +50,50 @@ describe("ProcessMetrics", () => {
     expect(stale.dead.map((l) => l.name)).toEqual(["outbox"]);
   });
 
+  it("reports a registered loop that has never ticked as stale after one interval", async () => {
+    // The hole `/readyz` could not see: a loop whose fiber died before its first completed tick
+    // never entered the map at all, so `staleLoops()` was `[]` and the process reported ready for
+    // as long as it ran. One interval, not three — there is no slow first tick to forgive when
+    // nothing has happened.
+    vi.useFakeTimers();
+    const out = await withMetrics((m) =>
+      Effect.gen(function* () {
+        yield* m.register("outbox", 5_000);
+        const early = yield* m.staleLoops();
+        vi.setSystemTime(Date.now() + 5_001);
+        const late = yield* m.staleLoops();
+        return { early, late };
+      }),
+    );
+    expect(out.early).toEqual([]);
+    expect(out.late.map((l) => l.name)).toEqual(["outbox"]);
+    expect(out.late[0]?.lastTickAt).toBeNull();
+  });
+
+  it("does not stamp the clock for a failed tick, and counts the failures in a row", async () => {
+    // The other half of the same defect: `catchAll` ran before the stamp, so a loop that errored on
+    // every tick kept claiming to have ticked. An outbox with bad credentials stayed green.
+    vi.useFakeTimers();
+    const out = await withMetrics((m) =>
+      Effect.gen(function* () {
+        yield* m.tick("outbox", 5_000);
+        vi.setSystemTime(Date.now() + 5_000 * STALE_TICKS + 1);
+        yield* m.tickFailed("outbox", 5_000);
+        yield* m.tickFailed("outbox", 5_000);
+        const stale = yield* m.staleLoops();
+        // ...and a success clears the count, so the gauge means "in a row" and not "ever".
+        yield* m.tick("outbox", 5_000);
+        const recovered = yield* m.staleLoops();
+        const snapshot = yield* m.snapshot();
+        return { stale, recovered, failures: snapshot.loops[0]?.consecutiveFailures };
+      }),
+    );
+    expect(out.stale.map((l) => l.name)).toEqual(["outbox"]);
+    expect(out.stale[0]?.consecutiveFailures).toBe(2);
+    expect(out.recovered).toEqual([]);
+    expect(out.failures).toBe(0);
+  });
+
   it("judges each loop against its own cadence, not a shared one", async () => {
     // The sweeper ticks every 10 s and the scheduled actions every 15 s; a rule with one timeout
     // would call the slower one dead while it was working perfectly.

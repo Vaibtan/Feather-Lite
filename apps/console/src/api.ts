@@ -247,7 +247,7 @@ export interface SystemStatus {
     memory_bytes: { rss: number; heap_used: number; heap_total: number; external: number };
     gc: { total_pause_ms: number; collections: number };
     pg_pool: { size: number; idle: number; waiting: number } | null;
-    loops: Array<{ name: string; last_tick_at: string | null; interval_ms: number; stale: boolean }>;
+    loops: Array<{ name: string; last_tick_at: string | null; interval_ms: number; stale: boolean; consecutive_failures: number }>;
     sse_streams: number;
     live_turns: number;
     rate_limit_buckets: number;
