@@ -15,13 +15,20 @@ import { availableParallelism } from "node:os";
 import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
 import { type AgentServer, type JobContext, type JobProcess, ServerOptions, cli, defineAgent, voice } from "@livekit/agents";
-import * as silero from "@livekit/agents-plugin-silero";
 import { RoomServiceClient, SipClient } from "livekit-server-sdk";
 import { createAdmissionController } from "./admission.js";
 import { ControlPlaneClient } from "./control-plane-client.js";
 import { FeatherAgent } from "./feather-agent.js";
 import { buildSpeechStack } from "./speech.js";
 import { RemoteOrchestratorLLM } from "./tracer/remote-orchestrator-llm.js";
+/**
+ * Type-only, deliberately (review #6). The value import pulled `onnxruntime-node` — a native addon —
+ * in at module scope, and this module's top level runs in **every** process: the main worker and
+ * each forked job process, because `job_proc_lazy_main` imports the file for its default export.
+ * Measured at +73.8 MB RSS per process, for a module only `prewarm` uses. Same class of defect W1
+ * removed for `@livekit/local-inference`; the import moved into `prewarm`, below.
+ */
+import type * as silero from "@livekit/agents-plugin-silero";
 
 loadEnv({ path: fileURLToPath(new URL("../../../.env", import.meta.url)) });
 
@@ -116,7 +123,9 @@ const parseMeta = (raw: string | undefined): RoomMeta => {
 
 export default defineAgent({
   prewarm: async (proc: JobProcess) => {
-    proc.userData.vad = await silero.VAD.load();
+    // The one place the addon is needed, and it runs only in a job process.
+    const { VAD } = await import("@livekit/agents-plugin-silero");
+    proc.userData.vad = await VAD.load();
   },
   entry: async (ctx: JobContext) => {
     const log = (msg: string, extra: Record<string, unknown> = {}) => console.log(`[feather] ${msg} ${Object.keys(extra).length ? JSON.stringify(extra) : ""}`);
