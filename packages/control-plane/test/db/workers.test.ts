@@ -3,7 +3,7 @@
  * callbacks, reschedules to the next contact window on TCPA failure, and the outbox worker
  * processes post-call jobs with OUTBOX_PROCESSED events.
  */
-import { DateTime, Effect, Layer, Option } from "effect";
+import { DateTime, Effect, Layer, Option, Redacted } from "effect";
 import { localIsoDate, nextLocalHour } from "@feather-lite/domain";
 import { PgClient } from "@effect/sql-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -21,7 +21,8 @@ import {
 } from "../../src/index.js";
 import { makeInfraLayer, makeRuntime, truncateAll } from "./harness.js";
 
-const layer = Layer.mergeAll(
+/** One service graph; the two runtimes below differ only in how the media plane is configured. */
+const services = Layer.mergeAll(
   Orchestrator.Default,
   WorkflowService.Default,
   SchedulingService.Default,
@@ -30,8 +31,24 @@ const layer = Layer.mergeAll(
   ConversationRepo.Default,
   SchedulingRepo.Default,
   IdGen.Default,
-).pipe(Layer.provide(ScriptedTurnDeciderLive), Layer.provideMerge(makeInfraLayer()));
-const rt = makeRuntime(layer);
+).pipe(Layer.provide(ScriptedTurnDeciderLive));
+
+const rt = makeRuntime(services.pipe(Layer.provideMerge(makeInfraLayer())));
+
+/**
+ * The same graph against a media plane that is configured and will not answer (review #11).
+ *
+ * Port 1 refuses immediately, so this is the "LiveKit exists and did not answer" case rather than
+ * the "nothing is configured" one — the branch that now runs in its own second transaction, after
+ * the first has committed and released the conversation row.
+ */
+const rtNoAnswer = makeRuntime(
+  services.pipe(
+    Layer.provideMerge(
+      makeInfraLayer({ livekit: { url: "http://127.0.0.1:1", apiKey: "k", apiSecret: Redacted.make("s"), agentName: "feather-lite-agent" } }),
+    ),
+  ),
+);
 
 const seedBorrower = (name: string, tz: string, phone: string) =>
   Effect.gen(function* () {
@@ -51,6 +68,7 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   await rt.dispose();
+  await rtNoAnswer.dispose();
 });
 
 describe("scheduled-action worker", () => {
@@ -129,6 +147,49 @@ describe("scheduled-action worker", () => {
     expect(out.actions[0]?.status).toBe("FAILED");
     // And - the point - no phantom conversation for the sweeper to find later.
     expect(out.after).toBe(out.before);
+  });
+
+  it("records a dispatch that the media plane refused, in a transaction of its own (review #11)", async () => {
+    // The other side of the case above: LiveKit *is* configured and does not answer. That branch now
+    // runs after the first transaction has committed and released the conversation row, because
+    // `dispatchAgent` is an HTTP call and ADR 0003 forbids one under a lock. So the end state is a
+    // conversation that exists with no agent dispatched to it - which the sweeper books as
+    // NEVER_SERVED - and an action recorded FAILED by a second, short transaction.
+    const out = await rtNoAnswer.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* PgClient.PgClient;
+        const { borrowerId, cpId } = yield* seedBorrower("Refused Dispatch Person", "America/New_York", "+15550002011");
+        const ids = yield* IdGen;
+        const repo = yield* SchedulingRepo;
+        const sched = yield* SchedulingService;
+        const orch = yield* Orchestrator;
+        const first = yield* (yield* WorkflowService).startCall({ borrowerId, contactPointId: cpId, channel: "voice", now: FROZEN_NOW });
+        yield* orch.processSignal(first.conversationId, { kind: "no_answer" });
+        const wfId = first.workflowExecutionId;
+        for (const a of (yield* repo.listForWorkflow(wfId)).filter((x) => x.status === "PENDING")) {
+          yield* repo.setActionStatus(a.id, "CANCELED", { canceled_reason: "test" });
+        }
+        const before = yield* sql<{ n: string }>`SELECT count(*)::text AS n FROM conversations`;
+        yield* repo.insertScheduledAction({
+          id: yield* ids.next(),
+          workflowExecutionId: wfId,
+          actionType: "RETRY_CALL",
+          dueAt: DateTime.toDateUtc(DateTime.subtract(FROZEN_NOW, { minutes: 1 })),
+          payload: { borrower_id: borrowerId, contact_point_id: cpId, channel: "voice", reason: "no_answer" },
+        });
+        const processed = yield* sched.runOnce(20, FROZEN_NOW);
+        const after = yield* sql<{ n: string }>`SELECT count(*)::text AS n FROM conversations`;
+        const actions = yield* repo.listForWorkflow(wfId);
+        return { processed, before: Number(before[0]?.n ?? 0), after: Number(after[0]?.n ?? 0), actions };
+      }),
+    );
+    expect(out.processed).toHaveLength(1);
+    expect(out.processed[0]?.status).toBe("FAILED");
+    expect(out.processed[0]?.detail).toMatchObject({ reason: "DISPATCH_FAILED" });
+    expect(out.actions.find((a) => a.status === "FAILED")?.payload["reason"]).toBe("DISPATCH_FAILED");
+    // The conversation the first transaction opened is committed and left for the sweeper. That is
+    // the deliberate difference from NO_MEDIA_PLANE, where nothing is written at all.
+    expect(out.after).toBe(out.before + 1);
   });
 
   it("reschedules a callback that comes due outside the TCPA window to the next 08:00 local", async () => {

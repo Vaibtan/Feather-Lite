@@ -109,14 +109,24 @@ export class SchedulingService extends Effect.Service<SchedulingService>()("@fea
     const cancelPending = (workflowExecutionId: string, reason: string, actionTypes: ReadonlyArray<ScheduledActionType> | null) =>
       sched.cancelPending({ workflowExecutionId, reason, actionTypes });
 
-    /** Execute one claimed action in its own transaction. */
-    const processOne = (action: ScheduledActionRow, now: DateTime.Utc): Effect.Effect<ProcessedAction, unknown> =>
+    /**
+     * What the first transaction concluded: either the action is settled, or a room has to be
+     * dispatched to — which is an HTTP call to the media plane and must not happen under a lock.
+     */
+    type Prepared =
+      | { readonly kind: "settled"; readonly result: ProcessedAction }
+      | { readonly kind: "dispatch"; readonly conversationId: string; readonly callAttemptId: string; readonly roomName: string; readonly metadata: string };
+
+    const settled = (result: ProcessedAction) => ({ kind: "settled", result }) as const;
+
+    /** Everything about one claimed action that is only Postgres. Commits before anything is dialled. */
+    const prepare = (action: ScheduledActionRow, now: DateTime.Utc): Effect.Effect<Prepared, unknown> =>
       sql.withTransaction(
         Effect.gen(function* () {
           if (action.actionType === "HUMAN_FOLLOWUP") {
             yield* conv.setWorkflowStatus(action.workflowExecutionId, "RUNNING");
             yield* sched.setActionStatus(action.id, "DONE", { handled: "queued_for_human" });
-            return { actionId: action.id, actionType: action.actionType, status: "DONE", detail: { queue: action.payload["queue"] } } satisfies ProcessedAction;
+            return settled({ actionId: action.id, actionType: action.actionType, status: "DONE", detail: { queue: action.payload["queue"] } });
           }
           const borrowerId = String(action.payload["borrower_id"] ?? "");
           const contactPointId = String(action.payload["contact_point_id"] ?? "");
@@ -133,6 +143,9 @@ export class SchedulingService extends Effect.Service<SchedulingService>()("@fea
            * seconds after it was created, and dragged the fleet's `orphan_detect_ms` p95 from
            * 38 902 ms to 308 860 ms — a number describing a call that never had a worker to lose.
            *
+           * So a voice re-dial must both open the conversation *and* dispatch an agent to the room,
+           * which is why this function ends by handing the dispatch back rather than by finishing.
+           *
            * `sip` because a scheduled re-dial is outbound: there is no browser tab waiting on the
            * other end of it.
            */
@@ -142,7 +155,7 @@ export class SchedulingService extends Effect.Service<SchedulingService>()("@fea
           if (channel === "voice" && !hasMediaPlane(cfg)) {
             yield* Effect.logWarning(`scheduled ${action.actionType} for borrower ${borrowerId} cannot place a voice call: no media plane configured`);
             yield* sched.setActionStatus(action.id, "FAILED", { reason: NO_MEDIA_PLANE });
-            return { actionId: action.id, actionType: action.actionType, status: "FAILED", detail: { reason: NO_MEDIA_PLANE } } satisfies ProcessedAction;
+            return settled({ actionId: action.id, actionType: action.actionType, status: "FAILED", detail: { reason: NO_MEDIA_PLANE } });
           }
 
           const started = yield* workflow
@@ -158,42 +171,30 @@ export class SchedulingService extends Effect.Service<SchedulingService>()("@fea
 
           if (started._tag === "Right") {
             const conversationId = started.right.conversationId;
-            /**
-             * **Dispatch an agent to it (O4).** `startCall` opens a conversation and nothing else;
-             * for `channel: 'voice'` that produced a call no worker was ever told about. The room
-             * was never created, nobody claimed it, and the sweeper finalized it as an orphan on
-             * the long unconfirmed window. Measured, unprompted: conversation `ae312a15…` from
-             * attempt 4 was swept 5 minutes 9 seconds after creation and pulled the fleet's
-             * `orphan_detect_ms` p95 from 38 902 ms to 308 860 ms — describing a call that never
-             * had a worker to lose.
-             */
             if (channel === "voice") {
-              const roomName = roomNameFor(conversationId);
-              const metadata = JSON.stringify({
-                conversation_id: conversationId,
-                workflow_execution_id: started.right.workflowExecutionId,
-                call_attempt_id: started.right.callAttemptId,
-                borrower_id: borrowerId,
-                contact_point_id: contactPointId,
-                // Outbound: a scheduled re-dial has no browser tab waiting on the other end.
-                mode: "sip",
-                channel: "voice",
-                opening_text: started.right.openingText,
-              });
-              const dispatched = yield* dispatchAgent(cfg, { roomName, metadata, emptyTimeoutSeconds: 300 }).pipe(Effect.either);
-              if (dispatched._tag === "Left") {
-                // The media plane exists and did not answer. The conversation is left for the
-                // sweeper, which now finalizes a call no worker ever claimed as NEVER_SERVED
-                // rather than timing it as an orphan — closing it from here would mean importing
-                // the orchestrator, and the orchestrator imports this service.
-                yield* Effect.logWarning(`scheduled ${action.actionType} could not dispatch an agent: ${dispatched.left.detail}`);
-                yield* sched.setActionStatus(action.id, "FAILED", { reason: "DISPATCH_FAILED", detail: dispatched.left.detail });
-                return { actionId: action.id, actionType: action.actionType, status: "FAILED", detail: { reason: "DISPATCH_FAILED" } } satisfies ProcessedAction;
-              }
-              yield* conv.setAttemptProviderCallId(started.right.callAttemptId, `${roomName}/${dispatched.right}`);
+              // A voice call still needs an agent dispatched to it (O4, above) — but that is an
+              // HTTP call, so it is handed back to `processOne`, which dials with no transaction
+              // open and records the answer in a second, short one.
+              return {
+                kind: "dispatch",
+                conversationId,
+                callAttemptId: started.right.callAttemptId,
+                roomName: roomNameFor(conversationId),
+                metadata: JSON.stringify({
+                  conversation_id: conversationId,
+                  workflow_execution_id: started.right.workflowExecutionId,
+                  call_attempt_id: started.right.callAttemptId,
+                  borrower_id: borrowerId,
+                  contact_point_id: contactPointId,
+                  // Outbound: a scheduled re-dial has no browser tab waiting on the other end.
+                  mode: "sip",
+                  channel: "voice",
+                  opening_text: started.right.openingText,
+                }),
+              } as const;
             }
             yield* sched.setActionStatus(action.id, "DONE", { conversation_id: conversationId });
-            return { actionId: action.id, actionType: action.actionType, status: "DONE", detail: { conversation_id: conversationId } } satisfies ProcessedAction;
+            return settled({ actionId: action.id, actionType: action.actionType, status: "DONE", detail: { conversation_id: conversationId } });
           }
           const err = started.left;
           if (err instanceof PreCallRejected && err.failures.includes("TCPA_TIME_WINDOW") && attempts < 3) {
@@ -201,13 +202,59 @@ export class SchedulingService extends Effect.Service<SchedulingService>()("@fea
             const tz = Option.isSome(borrower) ? borrower.value.timezone : "UTC";
             const next = DateTime.toDateUtc(nextLocalHour(now, tz, POLICY.contactWindowStartHour));
             yield* sched.setActionStatus(action.id, "PENDING", { retry_count: attempts + 1, last_error: "TCPA_TIME_WINDOW" }, next);
-            return { actionId: action.id, actionType: action.actionType, status: "RESCHEDULED", detail: { due_at: next.toISOString() } } satisfies ProcessedAction;
+            return settled({ actionId: action.id, actionType: action.actionType, status: "RESCHEDULED", detail: { due_at: next.toISOString() } });
           }
           const reason = err instanceof PreCallRejected ? err.failures.join(",") : String(err);
           yield* sched.setActionStatus(action.id, "CANCELED", { canceled_reason: reason, retry_count: attempts + 1 });
-          return { actionId: action.id, actionType: action.actionType, status: "CANCELED", detail: { reason } } satisfies ProcessedAction;
+          return settled({ actionId: action.id, actionType: action.actionType, status: "CANCELED", detail: { reason } });
         }),
       );
+
+    /**
+     * Execute one claimed action: prepare, dispatch, record.
+     *
+     * **The dispatch is no longer inside a transaction** (review #11). `dispatchAgent` is an HTTP
+     * call to LiveKit, and it was made after `startCall` had written and row-locked the
+     * conversation - the pattern ADR 0003 forbids, on the loop that also serves callbacks. A slow
+     * media plane held a Postgres transaction and the conversation row for the length of an HTTP
+     * timeout, and twenty such actions serialised behind it.
+     *
+     * The window between the two transactions is a conversation that exists with no agent
+     * dispatched to it, which the sweeper already finalizes as `NEVER_SERVED` - a call that never
+     * had a worker, distinct from one that lost hers (O4). The action row is left `CLAIMED`, which
+     * is not new: `claimDue` commits the claim in its own transaction before this is called, so a
+     * crash here has always left the action claimed.
+     *
+     * **What is new, and bounded:** if the *second* transaction itself fails - not a refused
+     * dispatch, which is caught, but the recording of it - `runOnce` reschedules the action to
+     * `PENDING` with one conversation already committed. The next tick's `startCall` then fails
+     * pre-call with `ACTIVE_CONVERSATION` (that conversation is still open), which is not the TCPA
+     * branch, so the action is `CANCELED` rather than re-dialled until the sweeper clears the
+     * conversation. One leaked conversation per crash, not per retry, and visible as a
+     * `NEVER_SERVED` finalization rather than as silence.
+     */
+    const processOne = (action: ScheduledActionRow, now: DateTime.Utc): Effect.Effect<ProcessedAction, unknown> =>
+      Effect.gen(function* () {
+        const prepared = yield* prepare(action, now);
+        if (prepared.kind === "settled") return prepared.result;
+        const dispatched = yield* dispatchAgent(cfg, { roomName: prepared.roomName, metadata: prepared.metadata, emptyTimeoutSeconds: 300 }).pipe(Effect.either);
+        return yield* sql.withTransaction(
+          Effect.gen(function* () {
+            if (dispatched._tag === "Left") {
+              // The media plane exists and did not answer. The conversation is left for the
+              // sweeper, which finalizes a call no worker ever claimed as NEVER_SERVED rather than
+              // timing it as an orphan - closing it from here would mean importing the
+              // orchestrator, and the orchestrator imports this service.
+              yield* Effect.logWarning(`scheduled ${action.actionType} could not dispatch an agent: ${dispatched.left.detail}`);
+              yield* sched.setActionStatus(action.id, "FAILED", { reason: "DISPATCH_FAILED", detail: dispatched.left.detail });
+              return { actionId: action.id, actionType: action.actionType, status: "FAILED", detail: { reason: "DISPATCH_FAILED" } } satisfies ProcessedAction;
+            }
+            yield* conv.setAttemptProviderCallId(prepared.callAttemptId, `${prepared.roomName}/${dispatched.right}`);
+            yield* sched.setActionStatus(action.id, "DONE", { conversation_id: prepared.conversationId });
+            return { actionId: action.id, actionType: action.actionType, status: "DONE", detail: { conversation_id: prepared.conversationId } } satisfies ProcessedAction;
+          }),
+        );
+      });
 
     /** One worker tick: claim due actions and process each. `nowOverride` is for tests/demo. */
     const runOnce = (limit = 20, nowOverride?: DateTime.Utc) =>
