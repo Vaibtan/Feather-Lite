@@ -65,14 +65,31 @@ exact the instant a job is accepted. **And that was not enough, which is the par
 still says idle. No threshold, however low, catches it, and the framework's default `requestFunc`
 accepts whatever it is offered.
 
-The ceiling is therefore enforced in `requestFunc`, where the answer is given, against
-`activeJobs + admitting` — `admitting` exists because `activeJobs` only counts a job once
-`launchJob` has run, which is after the accept and the SFU's assignment round trip.
+The ceiling is therefore enforced in `requestFunc`, where the answer is given, against the union
+of the running jobs and the admitted ones — `admitting` exists because `activeJobs` only counts a job
+once `launchJob` has run, which is after the accept and the SFU's assignment round trip.
 
-**Measured after**: three calls started together against `WORKER_MAX_JOBS=1` — one admitted, two
-refused, and both refused calls finalized `FAILED` with reason `NEVER_SERVED` about 38 seconds later.
-That is the O4 distinction (a call that never had a worker, as against one that lost hers) firing on
-real shed load rather than on a chaos script.
+**Corrected on 2026-09-01 (review #1).** This paragraph described a behaviour the code did not have,
+and the measurement below did not test the difference.
+
+`JobRequest.accept()` calls the worker's `#onAccept` **without awaiting it**
+(`agents/dist/job.js:468-471`), so `await req.accept()` returned before the SFU round trip had
+started: `admitting` was decremented in the same microtask it was incremented in, and the ceiling
+collapsed back to the stale `activeJobs` it was written to replace. The fix fires the accept without
+awaiting it and waits for the job id to appear in `activeJobs` or for the assignment to time out.
+
+And the original measurement **could not have caught that**, which is the more useful half of this
+correction. Its three rooms were created over separate HTTP calls, so the first job had reached
+`activeJobs` before the second request arrived — "one served, two refused" follows from the stale
+count alone. A probe of a concurrency window has to be concurrent.
+
+**Measured after, 2026-09-01** (`docs/loadtest/README.md`, Phase 0): four sessions created in one
+`Promise.all` against `WORKER_MAX_JOBS=2` — two admitted, two refused, and both refused calls
+finalized `FAILED` with reason `NEVER_SERVED` about 38 seconds later. The worker's own line at the
+third refusal reads `in_flight 2, running 1, admitting 2, max_jobs 2`: `activeJobs` held one job
+against a ceiling of two, so the code this replaces would have accepted both surplus calls. That is
+the O4 distinction (a call that never had a worker, as against one that lost hers) firing on real
+shed load rather than on a chaos script, and this time the probe can tell.
 
 `loadThreshold` keeps its original meaning and is not a ceiling: it is the point at which this worker
 asks the SFU to prefer somebody else, which matters when there is a somebody else.

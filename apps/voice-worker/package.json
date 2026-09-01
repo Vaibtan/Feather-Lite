@@ -16,7 +16,8 @@
     "start": "node dist/agent.js start",
     "fake-borrower": "tsx src/tracer/fake-borrower.ts",
     "fake-borrower-fleet": "tsx src/tracer/fake-borrower-fleet.ts",
-    "chaos-orphan": "tsx src/tracer/chaos-orphan.ts"
+    "chaos-orphan": "tsx src/tracer/chaos-orphan.ts",
+    "shed-probe": "tsx src/tracer/shed-probe.ts"
   },
   "dependencies": {
     "@effect/platform": "^0.97.1",

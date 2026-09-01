@@ -1,0 +1,149 @@
+{
+  "kind": "idle-tree",
+  "label": "phase0",
+  "seconds": 60,
+  "taken_at": "2026-09-01T09:51:59.821Z",
+  "resources": {
+    "platform": "win32",
+    "vcpus": 12,
+    "interval_ms": 1000,
+    "samples": 60,
+    "wall_ms": 61051,
+    "load_wall_ms": 60347,
+    "marked": false,
+    "roles": [
+      {
+        "role": "server",
+        "pids": [
+          14408
+        ],
+        "samples": 60,
+        "peak_rss_bytes": 131481600,
+        "peak_private_bytes": 138928128,
+        "cpu_seconds": 0.203,
+        "idle_rss_bytes": 130498560,
+        "last_rss_bytes": 131481600
+      },
+      {
+        "role": "worker-main",
+        "pids": [
+          876
+        ],
+        "samples": 60,
+        "peak_rss_bytes": 134246400,
+        "peak_private_bytes": 112324608,
+        "cpu_seconds": 0.359,
+        "idle_rss_bytes": 134004736,
+        "last_rss_bytes": 134246400
+      },
+      {
+        "role": "worker-inference",
+        "pids": [
+          3948
+        ],
+        "samples": 60,
+        "peak_rss_bytes": 958234624,
+        "peak_private_bytes": 870383616,
+        "cpu_seconds": 0.031,
+        "idle_rss_bytes": 958210048,
+        "last_rss_bytes": 958234624
+      },
+      {
+        "role": "worker-job",
+        "pids": [
+          20696,
+          21564,
+          23704,
+          25276
+        ],
+        "samples": 60,
+        "peak_rss_bytes": 638763008,
+        "peak_private_bytes": 519507968,
+        "cpu_seconds": 0.031,
+        "idle_rss_bytes": 638668800,
+        "last_rss_bytes": 638763008
+      },
+      {
+        "role": "harness",
+        "pids": [
+          13712,
+          21252,
+          22936
+        ],
+        "samples": 60,
+        "peak_rss_bytes": 230731776,
+        "peak_private_bytes": 263655424,
+        "cpu_seconds": 0.219,
+        "idle_rss_bytes": 230621184,
+        "last_rss_bytes": 209690624
+      }
+    ],
+    "totals": {
+      "peak_rss_bytes": 2092118016,
+      "peak_private_bytes": 1904123904,
+      "cpu_seconds": 0.843,
+      "idle_rss_bytes": 2092003328
+    },
+    "subsets": {
+      "worker": {
+        "peak": 1731244032,
+        "idle": 1730883584,
+        "peak_private": 1502216192,
+        "idle_private": 1502216192,
+        "roles": [
+          "worker-main",
+          "worker-inference",
+          "worker-job",
+          "worker-launcher"
+        ]
+      },
+      "server": {
+        "peak": 131481600,
+        "idle": 130498560,
+        "peak_private": 138928128,
+        "idle_private": 138252288,
+        "roles": [
+          "server",
+          "server-launcher"
+        ]
+      }
+    },
+    "steady_state": {
+      "target_ms": 60000,
+      "full_window": false,
+      "worker": {
+        "cpu_seconds": 0.422,
+        "wall_ms": 60347
+      },
+      "server": {
+        "cpu_seconds": 0.203,
+        "wall_ms": 60347
+      }
+    },
+    "rss_slope_mb_per_min": 1.77,
+    "private_slope_mb_per_min": 0.43,
+    "containers": [
+      {
+        "name": "feather-lite-livekit",
+        "samples": 12,
+        "peak_mem_bytes": 43169874,
+        "peak_cpu_percent": 0.2,
+        "mean_cpu_percent": 0.1
+      },
+      {
+        "name": "feather-lite-postgres",
+        "samples": 12,
+        "peak_mem_bytes": 263402291,
+        "peak_cpu_percent": 0.2,
+        "mean_cpu_percent": 0.1
+      }
+    ],
+    "host": {
+      "total_mem_bytes": 16477151232,
+      "free_mem_bytes_start": 2571091968,
+      "free_mem_bytes_end": 2606436352
+    },
+    "unclassified_pids": 1,
+    "notes": []
+  }
+}

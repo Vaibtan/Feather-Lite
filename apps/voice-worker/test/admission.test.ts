@@ -147,6 +147,33 @@ describe("admission control", () => {
     expect(clock.now()).toBeLessThan(8_000);
   });
 
+  it("counts a job once when it is both admitting and already running", async () => {
+    // Measured live on 2026-09-01: a warm slot put a job into `activeJobs` 26 ms after the accept,
+    // one millisecond before the 25 ms poll observed it, so a counter read `running: 1,
+    // admitting: 1` for a single job. Over-counting refuses early rather than late, which was never
+    // dangerous — but the ceiling is claimed to be exact, so it is exact.
+    const clock = fakeClock();
+    const active: string[] = [];
+    const admission = createAdmissionController({ maxJobs: 2, activeJobIds: () => active, now: clock.now, sleep: clock.sleep });
+
+    const one = fakeRequest("job-1");
+    const waiting = admission.requestFunc(one.req);
+    // `launchJob` has run; the poll has not yet noticed.
+    active.push("job-1");
+    expect(admission.admitting()).toBe(1);
+    expect(admission.inFlight()).toBe(1);
+
+    // ...so the second slot is genuinely free, and a request for it is served.
+    const two = fakeRequest("job-2");
+    const second = admission.requestFunc(two.req);
+    expect(two.calls.rejected).toBe(false);
+    expect(two.calls.accepted).toBe(true);
+    expect(admission.inFlight()).toBe(2);
+
+    active.push("job-2");
+    await Promise.all([waiting, second]);
+  });
+
   it("counts running jobs against the ceiling as well as admitting ones", async () => {
     const admission = createAdmissionController({
       maxJobs: 2,
@@ -172,6 +199,6 @@ describe("admission control", () => {
     await admission.requestFunc(fakeRequest("job-b").req);
     expect(logged).toHaveLength(1);
     expect(logged[0]?.message).toContain("refusing job job-b");
-    expect(logged[0]?.extra).toEqual({ running: 1, admitting: 0, max_jobs: 1 });
+    expect(logged[0]?.extra).toEqual({ in_flight: 1, running: 1, admitting: 0, max_jobs: 1 });
   });
 });

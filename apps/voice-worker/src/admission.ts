@@ -90,20 +90,33 @@ export const createAdmissionController = (options: AdmissionOptions): AdmissionC
   const sleep = options.sleep ?? defaultSleep;
   const log = options.log ?? (() => undefined);
 
-  let admitting = 0;
+  /**
+   * The ids of jobs accepted and not yet seen running — a set, not a counter.
+   *
+   * A counter double-counts for up to one poll interval: measured live on 2026-09-01, a warm slot
+   * put a job into `activeJobs` 26 ms after the accept, before the 25 ms poll had observed it, so
+   * the next request read `running: 1, admitting: 1` for one job. Over-counting refuses early
+   * rather than late, so it was never dangerous — but the ceiling is supposed to be exact, and a
+   * union of ids is exact for the same three lines.
+   */
+  const admittingIds = new Set<string>();
   let abandoned = false;
-  const inFlight = (): number => activeJobIds().length + admitting;
+  const inFlight = (): number => {
+    const running = activeJobIds();
+    return running.length + [...admittingIds].filter((id) => !running.includes(id)).length;
+  };
 
   const requestFunc = async (req: AdmissionRequest): Promise<void> => {
-    const running = activeJobIds().length;
-    if (running + admitting >= maxJobs) {
+    if (inFlight() >= maxJobs) {
       // The one line that must exist: a refused job is otherwise indistinguishable, from outside,
       // from a call the SFU never offered.
-      log(`refusing job ${req.id}: at capacity`, { running, admitting, max_jobs: maxJobs });
+      // `in_flight` as well as its two parts, because they overlap: a job that has just reached
+      // `activeJobs` is in both until the poll notices, and the decision is made on the union.
+      log(`refusing job ${req.id}: at capacity`, { in_flight: inFlight(), running: activeJobIds().length, admitting: admittingIds.size, max_jobs: maxJobs });
       await req.reject();
       return;
     }
-    admitting += 1;
+    admittingIds.add(req.id);
     const startedAt = now();
     try {
       // Deliberately not awaited — see the module comment. Errors inside `#onAccept` are caught by
@@ -121,13 +134,13 @@ export const createAdmissionController = (options: AdmissionOptions): AdmissionC
         await sleep(pollIntervalMs);
       }
     } finally {
-      admitting -= 1;
+      admittingIds.delete(req.id);
     }
   };
 
   return {
     requestFunc,
-    admitting: () => admitting,
+    admitting: () => admittingIds.size,
     inFlight,
     abandonWaits: () => {
       abandoned = true;

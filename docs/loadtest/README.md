@@ -100,8 +100,154 @@ CPU-seconds per turn is 9 %.
   per-IP demo hardening, and a tier-1 run comes from one IP. A C=100 run against the defaults
   reported 8/100 correct with 67 start errors and 25 turn errors, all 429 from the server's own
   middleware. The harness now says so in as many words instead of leaving it to be read as a
-  regression; O9 will give it a bypass token and the status page a counter.
+  regression. Since 2026-09-01 it does not have to: `RATE_LIMIT_BYPASS_TOKEN`, set on the server and
+  on the harness, exempts the run and is counted as `rate_limit_bypassed` on the status page (O9).
+  Raising the two budgets for a run is no longer the advice — that measured a server configured
+  differently from the one being described.
 - **`JUDGE_ENABLED=false`.** A C=50 run would otherwise enqueue fifty reasoning-model calls.
+
+## 2026-09-01 — Phase 0, the instruments straightened
+
+Eleven fixes from `docs/reviews/2026-08-30-efficiency-spec-phases-0-6-review.md`, and then every
+number retaken, because five of the eleven were instruments that read in the direction of "fine".
+**Nothing in this section should be compared with the 2026-08-28 table**: the point of the phase is
+that the earlier numbers were taken through bent instruments, and the spec says so.
+
+Box: quiet (`pnpm stack:quiet` green at 5.4 GB free after the browser was closed), Langfuse down,
+`JUDGE_ENABLED=false`, `TURN_DECIDER=openai`, `RATE_LIMIT_BYPASS_TOKEN` set on both sides,
+`aura-2-orion-en` to match the previous tier-2 voice.
+
+### The shed probe, made able to discriminate
+
+The 2026-08-28 probe could not tell the fix from its absence. It created its rooms over separate
+HTTP calls, so the first job had already reached `activeJobs` before the second request arrived —
+and "one served, two refused" follows from the stale `activeJobs` count alone. The window the
+admission counter exists for is the gap between the accept and `launchJob`, and the only way to be
+inside it for every request is to make every request at once.
+
+`pnpm --filter @feather-lite/voice-worker shed-probe -- --calls 4`, four sessions created in one
+`Promise.all`, against a worker started `WORKER_MAX_JOBS=2 WORKER_IDLE_PROCESSES=1`:
+
+| job | arrived | decision | worker's own numbers |
+|---|---:|---|---|
+| 1 | +0 ms | accepted | — |
+| 2 | +2 ms | accepted | — |
+| 3 | +14 ms | **refused** | `in_flight 2, running 1, admitting 2, max_jobs 2` |
+| 4 | +57 ms | **refused** | `in_flight 2, running 1, admitting 1, max_jobs 2` |
+
+**Two served, two `NEVER_SERVED`.** The `admitting` figures are the discrimination: at the moment
+job 3 was refused, `activeJobs` held one job and the ceiling was two, so the code this replaces
+would have read 1 < 2 and accepted it — and job 4 as well. Four calls served against a ceiling of
+two, which is exactly what the review predicted and what the old probe could not show.
+
+The two refused calls finalized `FAILED` / `NEVER_SERVED` about 38 s later, on the sweeper's own
+schedule. A refused job is not a lost call; it is a worker saying no, and the ledger records which.
+
+One thing the live run corrected in the fix itself: with a warm slot, `launchJob` put job 1 into
+`activeJobs` **26 ms** after the accept — one millisecond before the 25 ms admission poll noticed —
+so a plain counter briefly counted one job twice. Over-counting refuses early rather than late and
+was never dangerous, but the ceiling is claimed to be exact, so `admitting` became a set of job ids
+and `in_flight` a union.
+
+### Tier 2 — N=5, real calls, on the corrected tree
+
+`2026-09-01-tier2-n5.json`. `WORKER_MAX_JOBS=8`, four warm slots, borrowers in a forked child.
+
+| | 2026-09-01 |
+|---|---:|
+| agent hung up | 5/5 |
+| equivalence | **5/5 green** |
+| STT WER p50 / p95 | **0.000 / 0.000** (gate 0.20) |
+| silent playouts | **0 of 15** |
+| harness turn latency p50 / p95 | 3 115 / 4 501 ms |
+| TTS TTFB p50 / p95 | 391 / 417 ms |
+| CPU-seconds per call-minute | 8.1 |
+| calls per vCPU | 3.63 |
+
+The waterfall, from `/api/system/latency` over the same 15 turns, is where the turn latency comes
+from:
+
+| stage | p50 | p95 | target |
+|---|---:|---:|---:|
+| `eou_delay_ms` | 579 | 582 | 700 |
+| `transcription_delay_ms` | 448 | 555 | 600 |
+| `ttft_ms` | 1 020 | **2 321** | 1 500 |
+| `tts_ttfb_ms` | 391 | 417 | 600 |
+| `total_ms` | 2 441 | 3 696 | 2 500 |
+
+`ttft_ms` p95 owns the tail, which is the finding ADR 0008 already recorded and could not fix:
+decide latency on identical prompts varies 0.8–4.6 s and it is OpenAI's tail, not prefill. Every
+other stage is inside its target. This is a new baseline and not a regression against 2026-08-28 —
+the same night ADR 0008 was written, two N=5 runs on this box read p50 2 145 and 3 039 ms with
+identical per-stage numbers.
+
+### The SLO verdict, proving itself on the run that produced it
+
+`/api/system/status` over that window:
+
+```
+verdict: "insufficient", pass: false, calls_found: 5, min_sample: 20
+insufficient: [total_ms, eou_delay_ms, transcription_delay_ms, ttft_ms, tts_ttfb_ms]
+breaches: []
+```
+
+Fifteen turns against a minimum sample of twenty, so no component was judged. **Before this phase
+that window badged "SLO MET"** — `pass` was `breaches.length === 0`, and an empty breach list over
+nothing measured is not a pass. The console now shows "NOT ENOUGH DATA" in a neutral badge.
+
+### The worker heartbeat, now reporting what it resolved
+
+The same run, from `/api/system/status`:
+
+```
+production: true, simulation: false, max_jobs: 8,
+load_threshold: 0.75, load_shedding_disabled: false,
+idle_processes: 4, idle_processes_configured: 4
+```
+
+`idle_processes` is the pool's own count of forked job processes, not the constant it was
+configured with — which makes "verify live that the pool actually pre-warms" (W3) answerable for the
+first time. It reads 4 of 4 here. A `dev`-mode worker reports `production: false` and the fleet
+refuses it; the refusal message no longer claims dev mode disables load shedding, because it does
+not: `ServerOptions` forces `loadThreshold` to `Infinity` only under `--simulation`, which is now
+its own refusal with its own flag.
+
+### The idle tree, and a review claim that did not reproduce
+
+`2026-09-01-idle-tree-phase0.json` against `2026-08-28-idle-tree-bundle.json`, both `start` mode
+with four warm slots:
+
+| role | 2026-08-28 peak RSS | 2026-09-01 peak RSS |
+|---|---:|---:|
+| worker-main | 133 MB | **128 MB** |
+| worker-inference | 916 MB | 914 MB |
+| worker-job (×4) | 617 MB | 609 MB |
+
+The review put the top-level `import * as silero` at **+73.8 MB per process**. Moving it into
+`prewarm` is worth **5 MB** on this box under the bundle — the import chain is real
+(`index.js` → `vad.js` → `onnx_model.js` → `onnxruntime-node`, all static), so the change is right
+in principle and the main process no longer loads a native addon for a plugin only `prewarm` uses.
+But the number does not reproduce at anything like that size here, and it is recorded at what it
+measured rather than at what was expected. W11 removes the package from the tree entirely and is
+where the real figure will be.
+
+### What the run found that was not being looked for
+
+**`mode: "adaptive"` interruption is not running on the self-hosted profile.** The worker log, on
+every job:
+
+```
+adaptive interruption disabled due to unrecoverable error, falling back to VAD-based interruption
+error: "WebSocket connection rejected with status 401"
+label: "AdaptiveInterruptionDetector"
+```
+
+The adaptive detector is hosted inference resolved from `LIVEKIT_INFERENCE_URL` / `LIVEKIT_API_KEY`,
+and the self-hosted SFU's key is not a LiveKit Cloud inference credential. So every interruption
+number this project has ever taken was taken on **VAD-based** interruption, and the config's
+`mode: "adaptive"` has been a request, not a fact. That is the spec's D5.1 question, answered
+before it was asked; `interruption.minDuration` (D5.2) is therefore the live knob, and D5.1 becomes
+a config correction rather than a measurement.
 
 ## 2026-08-28 — the efficiency phase, measured commit by commit
 
