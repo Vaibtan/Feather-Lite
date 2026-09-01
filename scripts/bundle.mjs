@@ -13,7 +13,7 @@
  *   publish raw TypeScript (`exports.default: ./src/index.ts`), so Node cannot load them at all
  *   without a transpiling loader. Inlining them is what removes the loader from the runtime.
  * - **Everything from node_modules stays external.** Native addons (`@livekit/local-inference`,
- *   `@livekit/rtc-node`, `onnxruntime-node`) cannot be bundled, `@livekit/agents` resolves job and
+ *   `@livekit/rtc-node`) cannot be bundled, `@livekit/agents` resolves job and
  *   inference entry points by URL at runtime, and Effect's module identity matters for its
  *   `Context.Tag`s. `--packages=external` would also externalise the workspace ones, so the split
  *   is done by a plugin instead.

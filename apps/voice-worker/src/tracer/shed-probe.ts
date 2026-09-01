@@ -14,8 +14,20 @@
  *
  * A refused call is not a lost call and not a bug: it is the honest record of a worker saying no.
  *
- * Run (with a worker started as `WORKER_MAX_JOBS=1 pnpm start:worker`):
+ * Run it against the **containerised** worker, which is the stack that ships and is measured. The
+ * ceiling has to be set when the container is created, because `.env` is read once at boot and does
+ * not reach a container the way it reaches a native process:
+ *
+ *   $env:LIVEKIT_NODE_IP='<host LAN IP>'; $env:WORKER_MAX_JOBS='1'
+ *   docker compose --profile livekit --profile app up -d
  *   pnpm --filter @feather-lite/voice-worker shed-probe -- --calls 3
+ *
+ * Against a native worker instead: `WORKER_MAX_JOBS=1 pnpm start:worker`, then the same probe.
+ *
+ * One caveat either way: `WORKER_MAX_JOBS` is the **denominator of the load** the worker reports,
+ * and the SFU stops assigning at `WORKER_LOAD_THRESHOLD` — so the concurrency actually served is
+ * lower than the ceiling, and at `--calls 3` against a ceiling of 1 that difference does not matter
+ * but at ten calls it decides the run (docs/loadtest/README.md, 2026-09-01).
  */
 import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";

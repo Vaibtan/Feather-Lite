@@ -19,12 +19,12 @@ the PRD (`PRD.md`) and implementation spec (`SPEC.md`) are the requirements, thi
 v1 came first and was rewritten after the review in `docs/reviews/`; it is gone from the tree (ADR
 0005 records why TypeScript won) and lives on only in git history.
 
-## What is here (v2, verified 2026-08-28)
+## What is here (v2, verified 2026-09-01)
 
 | Area | Status | Evidence |
 |---|---|---|
-| Pure domain (`packages/domain`): states, adjacency, overrides, tool matrix, event union, replay reducer, pre-call policy, scripts, percentiles | done | 210 unit tests |
-| Control plane (`packages/control-plane`): Effect services, Postgres via `@effect/sql-pg`, three-phase turn, tools with idempotency, scheduled-action + outbox workers, scripted + OpenAI deciders, Langfuse tracing | done | 76 unit + 66 DB tests, incl. **20/20 scenarios** on real Postgres |
+| Pure domain (`packages/domain`): states, adjacency, overrides, tool matrix, event union, replay reducer, pre-call policy, scripts, percentiles, redaction, turn-taking metrics | done | 246 unit tests |
+| Control plane (`packages/control-plane`): Effect services, Postgres via `@effect/sql-pg`, three-phase turn, tools with idempotency, scheduled-action + outbox workers, scripted + OpenAI deciders, Langfuse tracing | done | 86 unit + 74 DB tests (73 pass, 1 skipped as issue #3), incl. **20/20 scenarios** on real Postgres |
 | HTTP API (`packages/contracts` + `apps/server`): Effect HttpApi, 25 routes, OpenAPI at `/docs`, SSE turn stream, bearer/rate-limit middleware with counted rejections | done | live smoke: start / turn(SSE) / replay / 409 / 422 / scenarios |
 | Voice worker (`apps/voice-worker`): LiveKit Agents 1.6 `llmNode` → `/turn`, barge-in heard-text, interruptible read-back guard, AMD-gated SIP path, heartbeats | done (browser path) | automated real voice call on LiveKit Cloud with GPT-4.1; scripted voice call == simulation scenario (state path, tools, outcome) |
 | Operator console (`apps/console`): conversations, transcript + timeline + replay, simulate (streaming), **call me in the browser**, scenario matrix, status/seed | done | headless run: 20/20 matrix, PTP simulation, browser call joined LiveKit Cloud with live transcript |
@@ -108,7 +108,8 @@ apps/voice-worker/       LiveKit Agents worker (+ tracer/ harnesses: fake borrow
 apps/console/            Vite + TS operator console (no framework), deploys to Pages
 apps/load-test/          tier-1 control-plane load harness (plain tsx)
 deploy/livekit/          livekit-server config for the self-hosted compose profile
-docs/adr/                0001–0007 · docs/deploy/ runbook · docs/loadtest/ results · docs/plans/ plan, revisions, findings, progress
+docs/adr/                0001–0010 · docs/agents/ issue tracker, triage labels, domain docs
+docs/deploy/ runbook · docs/loadtest/ results · docs/plans/ specs, revisions, findings, progress · docs/reviews/ code reviews
 ```
 
 ## Run it locally
@@ -136,41 +137,80 @@ pnpm dev:worker                  # LiveKit Agents worker "feather-lite-agent" (h
 
 ### Running it the way it is measured
 
-`dev` is `tsx` and, for the worker, LiveKit's development mode — where `loadThreshold` is `Infinity`
-and the worker can never report itself full. Every number in `docs/loadtest/README.md` comes from
-the other pair:
+**Containers, since 2026-09-01.** Everything runs in Docker except the borrower harness, because the
+harness is the caller. This is where every number in `docs/loadtest/README.md` from that date on
+comes from, including the N=10 acceptance run:
+
+```bash
+# PowerShell; bash is `export LIVEKIT_NODE_IP=...`
+$env:LIVEKIT_NODE_IP='192.168.1.4'          # a host address BOTH sides can reach — see below
+docker compose --profile livekit --profile app up -d --build
+pnpm stack:quiet                            # must exit 0 before any fleet number
+pnpm --filter @feather-lite/voice-worker fake-borrower-fleet -- --calls 5
+```
+
+`LIVEKIT_NODE_IP` is the one setting a containerised call cannot do without, and it is load-bearing
+rather than cosmetic: it is the ICE candidate the SFU advertises. The default `127.0.0.1` is right
+for the browser demo and means *this container* to a worker in another one, so the call connects and
+then hears nothing. Use the machine's LAN address — it works from the host directly and from inside
+Docker Desktop's VM, because the media ports are published on the host.
+
+Two more things a fleet run needs, both from measurement rather than taste:
+
+- **`RATE_LIMIT_BYPASS_TOKEN` set identically** on the server (it is read from your shell at
+  `docker compose up` time) and on the harness, or the harness is rate-limited by its own server.
+  Exempted requests are counted as `rate_limit_bypassed`, so the exemption is visible rather than
+  silent.
+- **`JUDGE_ENABLED=false` and `pnpm lf:down`.** The judge is a reasoning model called post-call and
+  the Langfuse stack is several containers; neither belongs in a latency measurement.
+
+To serve *N* concurrent calls the worker's ceiling has to be **higher than N**: `WORKER_MAX_JOBS` is
+the denominator of the load the worker reports, and the SFU stops assigning at
+`WORKER_LOAD_THRESHOLD` (0.75), so a ceiling of ten serves eight or nine. The N=10 run uses
+`WORKER_MAX_JOBS=14`. `docker-compose.yml` carries the arithmetic and
+`apps/load-test/test/composeLimits.test.ts` asserts it against `mem_limit`.
+
+**Natively, through 2026-08-28.** The `start` pair is still here for comparison runs against the
+container numbers, and it is what every measurement before that date used. It is not what ships:
 
 ```bash
 pnpm build                       # esbuild: one file per app
 pnpm start:server                # node apps/server/dist/main.js
 pnpm start:worker                # node apps/voice-worker/dist/agent.js start  (production mode)
-pnpm stack:quiet                 # stop Langfuse, find stray workers, report free memory
 ```
 
-`stack:quiet` exits non-zero under 3 GB free, which is the line a fleet run needs, **and on a stray
-host voice worker** — the failure where the run looks fine and the numbers belong to a process
-nobody is watching. `--allow-worker` is the escape when that worker is yours and deliberate. It will
-not close your browser or run `wsl --shutdown` — both are yours — but it names them when they are
-the problem.
+`start`, not `dev`: `dev` is `tsx` with the framework's development defaults and debug logging, and
+the fleet harness refuses to measure a `dev`-mode worker without `--allow-dev` for exactly that
+reason.
+
+`stack:quiet` exits non-zero under 3 GB available — the line a fleet run needs — **and on a stray
+host voice worker**, the failure where the run looks fine and the numbers belong to a process nobody
+is watching. `--allow-worker` is the escape when that worker is yours and deliberate. With the
+containers up it reads the memory available *inside the container VM*, which is where the worker
+tree lives; with none up it reads the host. It will not close your browser or run `wsl --shutdown` —
+both are yours — but it names them when they are the problem.
 
 **On Windows, WSL keeps the memory it has taken.** `vmmemWSL` has been seen holding 5.8 GB with every
 container stopped. `wsl --shutdown` returns it, and `autoMemoryReclaim=gradual` under
-`[experimental]` in `%USERPROFILE%\.wslconfig` stops it accumulating.
+`[experimental]` in `%USERPROFILE%\.wslconfig` stops it accumulating. With the stack *running* that
+number is supposed to be large — it is the worker tree — which is why `stack:quiet` only warns about
+it when nothing is up.
 
-### As containers
+### The images
 
-```bash
-docker compose --profile livekit --profile app up -d --build
-```
+Both are `node:22-bookworm-slim`, non-root, health-checked, and built from the repo root so the pnpm
+workspace is intact — **505 MB server and 724 MB worker** as built here (`docker image ls`, Docker
+Desktop on Windows). CI builds the same two from the same commit on a Linux runner and reports
+**341 MB and 481 MB**. That gap is not explained and neither number is gated on; the CI job prints
+its sizes so a change is visible in the log of the commit that made it, and the figures quoted in
+`docs/loadtest/README.md` and ADR 0010 are the Docker Desktop ones, measured on the box the rest of
+those numbers come from. `docker buildx build --platform linux/amd64,linux/arm64` works for both —
+every native package the worker needs publishes a `linux-arm64-gnu` build — though only amd64 has
+been run here.
 
-Both images are `node:22-bookworm-slim`, non-root, health-checked, and built from the repo root so
-the pnpm workspace is intact. `docker buildx build --platform linux/amd64,linux/arm64` works for
-both — every native package the worker needs publishes a `linux-arm64-gnu` build — though only
-amd64 has been run here. A container-to-container **call** needs the SFU's advertised node IP to be
-reachable from the worker container: set `LIVEKIT_NODE_IP` to a host address both sides can reach
-(the default `127.0.0.1` is for the browser demo and means "this container" to a containerised
-worker). With that set, calls through the containerised worker are verified — see
-`docs/loadtest/README.md`, 2026-09-01.
+CI builds both images, boots `--profile livekit --profile app` with a runner-local
+`LIVEKIT_NODE_IP`, and gates on the worker container's own healthcheck and the server's `/readyz`,
+so the artefact is tested and not only the source.
 
 ### Voice with no cloud account (self-hosted LiveKit)
 
