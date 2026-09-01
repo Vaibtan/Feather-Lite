@@ -34,3 +34,94 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm --filter @feather-lite/control-plane test:db
+
+  # ---------------------------------------------------------------------------------------------
+  # CI builds and boots what ships (review §3, Testing Decisions).
+  #
+  # `check` above tests the source. Nothing tested the **artefact**: the two images are what runs in
+  # production and what every number since 2026-09-01 was measured on, and until now they were built
+  # only by hand, on one machine, by whoever remembered to. A Dockerfile that stopped building, an
+  # image that grew by a hundred megabytes, or a worker that could no longer reach the SFU would all
+  # have reached `main` green.
+  #
+  # Its own job rather than steps on `check`, so a broken image is a distinguishable failure and the
+  # unit tests still report while the images build.
+  # ---------------------------------------------------------------------------------------------
+  images:
+    runs-on: ubuntu-latest
+    env:
+      # The dev credential committed in `deploy/livekit/livekit.yaml` on purpose (it is local-only
+      # and documented as such there). The worker's healthcheck is "registered with the SFU", so
+      # without a matching key this job would assert nothing.
+      LIVEKIT_API_KEY: devkey
+      LIVEKIT_API_SECRET: Dt9Jzf0Ix8nNl80YbUKHjJkJIlBSlVET
+      # One call at a time and no warm pool: this job proves the stack boots, not what it can carry,
+      # and a runner has neither the cores nor the memory to be measured on. `WORKER_IDLE_PROCESSES:
+      # 0` also exercises the framework patch from review #18 — before it, zero silently meant four.
+      WORKER_MAX_JOBS: 1
+      WORKER_IDLE_PROCESSES: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The bundler's externals guard has never run in CI (review §4): it asserts that every
+      # external the bundle keeps is resolvable from the production dependency set, and it is the
+      # one check that catches a workspace import sneaking into `--prod` node_modules. It runs on
+      # the host, before the images, because a bundle that cannot be built is a faster failure than
+      # an image that cannot be built.
+      - name: Bundle both apps (runs the externals guard)
+        run: pnpm build
+
+      - name: Build both images
+        run: docker compose --profile app build
+      # Printed, not gated. There is no threshold anyone has argued for, and a size that moves is
+      # worth seeing in the log of the commit that moved it — 505 MB server / 724 MB worker as of
+      # 2026-09-01 (docs/loadtest/README.md).
+      - name: Image sizes
+        run: docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep '^feather-lite-'
+
+      - name: Boot the stack the way it is measured
+        run: |
+          # A host address both the SFU and the worker container can reach. `127.0.0.1` would make
+          # the SFU advertise a candidate that means "this container" to the worker — the exact
+          # defect that kept "a container-to-container call is verified" off the README until
+          # 2026-09-01 — so CI sets it for the same reason a measured run does.
+          export LIVEKIT_NODE_IP=$(hostname -I | awk '{print $1}')
+          echo "LIVEKIT_NODE_IP=$LIVEKIT_NODE_IP"
+          docker compose --profile livekit --profile app up -d --wait --wait-timeout 180
+
+      # `--wait` above already gates on every healthcheck the compose file declares, including the
+      # worker's ("registered with the SFU and the inference process is alive"). This asserts it
+      # again by name, because `--wait` succeeding on a service that has no healthcheck would be
+      # indistinguishable from one that passed, and the worker's is the whole point of the job.
+      - name: The worker container is healthy
+        run: |
+          test "$(docker inspect -f '{{.State.Health.Status}}' feather-lite-worker)" = healthy
+          docker inspect -f '{{.Name}} {{.State.Health.Status}}' feather-lite-server feather-lite-worker feather-lite-livekit
+
+      # `/healthz` is what the container healthcheck asks; `/readyz` is the stronger claim — every
+      # background loop has ticked at least once, which is the thing Phase 0 made able to fail.
+      # A loop that dies before its first tick reads NOT READY, so this waits rather than asserting
+      # immediately: it is a liveness claim about a process that has just started.
+      - name: The server reports ready (every loop has ticked)
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/readyz; then echo; echo "ready after ${i}s"; exit 0; fi
+            sleep 1
+          done
+          echo "::error::/readyz never went green"
+          curl -sS http://127.0.0.1:8080/readyz || true
+          exit 1
+
+      - name: Logs, if any of that failed
+        if: failure()
+        run: docker compose --profile livekit --profile app logs --tail 200
+      - name: Tear down
+        if: always()
+        run: docker compose --profile livekit --profile app down -v
