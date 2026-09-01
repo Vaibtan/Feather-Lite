@@ -71,9 +71,15 @@ describe("docker-compose worker sizing", () => {
     expect(envDefault(block, "WORKER_IDLE_PROCESSES")).toBeLessThanOrEqual(envDefault(block, "WORKER_MAX_JOBS"));
   });
 
-  it("fails when the ceiling and the concurrency disagree — which is the case it exists for", () => {
-    // Ten is the efficiency spec's acceptance bar and it does not fit in 3 GB. That run has to raise
-    // `mem_limit` deliberately, and this is what tells it so.
-    expect(FIXED_MB + 10 * PER_CALL_MB).toBeGreaterThan(3 * 1024);
+  it("carries the acceptance bar's ten calls, not only the default eight", () => {
+    // Ten is the efficiency spec's acceptance bar, and the run overrides `WORKER_MAX_JOBS` to reach
+    // it — so the *default* concurrency above is not what has to fit. This is.
+    //
+    // Until 2026-09-01 this assertion was the counterexample instead: `1093 + 10 x 240 > 3 x 1024`,
+    // there to prove the arithmetic could fail and to tell the acceptance run it had a limit to
+    // raise. The run came due, the limit was raised to 4 GB, and the counterexample became the
+    // thing it was warning about. It is a live guard now rather than a demonstration.
+    const block = workerBlock();
+    expect(memLimitMb(block)).toBeGreaterThanOrEqual(FIXED_MB + 10 * PER_CALL_MB);
   });
 });

@@ -170,13 +170,18 @@ services:
     #   a concurrent call, measured at N=5 (2018-2095 peak)      =  ~200 MB  per call
     #   with a 20 % margin on the per-call figure                =   240 MB
     #   1093 + 8 x 240                                           = 3013 MB  at WORKER_MAX_JOBS=8
+    #   1093 + 10 x 240                                          = 3493 MB  at WORKER_MAX_JOBS=10
     #
-    # 3 GB carries eight, with the margin already inside the number. Ten would need ~3.5 GB, so the
-    # N=10 acceptance run raises this deliberately and the test says so by failing.
+    # **4 GB, because ten is the bar this is measured against.** The efficiency spec's acceptance
+    # run is `WORKER_MAX_JOBS=10`, and it does not fit in 3 GB — `composeLimits.test.ts` carried
+    # that as a counterexample until 2026-09-01, when the run came due and the counterexample became
+    # a limit to raise. The default concurrency stays **8**: the acceptance run overrides it, and
+    # what ten calls do on this box is what that run is for. `mem_limit` is a cap and not a
+    # reservation, so the headroom costs nothing until it is used.
     #
     # The fixed term is the whole reason W11 mattered: with the Silero plugin the same idle tree was
     # 1651 MB, and `onnxruntime-node` was 513 MB of binaries hand-pruned in the Dockerfile.
-    mem_limit: 3g
+    mem_limit: 4g
 
 volumes:
   feather_lite_pg:
