@@ -83,7 +83,10 @@ const renderSlo = (q: QualityReport) => {
     h(
       "div",
       { class: "row", style: "align-items:center;gap:10px" },
-      badge(q.slo.pass ? "MEETING TARGET" : "BREACHED", q.slo.pass ? "good" : "bad"),
+      badge(
+        q.slo.verdict === "pass" ? "MEETING TARGET" : q.slo.verdict === "breach" ? "BREACHED" : "NOT ENOUGH DATA",
+        q.slo.verdict === "pass" ? "good" : q.slo.verdict === "breach" ? "bad" : "muted",
+      ),
       // A green badge over a window nobody could judge is the failure mode this line prevents.
       shortfall > 0 ? badge(`${shortfall} UNJUDGED`, "warn") : null,
       h("span", { class: "muted small" }, `${facets.length > 0 ? facets.join(", ") : "all calls"} — ${q.window.conversations} call(s) in window`),

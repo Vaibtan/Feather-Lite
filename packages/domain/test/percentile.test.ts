@@ -8,7 +8,7 @@
  * observation instead of the first.
  */
 import { describe, expect, it } from "vitest";
-import { callSloVerdict, percentile, sloComponentStatus, type TurnLatencyComponents } from "../src/percentile.js";
+import { callSloVerdict, percentile, sloComponentStatus, sloVerdict, type TurnLatencyComponents } from "../src/percentile.js";
 
 describe("percentile", () => {
   it("has nothing to say about no observations", () => {
@@ -85,6 +85,30 @@ describe("sloComponentStatus", () => {
   it("treats the target as a ceiling, not a range — equal to target passes", () => {
     expect(sloComponentStatus({ p95: target, n: min }, target, min)).toBe("pass");
     expect(sloComponentStatus({ p95: target + 1, n: min }, target, min)).toBe("breach");
+  });
+});
+
+describe("sloVerdict", () => {
+  it("does not call a window with nothing measured a pass", () => {
+    // The defect (review #12): the verdict was `breaches.length === 0`, so a fresh database and a
+    // window of simulated calls — which carry no end-of-utterance delay at all — both badged
+    // "SLO MET". Nothing was measured; that is not the same as everything being fast.
+    expect(sloVerdict([])).toBe("insufficient");
+    expect(sloVerdict(["not_measured", "not_measured"])).toBe("insufficient");
+    expect(sloVerdict(["insufficient_sample", "not_measured"])).toBe("insufficient");
+  });
+
+  it("passes as soon as one component was actually judged and none breached", () => {
+    expect(sloVerdict(["pass"])).toBe("pass");
+    // A pass with components short of the minimum is still a pass; the `insufficient` list beside
+    // the verdict is what says it is not a clean bill.
+    expect(sloVerdict(["pass", "insufficient_sample", "not_measured"])).toBe("pass");
+  });
+
+  it("lets one breach outrank everything else", () => {
+    expect(sloVerdict(["breach"])).toBe("breach");
+    expect(sloVerdict(["pass", "breach"])).toBe("breach");
+    expect(sloVerdict(["breach", "insufficient_sample", "not_measured"])).toBe("breach");
   });
 });
 

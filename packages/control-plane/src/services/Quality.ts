@@ -16,7 +16,7 @@
 import { DateTime, Duration, Effect, Option } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import type { LatencyAggregate, QualityReport, SloComponent, SloReport, SloSegment, TtsHeuristicsReport } from "@feather-lite/contracts";
-import { localIsoDate, ORPHANED_REASON, percentile, SCORE_DATA_TYPE_BY_NAME, sloComponentStatus, ttsAggregate, type ScoreName, type ScoreSource, type TtsHeuristics } from "@feather-lite/domain";
+import { localIsoDate, ORPHANED_REASON, percentile, SCORE_DATA_TYPE_BY_NAME, sloComponentStatus, sloVerdict, ttsAggregate, type ScoreName, type ScoreSource, type TtsHeuristics } from "@feather-lite/domain";
 import { AppConfig } from "../config.js";
 import { Metrics } from "./Metrics.js";
 import { aggregateTurnRows, Queries, ttsReadingsOf } from "./Queries.js";
@@ -261,7 +261,8 @@ export class Quality extends Effect.Service<Quality>()("@feather-lite/Quality", 
         if (status === "breach") breaches.push(name);
         if (status === "insufficient_sample") insufficient.push(name);
       }
-      return { pass: breaches.length === 0, segment, min_sample: minSample, components, targets, measured, breaches, insufficient };
+      const verdict = sloVerdict(Object.values(components).map((c) => c.status));
+      return { verdict, pass: verdict === "pass", segment, min_sample: minSample, components, targets, measured, breaches, insufficient };
     };
 
     /**

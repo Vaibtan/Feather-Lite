@@ -135,11 +135,22 @@ services:
       STT_TTS_PROVIDER: ${STT_TTS_PROVIDER:-plugins}
       DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:-}
       DEEPGRAM_TTS_MODEL: ${DEEPGRAM_TTS_MODEL:-aura-2-asteria-en}
-      WORKER_MAX_JOBS: ${WORKER_MAX_JOBS:-8}
+      # Four, not the worker's own default of eight. The comment below sizes this container for
+      # four concurrent calls and the default said eight, which is 4.4 GB against a 3 GB cgroup:
+      # the kernel would kill the worker and every call on it under exactly the N=10 load the
+      # efficiency spec's acceptance bar names. `apps/load-test/test/composeLimits.test.ts` asserts
+      # the inequality, so the two numbers cannot drift apart again silently.
+      WORKER_MAX_JOBS: ${WORKER_MAX_JOBS:-4}
       WORKER_IDLE_PROCESSES: ${WORKER_IDLE_PROCESSES:-4}
-    # Measured in this image: main 192 MB, inference 235 MB, four warm job slots at ~194 MB each —
-    # 1.2 GB resident before a call, and a call adds ~300 MB. 3 GB carries the four warm slots plus
-    # four concurrent calls; raise it with WORKER_MAX_JOBS.
+    # The arithmetic, from measurements taken in this image:
+    #
+    #   main 192 MB + inference 235 MB                          =  427 MB  fixed
+    #   a warm job slot ~194 MB, and a call on it adds ~300 MB   =  494 MB  per concurrent call
+    #   427 + 4 x 494                                            = 2403 MB  at WORKER_MAX_JOBS=4
+    #
+    # 3 GB carries that with ~600 MB of headroom. Raising WORKER_MAX_JOBS means raising this too:
+    # eight would need ~4.4 GB and ten ~5.4 GB, and per-job limits do not help, because eight jobs
+    # at the 800 MB ceiling is already past 3 GB on their own.
     mem_limit: 3g
 
 volumes:

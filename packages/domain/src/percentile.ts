@@ -44,6 +44,27 @@ export const sloComponentStatus = (observed: { readonly p95: number | null; read
   return observed.p95 > targetMs ? "breach" : "pass";
 };
 
+/** The window's verdict. `insufficient` is not a pass — it is "nothing here was judgeable" (review #12). */
+export type SloVerdict = "pass" | "breach" | "insufficient";
+
+/**
+ * Roll a window's component statuses into one verdict.
+ *
+ * The defect this replaces was `pass: breaches.length === 0`, which made **a window with nothing
+ * measured a pass** — a fresh database, or a window of simulated calls that carry no
+ * end-of-utterance delay at all, badged "SLO MET". The component statuses already said so; the
+ * headline threw the distinction away, and a test pinned it.
+ *
+ * A breach outranks everything: one component over target is a breach whatever the rest did. Below
+ * that, a verdict needs at least one component that was actually judged; if none was, the honest
+ * answer is `insufficient`, not "met". A pass with some components short of the minimum is still a
+ * pass — the `insufficient` list beside it is what says the bill is not clean.
+ */
+export const sloVerdict = (statuses: ReadonlyArray<SloStatus>): SloVerdict => {
+  if (statuses.some((s) => s === "breach")) return "breach";
+  return statuses.some((s) => s === "pass") ? "pass" : "insufficient";
+};
+
 /** The four latency components a turn can carry, plus the decide TTFT. All optional per turn. */
 export interface TurnLatencyComponents {
   readonly eou_delay_ms: number | null;

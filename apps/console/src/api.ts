@@ -148,6 +148,9 @@ export interface SloComponent {
 }
 
 export interface SloReport {
+  /** `insufficient` means nothing in the window was judgeable — not that everything was fast. */
+  verdict: "pass" | "breach" | "insufficient";
+  /** True only for `verdict: "pass"`. */
   pass: boolean;
   segment: SloSegment;
   min_sample: number;

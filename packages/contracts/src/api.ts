@@ -293,6 +293,13 @@ export const SloComponent = Schema.Struct({
 export type SloComponent = typeof SloComponent.Type;
 
 export const SloReport = Schema.Struct({
+  /**
+   * The window's verdict (review #12). `insufficient` is not a pass: it means nothing in the window
+   * was judgeable — a fresh database, or a window of simulated calls that carry no end-of-utterance
+   * delay at all. `pass` used to be `breaches.length === 0`, which badged both of those "SLO MET".
+   */
+  verdict: Schema.Literal("pass", "breach", "insufficient"),
+  /** True only for `verdict: "pass"`. Kept so a reader cannot mistake `insufficient` for a pass. */
   pass: Schema.Boolean,
   segment: SloSegment,
   /** Below this many observations a component reports `insufficient_sample` rather than a verdict. */

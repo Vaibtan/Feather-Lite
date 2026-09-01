@@ -223,7 +223,9 @@ export const statusView = (root: HTMLElement, onStop: (fn: () => void) => void) 
         h(
           "div",
           { class: "row", style: "align-items:center;gap:10px;margin-bottom:10px" },
-          badge(s.slo.pass ? "SLO MET" : "SLO BREACHED", s.slo.pass ? "good" : "bad"),
+          // Three states, three badges. "SLO MET" over a window where nothing was measured was the
+          // most flattering thing this page could say, and it said it on a fresh database.
+          badge(s.slo.verdict === "pass" ? "SLO MET" : s.slo.verdict === "breach" ? "SLO BREACHED" : "NOT ENOUGH DATA", s.slo.verdict === "pass" ? "good" : s.slo.verdict === "breach" ? "bad" : "muted"),
           // The segment and its size, because "SLO MET over 0 calls" and "SLO MET over 50" are the
           // same badge and very different claims (O2).
           h(

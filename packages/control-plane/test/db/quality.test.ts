@@ -322,7 +322,11 @@ describe("quality report", () => {
     expect(out.window.conversations).toBe(0);
     expect(out.slo.measured["eou_delay_ms"]).toBeNull();
     expect(out.slo.breaches).toEqual([]);
-    expect(out.slo.pass).toBe(true);
+    // Not a pass (review #12). The slow call staying out of the window is what this test is about,
+    // and it is proved by the empty breach list; a window with nothing in it has no verdict to give,
+    // and this assertion used to pin the opposite.
+    expect(out.slo.verdict).toBe("insufficient");
+    expect(out.slo.pass).toBe(false);
   });
 
   it("answers an empty window without inventing rates", async () => {
