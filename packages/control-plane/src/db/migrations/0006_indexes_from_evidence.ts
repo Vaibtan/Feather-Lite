@@ -24,7 +24,7 @@ export const migration0006 = Effect.gen(function* () {
    * `(conversation_id, job_type)` rather than `conversation_id` alone so the `DISTINCT job_type`
    * is answered from the index without visiting the heap.
    */
-  yield* sql`CREATE INDEX ix_outbox_jobs_conversation ON outbox_jobs (conversation_id, job_type)`;
+  yield* sql`CREATE INDEX IF NOT EXISTS ix_outbox_jobs_conversation ON outbox_jobs (conversation_id, job_type)`;
 
   /**
    * The orphaned-call sweeper's candidate query, run every 10 seconds forever.
@@ -44,7 +44,7 @@ export const migration0006 = Effect.gen(function* () {
    * cost an index entry.
    */
   yield* sql`
-    CREATE INDEX ix_conversations_open_voice ON conversations (channel, started_at)
+    CREATE INDEX IF NOT EXISTS ix_conversations_open_voice ON conversations (channel, started_at)
     WHERE ended_at IS NULL AND final_outcome IS NULL`;
 
   /**
@@ -52,5 +52,12 @@ export const migration0006 = Effect.gen(function* () {
    * transaction and `CREATE INDEX CONCURRENTLY` cannot run in one. Both tables are small enough
    * here (33 k and 14 k rows) that the ACCESS EXCLUSIVE lock is milliseconds. A deployment with a
    * large history should build these by hand, concurrently, before deploying.
+   *
+   * **Which is why both statements are `IF NOT EXISTS`** (review #15). Following the advice in the
+   * paragraph above used to prevent boot: an operator who built the indexes by hand met `42P07
+   * relation already exists`, and because the migrator runs the set in one transaction that failure
+   * took every later migration with it. A migration whose own instructions break it is worse than
+   * one with no instructions. The names are fixed and the definitions are here, so "already
+   * present" is the intended end state, not a collision to report.
    */
 });
