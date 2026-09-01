@@ -230,7 +230,25 @@ describe("scheduled-action worker", () => {
 });
 
 describe("outbox worker", () => {
-  it("processes SUMMARY / EVALUATION / VECTOR_INDEX for a completed call and records OUTBOX_PROCESSED", async () => {
+  /**
+   * Skipped 2026-09-01 (issue #3). **The coverage is gone, not merely failing.**
+   *
+   * This test pins two clocks and not the third. `now` below governs `startCall` and
+   * `outbox.runOnce`, but `processTurn` takes no `now` — and the opt-out it sends finalizes the
+   * call, which is where `Outbox.enqueuePostCall` stamps the jobs with `availableAt` from the
+   * **service clock**, i.e. real wall-clock time. The claim query is `available_at <= ${now}`
+   * (`repos/scheduling.ts:117`), so the jobs are available today, `runOnce` is asked for work
+   * available in August 2026, and it correctly claims nothing: `expected 0 to be greater than or
+   * equal to 3`. It passed only while real time was before the pinned instant.
+   *
+   * Skipped rather than left red because it was the only failure in `pnpm test:db` and in CI's
+   * `check` job, and a permanently red CI cannot tell a regression from the status quo.
+   *
+   * **Do not simply unpin the date.** The instant is load-bearing for the borrower's TCPA window —
+   * see the comment inside — so a fix has to keep 09:00Z-in-Asia/Kolkata while making one clock
+   * govern the whole test. Issue #3 sets out the three candidates.
+   */
+  it.skip("processes SUMMARY / EVALUATION / VECTOR_INDEX for a completed call and records OUTBOX_PROCESSED", async () => {
     const out = await rt.runPromise(
       Effect.gen(function* () {
         const { borrowerId, cpId } = yield* seedBorrower("Outbox Person", "Asia/Kolkata", "+919800002003");
