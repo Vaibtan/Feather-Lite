@@ -4,9 +4,10 @@ Two patch files, both against `@livekit/agents` 1.6.4 and its plugins, both appl
 (`patchedDependencies` in `pnpm-workspace.yaml`). Neither is a fork: each is a few lines, and each is
 written to be droppable the moment upstream lands the same fix.
 
-**Each entry carries either a measurement or the defect it makes measurable.** Two of the three
-below have a number. The third has none *because it changes no behaviour*: it exposes two values the
-worker had already resolved and could not report, and the number it makes possible is in the
+**Each entry carries either a measurement or the defect it makes measurable.** Two of the four
+below have a number. The other two have none *because neither changes behaviour on a correctly
+configured worker*: one exposes values the worker had already resolved and could not report, the
+other makes a setting an operator can type mean what it says. What both buy shows up on the
 heartbeat rather than in this file. An entry that has neither is not allowed here.
 
 **The version is pinned deliberately.** `@livekit/agents` 1.7+ changes EOU and endpointing
@@ -109,6 +110,32 @@ patch is the only way. Both builds (`dist/worker.js`, `dist/worker.cjs`) and bot
 **Upstream:** worth filing as one issue with the W1 one. `activeJobs` is already public and this is
 the same question asked about the other half of the pool; there is no reason a worker should not be
 able to report its own resolved options.
+
+## `@livekit__agents@1.6.4.patch`, part three — a warm pool of zero is not a warm pool of four
+
+Phase C1 (review #18), 2026-09-01. One character:
+
+```js
+this.numIdleProcesses = numIdleProcesses ?? Default.numIdleProcesses(production);
+```
+
+`||` was `??`. **The defect it makes measurable**: `WORKER_IDLE_PROCESSES=0` is a legitimate
+setting — it is how you take the warm pool out of a measurement, and each warm slot is ~190 MB of
+resident memory doing nothing — and it did not work. Zero is falsy, so `ServerOptions` replaced it
+with `Default.numIdleProcesses(production)`, which is **4** in production mode. A run configured
+with no warm pool ran with four warm processes and reported `idle_processes_configured: 0` beside
+`idle_processes: 4`, and the two disagreeing fields were the only evidence.
+
+That is the same shape as the defect beside it in `agent.ts`: a number the operator set, silently
+replaced by one nobody chose. The worker-side half of #18 refuses to boot on a value it cannot
+honour; this half makes the one honourable value at the bottom of the range reachable at all.
+
+`loadThreshold` two lines above has the same `||`, and is **deliberately left alone**: a threshold
+of 0 means "never accept a job", which is not a configuration anyone wants silently honoured, and
+`simulation` already overrides that line. No number to claim here either — the pool size is
+reported on the heartbeat, and the verification is that `idle_processes` reads 0.
+
+**Upstream:** file with the other two. `?? ` is the whole fix.
 
 ---
 

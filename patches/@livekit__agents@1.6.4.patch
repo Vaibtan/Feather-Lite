@@ -94,7 +94,7 @@ index fdd027c23197a2541f78a6091165ee0b1c81dd8f..b535d118836fa1c448ca734163000700
  //# sourceMappingURL=_warmup.js.map
 \ No newline at end of file
 diff --git a/dist/worker.cjs b/dist/worker.cjs
-index c76343abb557cd3443896ed6ffbc0f48edf43c61..9a5066ee753094c6c915eeb39e5d6586ea2223d4 100644
+index c76343abb557cd3443896ed6ffbc0f48edf43c61..af8584914e90327c609762358f321f410a84a4b8 100644
 --- a/dist/worker.cjs
 +++ b/dist/worker.cjs
 @@ -60,7 +60,7 @@ function maybeRegisterLocalEotRunner() {
@@ -106,6 +106,15 @@ index c76343abb557cd3443896ed6ffbc0f48edf43c61..9a5066ee753094c6c915eeb39e5d6586
      (0, import_log.log)().warn(
        "@livekit/local-inference native binding unavailable; local audio EOT disabled (predictions will degrade to a positive default). cloud EOT and other turn detection modes are unaffected."
      );
+@@ -190,7 +190,7 @@ class ServerOptions {
+     this.requestFunc = requestFunc;
+     this.loadFunc = loadFunc;
+     this.loadThreshold = simulation ? Infinity : loadThreshold || Default.loadThreshold(production);
+-    this.numIdleProcesses = numIdleProcesses || Default.numIdleProcesses(production);
++    this.numIdleProcesses = numIdleProcesses ?? Default.numIdleProcesses(production);
+     this.drainTimeout = drainTimeout;
+     this.shutdownProcessTimeout = shutdownProcessTimeout;
+     this.initializeProcessTimeout = initializeProcessTimeout;
 @@ -386,6 +386,14 @@ class AgentServer {
    get activeJobs() {
      return this.#procPool.processes.filter((proc) => proc.runningJob).map((proc) => proc.runningJob);
@@ -152,7 +161,7 @@ index f11e279a2900d394506bccff4e8182ada87cc857..0c510270eeccfbe91d19b5d737228e25
      drain(timeout?: number): Promise<Throws<void, WorkerError | Error>>;
      simulateJob(roomName: string, participantIdentity?: string): Promise<void>;
 diff --git a/dist/worker.js b/dist/worker.js
-index a5c1b61cee16b2acbb7552775d70057a84db725a..10d3bbab2b9aea50874d00cf815589ca6ed671c6 100644
+index a5c1b61cee16b2acbb7552775d70057a84db725a..291c3cbb4527d33f7f584d6aa946b3f3c13010c3 100644
 --- a/dist/worker.js
 +++ b/dist/worker.js
 @@ -15,7 +15,7 @@ import { APIStatusError } from "./_exceptions.js";
@@ -173,6 +182,15 @@ index a5c1b61cee16b2acbb7552775d70057a84db725a..10d3bbab2b9aea50874d00cf815589ca
      log().warn(
        "@livekit/local-inference native binding unavailable; local audio EOT disabled (predictions will degrade to a positive default). cloud EOT and other turn detection modes are unaffected."
      );
+@@ -164,7 +164,7 @@ class ServerOptions {
+     this.requestFunc = requestFunc;
+     this.loadFunc = loadFunc;
+     this.loadThreshold = simulation ? Infinity : loadThreshold || Default.loadThreshold(production);
+-    this.numIdleProcesses = numIdleProcesses || Default.numIdleProcesses(production);
++    this.numIdleProcesses = numIdleProcesses ?? Default.numIdleProcesses(production);
+     this.drainTimeout = drainTimeout;
+     this.shutdownProcessTimeout = shutdownProcessTimeout;
+     this.initializeProcessTimeout = initializeProcessTimeout;
 @@ -360,6 +360,14 @@ class AgentServer {
    get activeJobs() {
      return this.#procPool.processes.filter((proc) => proc.runningJob).map((proc) => proc.runningJob);

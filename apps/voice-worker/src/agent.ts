@@ -17,6 +17,7 @@ import { config as loadEnv } from "dotenv";
 import { type AgentServer, inference, type JobContext, type JobProcess, ServerOptions, cli, defineAgent, voice } from "@livekit/agents";
 import { RoomServiceClient, SipClient } from "livekit-server-sdk";
 import { createAdmissionController } from "./admission.js";
+import { parseWorkerLimits } from "./env.js";
 import { ControlPlaneClient } from "./control-plane-client.js";
 import { FeatherAgent } from "./feather-agent.js";
 import { buildSpeechStack } from "./speech.js";
@@ -52,7 +53,22 @@ const SIP_OUTBOUND_TRUNK_ID = process.env["LIVEKIT_SIP_OUTBOUND_TRUNK_ID"] ?? nu
  * measurement. Nothing here decides what this box can carry; it decides that the answer is a number
  * someone chose rather than a CPU average nobody controls.
  */
-const WORKER_MAX_JOBS = Math.max(1, Number(process.env["WORKER_MAX_JOBS"] ?? 8));
+const LIMITS = parseWorkerLimits(process.env);
+if (!LIMITS.ok) {
+  /**
+   * Fail closed, at boot, on stderr (review #18).
+   *
+   * The alternative is what this replaces: `Math.max(1, Number("eight"))` is `NaN`, and the
+   * admission controller's `inFlight() >= NaN` is always false — a typo did not raise the ceiling,
+   * it removed it, and nothing said so. A worker whose limits nobody has decided is worse than a
+   * worker that did not start: it takes calls it cannot serve, and the failure arrives minutes
+   * later, on a borrower's call, somewhere else entirely.
+   */
+  for (const m of LIMITS.messages) console.error(`[worker] refusing to start: ${m}`);
+  process.exit(1);
+}
+
+const WORKER_MAX_JOBS = LIMITS.maxJobs;
 const WORKER_LOAD_THRESHOLD = Number(process.env["WORKER_LOAD_THRESHOLD"] ?? 0.75);
 /**
  * How many job processes are kept warm (W3).
@@ -66,7 +82,7 @@ const WORKER_LOAD_THRESHOLD = Number(process.env["WORKER_LOAD_THRESHOLD"] ?? 0.7
  * warm slot is ~190 MB resident doing nothing — but the gigabyte W1 just gave back buys four of
  * them and still leaves the tree lighter than it was this morning.
  */
-const WORKER_IDLE_PROCESSES = Math.max(0, Number(process.env["WORKER_IDLE_PROCESSES"] ?? Math.min(WORKER_MAX_JOBS, 4)));
+const WORKER_IDLE_PROCESSES = LIMITS.idleProcesses;
 
 /**
  * The EOU model's thread pool (W4).
