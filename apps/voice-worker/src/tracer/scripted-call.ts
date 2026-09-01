@@ -37,6 +37,7 @@ import { AccessToken, AgentDispatchClient, RoomServiceClient } from "livekit-ser
 import { wordErrorRate } from "@feather-lite/domain";
 import { buildSpeechStack, speechProvider } from "../speech.js";
 import { synthesizeCached } from "./line-cache.js";
+import { harnessJsonHeaders } from "@feather-lite/load-test/harness-http";
 
 /**
  * A different voice than the agent's, so a human listening can tell the two apart.
@@ -217,13 +218,12 @@ const bootstrapRoom = async (opts: ScriptedCallOptions): Promise<{ roomName: str
     return { roomName, token: await at.toJwt(), conversationId: null };
   }
 
-  const bearer = process.env["API_BEARER_TOKEN"];
   const dir = (await (await fetch(`${opts.controlPlaneUrl}/api/borrowers`)).json()) as Array<{ borrower_id: string; name: string; contact_points: Array<{ contact_point_id: string }> }>;
   const b = dir.find((x) => x.name === opts.borrowerName);
   if (!b) throw new Error(`borrower ${opts.borrowerName} not found in ${opts.controlPlaneUrl}/api/borrowers`);
   const res = await fetch(`${opts.controlPlaneUrl}/api/voice/sessions`, {
     method: "POST",
-    headers: { "content-type": "application/json", ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) },
+    headers: harnessJsonHeaders(),
     body: JSON.stringify({
       borrower_id: b.borrower_id,
       contact_point_id: b.contact_points[0]!.contact_point_id,

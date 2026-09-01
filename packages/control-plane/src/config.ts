@@ -43,6 +43,21 @@ export interface AppConfigShape {
   /** Demo conveniences: clock override on /calls/start, "reset demo" endpoint. */
   readonly demoMode: boolean;
   readonly apiBearerToken: Redacted.Redacted<string> | null;
+  /**
+   * A secret that exempts a caller from the per-IP budget and the daily turn cap (O9).
+   *
+   * The harness drives hundreds of turns a minute from one address, so the server's own middleware
+   * sheds it: a tier-1 run was 429ed 92 times and reported "23/50 correct". The workaround was to
+   * raise `RATE_LIMIT_PER_MINUTE` and `DAILY_TURN_CAP` in the server's environment for load runs,
+   * which means the run is measured against a server configured differently from the one being
+   * described — and it is the same knob a public demo depends on.
+   *
+   * A separate secret rather than a per-bearer bucket, because there is exactly one bearer here and
+   * a bucket keyed on it would exempt the demo as well. It exempts nothing else: the bearer check
+   * above still applies, so this cannot be used to reach an endpoint, only to be allowed to reach
+   * it often. Null unless set, and every bypassed request is counted.
+   */
+  readonly rateLimitBypassToken: Redacted.Redacted<string> | null;
   /** Public-demo hardening budgets. Raised deliberately for load runs (docs/loadtest/). */
   readonly rateLimitPerMinute: number;
   readonly dailyTurnCap: number;
@@ -139,6 +154,7 @@ export const appConfig: Config.Config<AppConfigShape> = Config.all({
   livekitAgentName: Config.string("LIVEKIT_AGENT_NAME").pipe(Config.withDefault("feather-lite-agent")),
   demoMode: Config.boolean("DEMO_MODE").pipe(Config.withDefault(true)),
   apiBearerToken: optionalRedacted("API_BEARER_TOKEN"),
+  rateLimitBypassToken: optionalRedacted("RATE_LIMIT_BYPASS_TOKEN"),
   rateLimitPerMinute: Config.integer("RATE_LIMIT_PER_MINUTE").pipe(Config.withDefault(120)),
   dailyTurnCap: Config.integer("DAILY_TURN_CAP").pipe(Config.withDefault(5000)),
   sweeperEnabled: Config.boolean("SWEEPER_ENABLED").pipe(Config.withDefault(true)),
@@ -184,6 +200,13 @@ export const appConfig: Config.Config<AppConfigShape> = Config.all({
           : null,
       demoMode: c.demoMode,
       apiBearerToken: c.apiBearerToken._tag === "Some" ? c.apiBearerToken.value : null,
+      /**
+       * A blank value is treated as absent, and it has to be: `RATE_LIMIT_BYPASS_TOKEN=` in a
+       * `.env` reads as `Some("")` rather than `None`, and an empty secret would have matched the
+       * empty-string fallback the middleware uses when the header is missing — exempting *every*
+       * request, from a line an operator wrote to turn the feature off.
+       */
+      rateLimitBypassToken: c.rateLimitBypassToken._tag === "Some" && Redacted.value(c.rateLimitBypassToken.value).length > 0 ? c.rateLimitBypassToken.value : null,
       rateLimitPerMinute: c.rateLimitPerMinute,
       dailyTurnCap: c.dailyTurnCap,
       sweeperEnabled: c.sweeperEnabled,

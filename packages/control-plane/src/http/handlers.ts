@@ -185,6 +185,8 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
               rejected_start: counted("rate_limited_start"),
               rejected_turn: counted("rate_limited_turn"),
               rejected_daily_cap: counted("rate_limited_daily_cap"),
+              /** Requests exempted by `RATE_LIMIT_BYPASS_TOKEN` (O9) — a harness run, or a leak. */
+              bypassed: counted("rate_limit_bypassed"),
               buckets: rateLimitBucketCount(),
             },
           };

@@ -511,6 +511,8 @@ export const SystemStatus = Schema.Struct({
     rejected_start: Schema.Number,
     rejected_turn: Schema.Number,
     rejected_daily_cap: Schema.Number,
+    /** Requests exempted by `RATE_LIMIT_BYPASS_TOKEN` (O9). Non-zero outside a load run is a leak. */
+    bypassed: Schema.Number,
     buckets: Schema.Number,
   }),
 });

@@ -7,6 +7,7 @@
  * `POST /api/conversations/:id/scores` a human label uses means the Quality page, Langfuse and the
  * fleet report all read one store rather than three.
  */
+import { harnessHeaders, harnessJsonHeaders } from "@feather-lite/load-test/harness-http";
 
 /** One turn as the ledger knows it: its id, and when the control plane claimed it. */
 export interface LedgerTurn {
@@ -30,11 +31,10 @@ export const postHarnessScores = async (
   log?: (m: string) => void,
 ): Promise<void> => {
   if (scores.length === 0) return;
-  const bearer = process.env["API_BEARER_TOKEN"];
   try {
     const res = await fetch(`${controlPlaneUrl}/api/conversations/${conversationId}/scores`, {
       method: "POST",
-      headers: { "content-type": "application/json", ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) },
+      headers: harnessJsonHeaders(),
       body: JSON.stringify({ scores }),
     });
     if (!res.ok) {
@@ -188,11 +188,8 @@ export const summariseWer = <L extends { readonly turn: string; readonly wer: nu
  * is what existed before any of this — so this never throws.
  */
 export const ledgerTurns = async (controlPlaneUrl: string, conversationId: string): Promise<ReadonlyArray<LedgerTurn>> => {
-  const bearer = process.env["API_BEARER_TOKEN"];
   try {
-    const res = await fetch(`${controlPlaneUrl}/api/conversations/${conversationId}/latency`, {
-      headers: bearer ? { authorization: `Bearer ${bearer}` } : {},
-    });
+    const res = await fetch(`${controlPlaneUrl}/api/conversations/${conversationId}/latency`, { headers: harnessHeaders() });
     if (!res.ok) return [];
     return ((await res.json()) as Array<{ turn_id: string; started_at: string }>).map((r) => ({ turn_id: r.turn_id, startedAtMs: Date.parse(r.started_at) }));
   } catch {

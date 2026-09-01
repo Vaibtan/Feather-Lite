@@ -8,6 +8,10 @@
     "./resources": {
       "types": "./src/resources.ts",
       "default": "./src/resources.ts"
+    },
+    "./harness-http": {
+      "types": "./src/harness-http.ts",
+      "default": "./src/harness-http.ts"
     }
   },
   "scripts": {

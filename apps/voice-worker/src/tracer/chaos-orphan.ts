@@ -27,6 +27,7 @@ import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
 import { initializeLogger } from "@livekit/agents";
 import { loadScriptedLines, runScriptedCall } from "./scripted-call.js";
+import { harnessJsonHeaders } from "@feather-lite/load-test/harness-http";
 
 loadEnv({ path: fileURLToPath(new URL("../../../../.env", import.meta.url)) });
 initializeLogger({ pretty: true, level: "warn" });
@@ -39,13 +40,8 @@ const BORROWER_NAME = process.env["TRACER_BORROWER"] ?? "Jordan Avery";
 /** ORPHAN_MISSED_HEARTBEATS x interval (30 s) + one sweep (10 s), plus slack for a busy laptop. */
 const WAIT_FOR_SWEEP_MS = Number(process.env["CHAOS_WAIT_MS"] ?? 90_000);
 
-const authHeaders = (): Record<string, string> => {
-  const bearer = process.env["API_BEARER_TOKEN"];
-  return { "content-type": "application/json", ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) };
-};
-
 const getJson = async <T>(path: string): Promise<T> => {
-  const res = await fetch(`${CONTROL_PLANE_URL}${path}`, { headers: authHeaders() });
+  const res = await fetch(`${CONTROL_PLANE_URL}${path}`, { headers: harnessJsonHeaders() });
   if (!res.ok) throw new Error(`GET ${path} -> ${res.status}: ${(await res.text()).slice(0, 200)}`);
   return (await res.json()) as T;
 };
@@ -165,7 +161,7 @@ if (!detect) failures.push("no system.orphan_detect_ms score was written");
 // The point of the whole exercise: the borrower is not blocked any more.
 const retry = await fetch(`${CONTROL_PLANE_URL}/api/calls/start`, {
   method: "POST",
-  headers: authHeaders(),
+  headers: harnessJsonHeaders(),
   body: JSON.stringify({ borrower_id: detail.conversation.borrower_id, contact_point_id: undefined, channel: "simulated" }),
 }).catch(() => null);
 if (retry && retry.status === 422) {

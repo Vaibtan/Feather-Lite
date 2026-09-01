@@ -8,6 +8,7 @@
  * ledger: the state path, the tool sequence, and the final outcome. Wording, timing, playout and
  * barge-in events legitimately differ between a typed simulation and spoken audio.
  */
+import { harnessHeaders } from "@feather-lite/load-test/harness-http";
 export interface ScenarioReference {
   readonly scenarioId: string;
   readonly statePath: ReadonlyArray<string>;
@@ -27,14 +28,9 @@ export interface EquivalenceResult {
   readonly finalOutcome: string | null;
 }
 
-const authHeaders = (): Record<string, string> => {
-  const bearer = process.env["API_BEARER_TOKEN"];
-  return bearer ? { authorization: `Bearer ${bearer}` } : {};
-};
-
 /** Run the reference simulation scenario and capture what it actually produced. */
 export const loadScenarioReference = async (controlPlaneUrl: string, scenarioId = "happy-path-promise-to-pay"): Promise<ScenarioReference> => {
-  const res = await fetch(`${controlPlaneUrl}/api/testing/scenarios/${scenarioId}/run`, { method: "POST", headers: authHeaders() });
+  const res = await fetch(`${controlPlaneUrl}/api/testing/scenarios/${scenarioId}/run`, { method: "POST", headers: harnessHeaders() });
   if (!res.ok) throw new Error(`scenario ${scenarioId} run failed: ${res.status} ${await res.text()}`);
   const r = (await res.json()) as {
     passed: boolean;
@@ -55,7 +51,7 @@ export const loadScenarioReference = async (controlPlaneUrl: string, scenarioId 
 
 /** Compare a finished voice conversation's ledger against the simulation reference. */
 export const checkEquivalence = async (controlPlaneUrl: string, conversationId: string, reference: ScenarioReference): Promise<EquivalenceResult> => {
-  const res = await fetch(`${controlPlaneUrl}/api/conversations/${conversationId}`, { headers: authHeaders() });
+  const res = await fetch(`${controlPlaneUrl}/api/conversations/${conversationId}`, { headers: harnessHeaders() });
   if (!res.ok) throw new Error(`conversation ${conversationId} fetch failed: ${res.status} ${await res.text()}`);
   const detail = (await res.json()) as {
     conversation?: { final_outcome: string | null; current_state: string };

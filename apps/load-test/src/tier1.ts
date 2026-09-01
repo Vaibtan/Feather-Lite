@@ -33,6 +33,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
+import { harnessBypassConfigured, harnessJsonHeaders } from "./harness-http.js";
 import { formatResourceReport, perCoreBudget, SERVER_ROLES, startResourceSampler, validateReport } from "./resources.js";
 
 /* ------------------------------- config ------------------------------- */
@@ -59,11 +60,6 @@ const SCRIPT = ["yes this is Jordan", "I can pay 550 on Friday", "yes"] as const
 
 /** How many conversations this run will drive, in either mode. */
 const CONVERSATIONS = MODE === "soak" ? Math.ceil((RATE / SCRIPT.length) * DURATION_SECONDS) : CONCURRENCY;
-
-const authHeaders = (): Record<string, string> => {
-  const bearer = process.env["API_BEARER_TOKEN"];
-  return { "content-type": "application/json", ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) };
-};
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -97,7 +93,7 @@ const runTurn = async (conversationId: string, turnId: string, userText: string)
   try {
     res = await fetch(`${BASE}/api/conversations/${conversationId}/turn`, {
       method: "POST",
-      headers: { ...authHeaders(), accept: "text/event-stream" },
+      headers: { ...harnessJsonHeaders(), accept: "text/event-stream" },
       body: JSON.stringify({ turn_id: turnId, user_text: userText }),
     });
   } catch (e) {
@@ -156,7 +152,7 @@ const runConversation = async (index: number, fixture: { borrower_id: string; co
   try {
     const res = await fetch(`${BASE}/api/calls/start`, {
       method: "POST",
-      headers: authHeaders(),
+      headers: harnessJsonHeaders(),
       body: JSON.stringify({ borrower_id: fixture.borrower_id, contact_point_id: fixture.contact_point_id, channel: "simulated" }),
     });
     if (!res.ok) return { index, conversationId: null, startMs: Date.now() - t0, turns: [], startError: `${res.status}: ${(await res.text()).slice(0, 300)}` };
@@ -224,7 +220,7 @@ if (status.judge?.enabled !== false && !process.argv.includes("--allow-judge")) 
 }
 
 // The reference outcome comes from the scenario suite, not from a constant in this file.
-const refRes = await fetch(`${BASE}/api/testing/scenarios/happy-path-promise-to-pay/run`, { method: "POST", headers: authHeaders() });
+const refRes = await fetch(`${BASE}/api/testing/scenarios/happy-path-promise-to-pay/run`, { method: "POST", headers: harnessJsonHeaders() });
 if (!refRes.ok) throw new Error(`reference scenario failed: ${refRes.status} ${await refRes.text()}`);
 const reference = (await refRes.json()) as { passed: boolean; actual_state_path: string[]; actual_tools: string[]; final_outcome: string | null };
 if (!reference.passed) throw new Error("the reference scenario did not pass its own assertions; fix that before load testing");
@@ -242,7 +238,7 @@ for (let minted = 0; minted < CONVERSATIONS; ) {
   const batch = Math.min(500, CONVERSATIONS - minted);
   const res = await fetch(`${BASE}/api/demo/load-fixtures`, {
     method: "POST",
-    headers: authHeaders(),
+    headers: harnessJsonHeaders(),
     body: JSON.stringify({ count: batch, prefix: `${prefix}-${String(minted)}` }),
   });
   if (!res.ok) throw new Error(`load-fixtures ${res.status}: ${await res.text()}`);
@@ -523,7 +519,7 @@ const resources = await sampler.stop();
 const verdictFor = async (run: ConversationRun): Promise<Verdict> => {
   const failures: string[] = [];
   if (!run.conversationId) return { index: run.index, conversationId: null, correct: false, failures: [`start failed: ${run.startError ?? "unknown"}`] };
-  const detailRes = await fetch(`${BASE}/api/conversations/${run.conversationId}`, { headers: authHeaders() });
+  const detailRes = await fetch(`${BASE}/api/conversations/${run.conversationId}`, { headers: harnessJsonHeaders() });
   if (!detailRes.ok) return { index: run.index, conversationId: run.conversationId, correct: false, failures: [`detail ${detailRes.status}`] };
   const detail = (await detailRes.json()) as {
     conversation?: { final_outcome: string | null };
@@ -589,13 +585,24 @@ console.log(`  start errors           ${startErrors.length}`);
 /**
  * A run that the server's own middleware shed is not a measurement of the server, and the failure
  * is silent otherwise: the correctness count simply drops and the report reads like a regression.
- * Named here until O9 gives the harness a bypass token and the status page a counter.
+ *
+ * `RATE_LIMIT_BYPASS_TOKEN`, set on both sides, exempts the harness (O9) — which is better than the
+ * old advice of raising the budgets in the server's environment, because that measures a server
+ * configured differently from the one being described.
  */
 const rateLimited = (errorsByStatus.get(429) ?? 0) + startErrors.filter((e) => e.startsWith("429")).length;
 if (rateLimited > 0) {
   console.log(`  !! rate limited        ${rateLimited} request(s) were 429ed by this server's own per-IP limiter.`);
-  console.log(`                         Raise RATE_LIMIT_PER_MINUTE and DAILY_TURN_CAP in the SERVER process env`);
-  console.log(`                         for load runs; this run is not a baseline.`);
+  console.log(
+    harnessBypassConfigured()
+      ? `                         RATE_LIMIT_BYPASS_TOKEN is set here but the server did not honour it —`
+      : `                         Set RATE_LIMIT_BYPASS_TOKEN to the same value in this process and the`,
+  );
+  console.log(
+    harnessBypassConfigured()
+      ? `                         check it is the same value in the SERVER process env. Not a baseline.`
+      : `                         SERVER process env. This run is not a baseline.`,
+  );
 }
 console.log(`  pg at peak             ${pg.peak ? `${pg.peak.backends} backends, ${pg.peak.active} active, ${pg.peak.idleInTransaction} idle-in-tx, ${pg.peak.waiting} lock-waiting (${pg.peak.samples} samples)` : "(not captured)"}`);
 if (statements.available && statements.top_by_total_time) {
@@ -646,7 +653,7 @@ const report = {
   conversations: { total: runs.length, correct, incorrect: runs.length - correct },
   turns: { attempted: allTurns.length, ok: okTurns.length, throughput_per_second: throughput },
   latency_ms: { start: starts, ttft, turn_wall: wall },
-  errors: { by_status: Object.fromEntries(errorsByStatus), start_errors: startErrors.slice(0, 20), rate_limited: rateLimited },
+  errors: { by_status: Object.fromEntries(errorsByStatus), start_errors: startErrors.slice(0, 20), rate_limited: rateLimited, rate_limit_bypass: harnessBypassConfigured() },
   pg_at_peak: pg.peak,
   /**
    * The outbox backlog this run started against. Non-zero means the server was draining an earlier

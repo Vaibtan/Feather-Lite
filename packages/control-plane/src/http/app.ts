@@ -71,6 +71,21 @@ export const securityMiddleware = HttpMiddleware.make((app) =>
     if (!open && RATE_LIMITED_PREFIXES.some((p) => url.startsWith(p))) {
       const metrics = yield* Metrics;
       /**
+       * The harness is not a stranger (O9).
+       *
+       * Its runs drive hundreds of turns a minute from one address and the per-IP budget sheds
+       * them, so the previous answer was to raise `RATE_LIMIT_PER_MINUTE` and `DAILY_TURN_CAP` in
+       * the server's environment for the duration — which measures a server configured differently
+       * from the one being described, and moves the knob a public demo depends on. A run that
+       * presents this secret is exempt instead, and is counted so an operator can see how much of
+       * the traffic was exempt rather than budgeted.
+       */
+      const presented = req.headers["x-ratelimit-bypass"];
+      if (cfg.rateLimitBypassToken !== null && presented !== undefined && presented === Redacted.value(cfg.rateLimitBypassToken)) {
+        yield* metrics.increment("rate_limit_bypassed");
+        return yield* app;
+      }
+      /**
        * A shed request is counted before it is refused (O9). A tier-1 run from one IP was 429ed 92
        * times, reported "23/50 correct", and moved no counter anywhere - so the status page could
        * not tell "the agent is broken" from "my own middleware is shedding load". The two prefixes

@@ -28,6 +28,7 @@ import { checkEquivalence, loadScenarioReference, type EquivalenceResult } from 
 import { buildHarnessScores, postHarnessScores, summariseWer } from "./harness-scores.js";
 import type { ScriptedCallResult } from "./scripted-call.js";
 import type { BorrowerProcMessage, BorrowerProcRequest } from "./borrower-proc.js";
+import { harnessJsonHeaders } from "@feather-lite/load-test/harness-http";
 
 loadEnv({ path: fileURLToPath(new URL("../../../../.env", import.meta.url)) });
 
@@ -77,10 +78,6 @@ const REPORT_DIR = fileURLToPath(new URL("../../../../docs/loadtest/", import.me
 
 const t0 = Date.now();
 const log = (m: string) => console.log(`[fleet] +${String(Date.now() - t0).padStart(6)}ms ${m}`);
-const authHeaders = (): Record<string, string> => {
-  const bearer = process.env["API_BEARER_TOKEN"];
-  return { "content-type": "application/json", ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) };
-};
 
 log(`calls=${CALLS} max-wer=${MAX_WER} borrowers=${IN_PROC ? "in-process" : "forked child"} livekit=${process.env["LIVEKIT_URL"] ?? "(unset)"} stt/tts=${process.env["STT_TTS_PROVIDER"] ?? "inference"}`);
 
@@ -109,7 +106,7 @@ interface WorkerMode {
   readonly idleConfigured: number | null;
 }
 const workerMode = await (async (): Promise<WorkerMode> => {
-  const res = await fetch(`${CONTROL_PLANE_URL}/api/system/status`, { headers: authHeaders() });
+  const res = await fetch(`${CONTROL_PLANE_URL}/api/system/status`, { headers: harnessJsonHeaders() });
   if (!res.ok) throw new Error(`status ${String(res.status)}: ${await res.text()}`);
   const status = (await res.json()) as { agents: Array<{ agent_name: string; online: boolean; meta: Record<string, unknown> }> };
   // The main worker, not a job process: only the main one reports `production`.
@@ -159,7 +156,7 @@ if (workerMode.maxJobs !== null && CALLS > Math.floor(workerMode.maxJobs * 0.75)
 
 const fixturesRes = await fetch(`${CONTROL_PLANE_URL}/api/demo/load-fixtures`, {
   method: "POST",
-  headers: authHeaders(),
+  headers: harnessJsonHeaders(),
   body: JSON.stringify({ count: CALLS, prefix: `voice-${Date.now().toString(36)}` }),
 });
 if (!fixturesRes.ok) throw new Error(`load-fixtures ${fixturesRes.status}: ${await fixturesRes.text()}`);
@@ -283,7 +280,7 @@ const rowsByConversation = new Map<string, TurnLatencyRow[]>();
 for (const { call } of equivalences) {
   if (!call.conversationId) continue;
   try {
-    const res = await fetch(`${CONTROL_PLANE_URL}/api/conversations/${call.conversationId}/latency`, { headers: authHeaders() });
+    const res = await fetch(`${CONTROL_PLANE_URL}/api/conversations/${call.conversationId}/latency`, { headers: harnessJsonHeaders() });
     if (res.ok) {
       const rows = (await res.json()) as TurnLatencyRow[];
       rowsByConversation.set(call.conversationId, rows);
