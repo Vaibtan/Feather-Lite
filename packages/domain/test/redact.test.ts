@@ -52,6 +52,43 @@ describe("redactAccountData", () => {
   });
 });
 
+describe("redactAccountData: the phrasing the fleet actually uses (review #13)", () => {
+  const masked: ReadonlyArray<readonly [string, string, string]> = [
+    ["a bare amount after a payment verb", "I can pay 550 on Friday.", "I can pay [amount] on Friday."],
+    ["with a hedge in between", "I could probably do about 300 next week.", "I could probably do about [amount] next week."],
+    ["what is owed", "You owe 1,250 on this account.", "You owe [amount] on this account."],
+    ["a noun instead of a verb", "The balance is 1250 as of today.", "The balance is [amount] as of today."],
+    ["the minimum", "Your minimum payment of 75 is due soon.", "Your minimum payment of [amount] is due soon."],
+    ["a phone number", "Call me on 555-123-4567 instead.", "Call me on [digits] instead."],
+    ["a hyphenated account reference", "The reference is 4485-9392-01.", "The reference is [digits]."],
+  ];
+  for (const [name, input, expected] of masked) {
+    it(name, () => {
+      expect(redactAccountData(input)).toBe(expected);
+    });
+  }
+
+  const survives: ReadonlyArray<readonly [string, string]> = [
+    // The counter-cases are the point. A redactor that ate these would be the instrument-that-lies
+    // problem in a different place: a masked measurement is worse than an unmasked one.
+    ["a turn count", "This is attempt 2 of 5."],
+    ["the borrower's own scheduling", "I can pay in 3 days."],
+    ["a duration", "Give me 5 minutes to find the card."],
+    ["a proportion", "That covers 40 percent of it."],
+    ["a latency, written out", "The turn took 1234 ms."],
+    ["a date the agent read back", "Call me on the 21st."],
+  ];
+  for (const [name, input] of survives) {
+    it(`leaves ${name} alone`, () => {
+      expect(redactAccountData(input)).toBe(input);
+    });
+  }
+
+  it("still knows a hyphenated date from a hyphenated identifier", () => {
+    expect(redactAccountData("Due 8-21-2026.")).toBe("Due [date].");
+  });
+});
+
 describe("redactAccountDataDeep", () => {
   it("walks a prompt's message array and leaves the measurements intact", () => {
     const input = {
@@ -73,6 +110,44 @@ describe("redactAccountDataDeep", () => {
       cached_tokens: 1792,
       superseded: false,
       nothing: null,
+    });
+  });
+
+
+  it("masks an account fact that arrives as a number under its own key (review #13)", () => {
+    // A tool result is a structure, not a sentence: `{"balance_due": 1250}` carries the balance
+    // with none of the shape the text rules match on. The key is the evidence, so the allowlist is
+    // of keys — and it is an allowlist, not a pattern, so widening it is a decision someone makes.
+    expect(
+      redactAccountDataDeep({
+        balance_due: 1250,
+        minimum_payment: 75,
+        days_past_due: 45,
+        account_number: 4485939201,
+        // Not account facts. These are the measurements, and they must come through untouched.
+        ttft_ms: 1234,
+        cached_tokens: 1792,
+        turn_index: 3,
+      }),
+    ).toEqual({
+      balance_due: "[amount]",
+      minimum_payment: "[amount]",
+      days_past_due: "[count]",
+      account_number: "[digits]",
+      ttft_ms: 1234,
+      cached_tokens: 1792,
+      turn_index: 3,
+    });
+  });
+
+  it("masks the same fact when the tool serialised it as a string", () => {
+    expect(redactAccountDataDeep({ balance_due: "1250" })).toEqual({ balance_due: "[amount]" });
+  });
+
+  it("reaches an account fact nested in a tool result", () => {
+    expect(redactAccountDataDeep({ tool: "get_account", result: { account: { balance_due: 1250 } } })).toEqual({
+      tool: "get_account",
+      result: { account: { balance_due: "[amount]" } },
     });
   });
 

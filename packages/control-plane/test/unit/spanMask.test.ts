@@ -47,6 +47,38 @@ describe("spanMask (the Langfuse export boundary)", () => {
     expect(JSON.parse(spanMask({ data: attribute }) as string)).toEqual({ latency_decide_ttft_ms: 1234, latency_eou_delay_ms: 578, state: "DISCUSSING_PAYMENT", superseded: false });
   });
 
+  it("masks the phrasing the fleet actually speaks, and the shapes a tool actually returns (review #13)", () => {
+    // The three the review found. Each reached Langfuse in full before this: the borrower's own
+    // line ("I can pay 550" — no currency mark anywhere), a callback number, and an account fact
+    // that arrived as a number under its key rather than as words in a sentence.
+    const attribute = JSON.stringify({
+      input: { user_text: "I can pay 550, call me on 555-123-4567." },
+      output: { tool: "record_promise_to_pay", args: { balance_due: 1250, days_past_due: 45 } },
+    });
+    const masked = JSON.parse(spanMask({ data: attribute }) as string) as {
+      input: { user_text: string };
+      output: { tool: string; args: { balance_due: unknown; days_past_due: unknown } };
+    };
+    expect(masked.input.user_text).toBe("I can pay [amount], call me on [digits].");
+    expect(masked.output.args).toEqual({ balance_due: "[amount]", days_past_due: "[count]" });
+    expect(masked.output.tool).toBe("record_promise_to_pay");
+  });
+
+  it("still leaves every measurement alone, which is the counter-case the new rules risk", () => {
+    // The new rules widen what is masked, so the thing worth re-asserting is what they must not
+    // reach: a redacted latency is a lying instrument, and so is a redacted turn count.
+    const attribute = JSON.stringify({
+      latency_decide_ttft_ms: 1234,
+      turn_index: 3,
+      agent_text: "This is attempt 2 of 5. Call me back in 3 days, that covers 40 percent.",
+    });
+    expect(JSON.parse(spanMask({ data: attribute }) as string)).toEqual({
+      latency_decide_ttft_ms: 1234,
+      turn_index: 3,
+      agent_text: "This is attempt 2 of 5. Call me back in 3 days, that covers 40 percent.",
+    });
+  });
+
   it("returns valid JSON, so a redaction can never break the attribute it edits", () => {
     const attribute = JSON.stringify({ agent_text: 'She said "pay $550.00 by 2026-08-21" — right?' });
     expect(() => JSON.parse(spanMask({ data: attribute }) as string)).not.toThrow();
