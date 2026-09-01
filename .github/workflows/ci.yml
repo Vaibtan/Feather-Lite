@@ -8,21 +8,21 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: feather_lite
-        ports: ["5434:5432"]
-        options: >-
-          --health-cmd "pg_isready -U postgres -d feather_lite"
-          --health-interval 5s --health-timeout 3s --health-retries 20
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5434/feather_lite
     steps:
       - uses: actions/checkout@v4
+      # Not a `services:` container. A service container's command cannot be overridden, and
+      # `pg_stat_statements` has to be preloaded at server start (`shared_preload_libraries`) — so
+      # CI was running the one Postgres shape the product had never been booted against, and
+      # migration 0005's `CREATE EXTENSION` failed there. Composing the repo's own Postgres means
+      # CI runs the flags the load reports are measured with, and there is one definition of them.
+      - name: Start Postgres (the same one docker-compose defines)
+        run: |
+          docker compose up -d --wait postgres
+          # Asserted, not printed. Dropping the flag would degrade migration 0005 to its warning
+          # path silently, and the statement ranking every load claim rests on would quietly vanish.
+          docker compose exec -T postgres psql -U postgres -d feather_lite -tAc "SHOW shared_preload_libraries" | grep -q pg_stat_statements
       - uses: pnpm/action-setup@v4
         with:
           version: 11

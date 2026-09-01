@@ -357,6 +357,68 @@ const readStatements = async (available: boolean): Promise<StatementReport> => {
     return { available: false, note: `pg_stat_statements read failed: ${String(e)}` };
   }
 };
+
+/**
+ * Whether migration 0005's other half worked (spec D5b; review §3).
+ *
+ * `fillfactor = 80` was set so the per-turn updates — the `active_turn_id` claim and release on
+ * `conversations`, the `result` merge on `conversation_turns` — become **heap-only tuple** updates
+ * that touch no index at all. The migration's own comment names the number to watch
+ * (`n_tup_hot_upd / n_tup_upd > 0.9`) and nothing has ever reported it, so the claim has been
+ * unverified since it was written.
+ *
+ * Taken as a **delta across the run**, not as the table's lifetime total, because the migration
+ * only changes pages written from now on: a table whose history is pre-fillfactor would otherwise
+ * drag the ratio down for ever. `n_dead_tup` is the absolute reading afterwards, since that is a
+ * "how much is autovacuum behind right now" question, not a rate.
+ */
+/** The four write-heavy tables migration 0005 tuned; keep in step with its `ALTER TABLE` loop. */
+const HOT_TABLES = ["conversations", "conversation_turns", "outbox_jobs", "scheduled_actions"] as const;
+interface TableWrites {
+  readonly n_tup_upd: number;
+  readonly n_tup_hot_upd: number;
+  readonly n_dead_tup: number;
+  readonly n_live_tup: number;
+}
+type TableWriteMap = Readonly<Record<string, TableWrites>>;
+const readTableWrites = async (): Promise<TableWriteMap | null> => {
+  try {
+    const rows = await sql<Array<{ relname: string; n_tup_upd: string; n_tup_hot_upd: string; n_dead_tup: string; n_live_tup: string }>>`
+      SELECT relname,
+             n_tup_upd::text     AS n_tup_upd,
+             n_tup_hot_upd::text AS n_tup_hot_upd,
+             n_dead_tup::text    AS n_dead_tup,
+             n_live_tup::text    AS n_live_tup
+      FROM pg_stat_user_tables
+      WHERE relname = ANY(${[...HOT_TABLES]})`;
+    return Object.fromEntries(
+      rows.map((r) => [r.relname, { n_tup_upd: Number(r.n_tup_upd), n_tup_hot_upd: Number(r.n_tup_hot_upd), n_dead_tup: Number(r.n_dead_tup), n_live_tup: Number(r.n_live_tup) }]),
+    );
+  } catch {
+    return null;
+  }
+};
+interface HotRow {
+  readonly table: string;
+  readonly updates: number;
+  readonly hot_updates: number;
+  /** `null` when the run did not update the table at all — a ratio of nothing is not 0. */
+  readonly hot_ratio: number | null;
+  readonly dead_tuples: number;
+  readonly live_tuples: number;
+}
+const hotReport = (before: TableWriteMap | null, after: TableWriteMap | null): ReadonlyArray<HotRow> | null => {
+  if (!before || !after) return null;
+  return HOT_TABLES.flatMap((table) => {
+    const a = after[table];
+    if (!a) return [];
+    const b = before[table] ?? { n_tup_upd: 0, n_tup_hot_upd: 0, n_dead_tup: 0, n_live_tup: 0 };
+    const updates = a.n_tup_upd - b.n_tup_upd;
+    const hot = a.n_tup_hot_upd - b.n_tup_hot_upd;
+    return [{ table, updates, hot_updates: hot, hot_ratio: updates > 0 ? Math.round((hot / updates) * 1000) / 1000 : null, dead_tuples: a.n_dead_tup, live_tuples: a.n_live_tup }];
+  });
+};
+
 /**
  * Wait for the previous run's post-call work to finish before starting this one.
  *
@@ -387,6 +449,7 @@ else if (pendingAtArrival > 0) console.log(`[tier1] outbox drained in ${String(M
 
 const statementsAvailable = await resetStatements();
 if (!statementsAvailable) console.log("[tier1] pg_stat_statements is not loaded; the report will carry no statement ranking (see docs/loadtest/README.md)");
+const tableWritesBefore = await readTableWrites();
 
 /**
  * Open-loop arrival: a conversation is launched every `SCRIPT.length / RATE` seconds and the loop
@@ -442,6 +505,7 @@ const runs =
 const wallMs = Date.now() - wallStart;
 clearInterval(pgSampler);
 const statements = await readStatements(statementsAvailable);
+const hotRows = hotReport(tableWritesBefore, await readTableWrites());
 
 /* ------------------------- correctness assertions ---------------------- */
 
@@ -544,6 +608,14 @@ if (statements.available && statements.top_by_total_time) {
 } else if (statements.note) {
   console.log(`  pg statements          ${statements.note}`);
 }
+if (hotRows) {
+  // Migration 0005's fillfactor claim, per table, over this run's own writes.
+  const shown = hotRows.filter((r) => r.updates > 0);
+  console.log(`  pg HOT updates         ${shown.length === 0 ? "(no updates in this run)" : ""}`);
+  for (const r of shown) {
+    console.log(`      ${r.table.padEnd(20)} ${String(r.hot_updates).padStart(7)}/${String(r.updates).padEnd(7)} HOT (${((r.hot_ratio ?? 0) * 100).toFixed(1)}%, target > 90%), ${String(r.dead_tuples)} dead of ${String(r.live_tuples)} live`);
+  }
+}
 if (startErrors.length) console.log(`  first start error      ${startErrors[0]}`);
 for (const v of verdicts.filter((x) => !x.correct).slice(0, 10)) console.log(`  INCORRECT #${v.index} ${v.conversationId ?? "-"}: ${v.failures.join("; ")}`);
 console.log(formatResourceReport(resources, budget));
@@ -583,6 +655,11 @@ const report = {
   outbox_pending_at_start: pending,
   /** What this run asked Postgres to do, per statement (D5b). The denominator of every D5 claim. */
   pg_statements: { ...statements, per_completed_turn: okTurns.length > 0 ? Math.round(((statements.total_calls ?? 0) / okTurns.length) * 100) / 100 : null },
+  /**
+   * Migration 0005's `fillfactor = 80` claim, checked (D5b): the share of this run's updates that
+   * were heap-only, per table, with the dead-tuple backlog autovacuum was carrying at the end.
+   */
+  pg_hot_updates: hotRows,
   resources,
   per_core: budget,
   reference: { state_path: reference.actual_state_path, tools: reference.actual_tools, final_outcome: reference.final_outcome },

@@ -22,8 +22,21 @@ export const migration0005 = Effect.gen(function* () {
    * with a clear message, and that must be a **warning, not a failed boot**: a deployment that has
    * not been restarted for it, or a managed Postgres that does not offer it, should still run the
    * product. What is lost is the measurement, not the service.
+   *
+   * **The savepoint is what makes that true** (review 2026-08-30, #2). Catching the Effect error
+   * does not un-poison the Postgres session: a failed statement inside a transaction leaves it in
+   * `25P02`, and every statement after it fails with "current transaction is aborted" — so the
+   * `ALTER TABLE` two lines down took the whole migration down with it and the server could not
+   * boot. That is the opposite of what the paragraph above promises, and it is exactly the
+   * environment CI runs (`postgres:16-alpine` with no preload flag).
+   *
+   * A nested `withTransaction` is a `SAVEPOINT`/`ROLLBACK TO SAVEPOINT` pair
+   * (`@effect/sql/dist/esm/internal/client.js:88-100`), which is the one construct that discards
+   * the failed statement and leaves the enclosing transaction usable. `CREATE EXTENSION` is legal
+   * inside a transaction block, so this costs nothing when the extension *is* available.
    */
   yield* sql`CREATE EXTENSION IF NOT EXISTS pg_stat_statements`.pipe(
+    sql.withTransaction,
     Effect.catchAll((e) =>
       Effect.logWarning(
         `pg_stat_statements is not available, so load reports will have no statement ranking. ` +
@@ -58,6 +71,7 @@ export const migration0005 = Effect.gen(function* () {
    * twice per turn each. 2 % and 1 % are cheap on tables this size and stop the polls from walking
    * a growing pile of dead rows between vacuums.
    */
+  // `apps/load-test/src/tier1.ts` reports the HOT ratio for exactly this list; keep the two in step.
   for (const table of ["conversations", "conversation_turns", "outbox_jobs", "scheduled_actions"] as const) {
     yield* sql`ALTER TABLE ${sql.unsafe(table)} SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_analyze_scale_factor = 0.01)`;
   }
