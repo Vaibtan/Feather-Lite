@@ -23,9 +23,10 @@ jobs:
           # Asserted, not printed. Dropping the flag would degrade migration 0005 to its warning
           # path silently, and the statement ranking every load claim rests on would quietly vanish.
           docker compose exec -T postgres psql -U postgres -d feather_lite -tAc "SHOW shared_preload_libraries" | grep -q pg_stat_statements
+      # No `version:` here on purpose. `pnpm/action-setup@v4` refuses to run when a version is
+      # given in both places — "Multiple versions of pnpm specified" — and `packageManager` in
+      # package.json is the one that also governs every local install, so it is the one that stays.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 11
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -62,9 +63,10 @@ jobs:
       WORKER_IDLE_PROCESSES: 0
     steps:
       - uses: actions/checkout@v4
+      # No `version:` here on purpose. `pnpm/action-setup@v4` refuses to run when a version is
+      # given in both places — "Multiple versions of pnpm specified" — and `packageManager` in
+      # package.json is the one that also governs every local install, so it is the one that stays.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 11
       - uses: actions/setup-node@v4
         with:
           node-version: 22
