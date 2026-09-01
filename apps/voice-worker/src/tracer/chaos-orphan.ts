@@ -9,10 +9,20 @@
  * borrower can be called again.
  *
  * Semi-automated on purpose. It starts a real call and then kills the worker's *job* processes,
- * which is a machine-specific act; everything after that is asserted. Run it with the stack up
- * (`pnpm db:up`, `pnpm lk:up`, `pnpm dev:server`, `pnpm dev:worker`):
+ * which is a machine-specific act; everything after that is asserted.
  *
+ * **Against the containerised stack**, which is what ships and what every number since 2026-09-01
+ * is measured on — the job processes are killed inside the worker container's own PID namespace,
+ * and the target is autodetected from whether that container is up:
+ *
+ *   $env:LIVEKIT_NODE_IP='<host LAN IP>'
+ *   docker compose --profile livekit --profile app up -d --build
  *   pnpm --filter @feather-lite/voice-worker chaos-orphan
+ *
+ * Against a native worker (`pnpm db:up`, `pnpm lk:up`, `pnpm start:server`, `pnpm start:worker`),
+ * pass `--host`; `--container` forces the other way, and `CHAOS_WORKER_CONTAINER` renames it.
+ *
+ *   pnpm --filter @feather-lite/voice-worker chaos-orphan -- --host
  *
  * What it prints, and what a pass looks like:
  *   - the call reaches the agent (the opening is spoken), so there is something real to orphan;
@@ -47,12 +57,70 @@ const getJson = async <T>(path: string): Promise<T> => {
 };
 
 /**
+ * Which worker is being chaos-tested (2026-09-01).
+ *
+ * The probe used to enumerate **host** PIDs, which since the Docker migration is the wrong process
+ * table: the deployed worker lives in its own PID namespace, so a probe run against the stack that
+ * actually ships found nothing, killed nothing, and then asserted a recovery that had nothing to
+ * recover from. The architecture that ships has to be the one that is chaos-tested, or the test is
+ * about a configuration nobody runs.
+ *
+ * Autodetected, because getting this wrong is silent: if the worker container is up, that is the
+ * worker serving the call. `--host` / `--container` force it either way.
+ */
+const WORKER_CONTAINER = process.env["CHAOS_WORKER_CONTAINER"] ?? "feather-lite-worker";
+const containerIsUp = (): boolean => {
+  try {
+    return execFileSync("docker", ["ps", "--filter", `name=^/${WORKER_CONTAINER}$`, "--format", "{{.Names}}"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() === WORKER_CONTAINER;
+  } catch {
+    return false; // no docker on the box: there is nothing to be in a container
+  }
+};
+const target: "host" | "container" = process.argv.includes("--host") ? "host" : process.argv.includes("--container") || containerIsUp() ? "container" : "host";
+
+/**
+ * Kill the containerised worker's job processes from inside its own PID namespace.
+ *
+ * `node -e` rather than `pkill`: the runtime image is `node:22-bookworm-slim` with only
+ * `ca-certificates` added, so there is no `procps` in it — and adding a package to the image that
+ * ships so a test can kill things in it would be the test changing the thing it measures. `/proc`
+ * is always there, and node is the one interpreter the image is guaranteed to have.
+ *
+ * `job_proc_lazy_main` is the framework's own fork entry (`ipc/job_proc_executor.js:48`), and it
+ * survives the esbuild bundle because `@livekit/agents` stays external — so the job process's argv
+ * carries that name in the container exactly as it does on the host.
+ */
+const killContainerJobs = (): number => {
+  const script = [
+    "const fs = require('node:fs');",
+    "let n = 0;",
+    "for (const p of fs.readdirSync('/proc')) {",
+    "  if (!/^[0-9]+$/.test(p) || Number(p) === process.pid) continue;",
+    "  try {",
+    "    if (!fs.readFileSync('/proc/' + p + '/cmdline', 'utf8').includes('job_proc_lazy_main')) continue;",
+    "    process.kill(Number(p), 'SIGKILL');",
+    "    n++;",
+    "  } catch { /* gone, or not ours */ }",
+    "}",
+    "console.log(n);",
+  ].join("");
+  try {
+    const out = execFileSync("docker", ["exec", WORKER_CONTAINER, "node", "--input-type=commonjs", "-e", script], { encoding: "utf8" });
+    return Number(out.trim()) || 0;
+  } catch (e) {
+    log(`could not kill job processes inside ${WORKER_CONTAINER}: ${String(e)}`);
+    return 0;
+  }
+};
+
+/**
  * Kill the worker's job processes — the ones actually serving calls — and leave the main worker
  * alone, which is what a crashed job looks like. On Windows the job processes are `node` children
  * of the worker; matching on the agent entry file is what distinguishes them from this script,
  * from the control-plane server, and from any other node on the box.
  */
 const killWorkerJobs = (): number => {
+  if (target === "container") return killContainerJobs();
   const isWindows = process.platform === "win32";
   try {
     if (isWindows) {
@@ -97,6 +165,8 @@ interface Detail {
 }
 
 log(`control plane=${CONTROL_PLANE_URL} livekit=${process.env["LIVEKIT_URL"] ?? "(unset)"}`);
+// Said out loud, because a probe that kills nothing still runs to the end and reports a verdict.
+log(`chaos target=${target}${target === "container" ? ` (${WORKER_CONTAINER})` : " (host processes)"}`);
 const lines = await loadScriptedLines();
 log(`borrower lines ready (${lines.cached ? "WAV cache" : "synthesised"})`);
 
@@ -126,7 +196,14 @@ if (!conversationId) {
   process.exit(1);
 }
 if (killed === 0) {
-  log("no worker process was killed — is `pnpm dev:worker` running? FAIL");
+  // The failure this guard exists for is now mostly the *wrong target*: a host-mode probe against a
+  // containerised worker enumerates a process table the worker is not in, finds nothing, and would
+  // otherwise go on to assert a recovery from an orphaning that never happened.
+  log(
+    target === "container"
+      ? `no job process was killed inside ${WORKER_CONTAINER} — is the worker container serving this call? FAIL`
+      : "no host worker process was killed — is a native worker running, or is it in a container (drop --host)? FAIL",
+  );
   process.exit(1);
 }
 
