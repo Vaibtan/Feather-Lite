@@ -94,7 +94,7 @@ index fdd027c23197a2541f78a6091165ee0b1c81dd8f..b535d118836fa1c448ca734163000700
  //# sourceMappingURL=_warmup.js.map
 \ No newline at end of file
 diff --git a/dist/worker.cjs b/dist/worker.cjs
-index c76343abb557cd3443896ed6ffbc0f48edf43c61..b4cbb447582545770d57e9131e9d0a74b47e56db 100644
+index c76343abb557cd3443896ed6ffbc0f48edf43c61..9a5066ee753094c6c915eeb39e5d6586ea2223d4 100644
 --- a/dist/worker.cjs
 +++ b/dist/worker.cjs
 @@ -60,7 +60,7 @@ function maybeRegisterLocalEotRunner() {
@@ -106,8 +106,53 @@ index c76343abb557cd3443896ed6ffbc0f48edf43c61..b4cbb447582545770d57e9131e9d0a74
      (0, import_log.log)().warn(
        "@livekit/local-inference native binding unavailable; local audio EOT disabled (predictions will degrade to a positive default). cloud EOT and other turn detection modes are unaffected."
      );
+@@ -386,6 +386,14 @@ class AgentServer {
+   get activeJobs() {
+     return this.#procPool.processes.filter((proc) => proc.runningJob).map((proc) => proc.runningJob);
+   }
++  /** @internal Patched (feather-lite): the RESOLVED options, so a worker can report its own truth. */
++  get options() {
++    return this.#opts;
++  }
++  /** @internal Patched (feather-lite): job processes forked and not on a call — the warm pool. */
++  get idleProcesses() {
++    return this.#procPool.processes.filter((proc) => proc.started && !proc.runningJob).length;
++  }
+   /** @throws {@link WorkerError} if worker did not drain in time */
+   async drain(timeout) {
+     if (this.#draining) {
+diff --git a/dist/worker.d.cts b/dist/worker.d.cts
+index f11e279a2900d394506bccff4e8182ada87cc857..0c510270eeccfbe91d19b5d737228e25197250e4 100644
+--- a/dist/worker.d.cts
++++ b/dist/worker.d.cts
+@@ -122,6 +122,10 @@ export declare class AgentServer {
+     run(): Promise<void>;
+     get id(): string;
+     get activeJobs(): RunningJobInfo[];
++    /** @internal Patched (feather-lite): the RESOLVED options, so a worker can report its own truth. */
++    get options(): ServerOptions;
++    /** @internal Patched (feather-lite): job processes forked and not on a call — the warm pool. */
++    get idleProcesses(): number;
+     /** @throws {@link WorkerError} if worker did not drain in time */
+     drain(timeout?: number): Promise<Throws<void, WorkerError | Error>>;
+     simulateJob(roomName: string, participantIdentity?: string): Promise<void>;
+diff --git a/dist/worker.d.ts b/dist/worker.d.ts
+index f11e279a2900d394506bccff4e8182ada87cc857..0c510270eeccfbe91d19b5d737228e25197250e4 100644
+--- a/dist/worker.d.ts
++++ b/dist/worker.d.ts
+@@ -122,6 +122,10 @@ export declare class AgentServer {
+     run(): Promise<void>;
+     get id(): string;
+     get activeJobs(): RunningJobInfo[];
++    /** @internal Patched (feather-lite): the RESOLVED options, so a worker can report its own truth. */
++    get options(): ServerOptions;
++    /** @internal Patched (feather-lite): job processes forked and not on a call — the warm pool. */
++    get idleProcesses(): number;
+     /** @throws {@link WorkerError} if worker did not drain in time */
+     drain(timeout?: number): Promise<Throws<void, WorkerError | Error>>;
+     simulateJob(roomName: string, participantIdentity?: string): Promise<void>;
 diff --git a/dist/worker.js b/dist/worker.js
-index a5c1b61cee16b2acbb7552775d70057a84db725a..f05c7cdbe9debf01f72eea4e12e0ba009fc776e3 100644
+index a5c1b61cee16b2acbb7552775d70057a84db725a..10d3bbab2b9aea50874d00cf815589ca6ed671c6 100644
 --- a/dist/worker.js
 +++ b/dist/worker.js
 @@ -15,7 +15,7 @@ import { APIStatusError } from "./_exceptions.js";
@@ -128,3 +173,18 @@ index a5c1b61cee16b2acbb7552775d70057a84db725a..f05c7cdbe9debf01f72eea4e12e0ba00
      log().warn(
        "@livekit/local-inference native binding unavailable; local audio EOT disabled (predictions will degrade to a positive default). cloud EOT and other turn detection modes are unaffected."
      );
+@@ -360,6 +360,14 @@ class AgentServer {
+   get activeJobs() {
+     return this.#procPool.processes.filter((proc) => proc.runningJob).map((proc) => proc.runningJob);
+   }
++  /** @internal Patched (feather-lite): the RESOLVED options, so a worker can report its own truth. */
++  get options() {
++    return this.#opts;
++  }
++  /** @internal Patched (feather-lite): job processes forked and not on a call — the warm pool. */
++  get idleProcesses() {
++    return this.#procPool.processes.filter((proc) => proc.started && !proc.runningJob).length;
++  }
+   /** @throws {@link WorkerError} if worker did not drain in time */
+   async drain(timeout) {
+     if (this.#draining) {

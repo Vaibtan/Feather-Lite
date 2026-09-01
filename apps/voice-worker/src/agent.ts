@@ -352,16 +352,41 @@ const loadFunc = async (w: AgentServer): Promise<number> => {
   const now = Date.now();
   if (now - lastBeatAt >= 10_000) {
     lastBeatAt = now;
+    /**
+     * Everything here that has a resolved value is read from the resolved value (review #4, #17).
+     *
+     * `production` used to be `process.env["LIVEKIT_DEV_MODE"] !== "1"`. That is *nearly* right —
+     * the SDK's own `dev`, `connect` and `console` commands do set it (`agents/dist/cli.js:128,144,
+     * 157`) — but it is an inference about a flag rather than the flag, and it says nothing about
+     * `start --simulation`, which is the mode where the ceiling really is gone: `ServerOptions`
+     * forces `loadThreshold` to `Infinity` when `simulation` is set (`worker.js:166`).
+     *
+     * `AgentServer` does not expose its options, so the patch adds two internal getters (see
+     * `patches/README.md`). They are the difference between a heartbeat that repeats the config it
+     * was handed and one that reports what the worker resolved — and `idle_processes` in
+     * particular was the configured constant, so a pool that failed to pre-warm looked identical to
+     * one that succeeded, which is the single thing W3 asked to verify live.
+     */
+    const opts = w.options;
     void client.heartbeat(AGENT_NAME, {
       pid: process.pid,
       mode: "worker",
-      production: process.env["LIVEKIT_DEV_MODE"] !== "1",
+      production: opts.production,
+      simulation: opts.simulation,
       max_jobs: WORKER_MAX_JOBS,
-      load_threshold: WORKER_LOAD_THRESHOLD,
+      // Effective, not configured. `Infinity` is not JSON, and it is exactly the value that means
+      // "this worker will never tell the SFU it is busy", so it is reported as its own fact.
+      load_threshold: Number.isFinite(opts.loadThreshold) ? opts.loadThreshold : null,
+      load_shedding_disabled: !Number.isFinite(opts.loadThreshold),
       active_jobs: w.activeJobs.length,
       admitting: admission.admitting(),
       load: Math.round(load * 1000) / 1000,
-      idle_processes: WORKER_IDLE_PROCESSES,
+      /**
+       * The pool's own count, not the constant it was configured with: job processes that have
+       * forked and are not on a call. Below `idle_processes_configured` means slots never filled.
+       */
+      idle_processes: w.idleProcesses,
+      idle_processes_configured: opts.numIdleProcesses,
       // The parent's value. `fork` passes `process.env` through unless told otherwise, so this is
       // also what the inference and job processes start with — and they are the ones that use it.
       uv_threadpool_size: Number(process.env["UV_THREADPOOL_SIZE"]),

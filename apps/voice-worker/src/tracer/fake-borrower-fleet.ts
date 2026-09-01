@@ -58,12 +58,20 @@ const MAX_WER = Number(flag("max-wer", "0.20"));
  */
 const IN_PROC = process.argv.includes("--in-proc");
 /**
- * `dev` mode sets `loadThreshold` to `Infinity`, so the worker cannot report itself full and the
- * SFU dispatches straight through the CPU ceiling. Every fleet number taken before 2026-08-27 was
- * measured that way, and nothing said so — which is why a `dev`-mode run is now a refusal rather
- * than a footnote. `--allow-dev` is there for a deliberate one, and it is recorded in the report.
+ * Every fleet number taken before 2026-08-27 was measured against a `dev`-mode worker and nothing
+ * said so, which is why a `dev`-mode run is a refusal rather than a footnote. `--allow-dev` is
+ * there for a deliberate one, and it is recorded in the report.
+ *
+ * What dev mode actually costs here is `tsx` instead of the bundle, debug logging and the
+ * framework's development defaults — **not** load shedding. That claim (repeated in the Dockerfile
+ * and in the refusal message) was wrong: `ServerOptions` forces `loadThreshold` to `Infinity` only
+ * under `--simulation` (`agents/dist/worker.js:166`), and this worker passes 0.75 explicitly, which
+ * survives dev mode. `--simulation` is its own refusal with its own flag, below: it is a different
+ * fact — a `--simulation` worker is `production: true` — and one flag must not wave through two.
  */
 const ALLOW_DEV = process.argv.includes("--allow-dev");
+/** Deliberately measuring a worker that can never ask the SFU to prefer somebody else. */
+const ALLOW_NO_SHEDDING = process.argv.includes("--allow-no-shedding");
 const CONTROL_PLANE_URL = (process.env["CONTROL_PLANE_URL"] ?? "http://127.0.0.1:8080").replace(/\/$/, "");
 const REPORT_DIR = fileURLToPath(new URL("../../../../docs/loadtest/", import.meta.url));
 
@@ -89,23 +97,58 @@ await sampler.awaitFirstSample();
  * asked of the worker directly: the heartbeat is already the only channel between them, and a
  * worker that is not heartbeating is one this run would have waited on anyway.
  */
-const workerMode = await (async (): Promise<{ production: boolean | null; maxJobs: number | null; idleProcesses: number | null }> => {
+interface WorkerMode {
+  /** Null when no online worker is reporting at all — a different fact from "dev mode". */
+  readonly production: boolean | null;
+  readonly simulation: boolean;
+  /** `loadThreshold` resolved to `Infinity`, so the worker can never report itself busy. */
+  readonly sheddingDisabled: boolean;
+  readonly maxJobs: number | null;
+  /** The pool's real warm count, and the number it was configured with. */
+  readonly idleProcesses: number | null;
+  readonly idleConfigured: number | null;
+}
+const workerMode = await (async (): Promise<WorkerMode> => {
   const res = await fetch(`${CONTROL_PLANE_URL}/api/system/status`, { headers: authHeaders() });
   if (!res.ok) throw new Error(`status ${String(res.status)}: ${await res.text()}`);
   const status = (await res.json()) as { agents: Array<{ agent_name: string; online: boolean; meta: Record<string, unknown> }> };
   // The main worker, not a job process: only the main one reports `production`.
   const main = status.agents.filter((a) => a.online).map((a) => a.meta).find((m) => typeof m["production"] === "boolean");
   const num = (k: string): number | null => (main !== undefined && typeof main[k] === "number" ? (main[k] as number) : null);
-  return { production: main === undefined ? null : (main["production"] as boolean), maxJobs: num("max_jobs"), idleProcesses: num("idle_processes") };
+  return {
+    production: main === undefined ? null : (main["production"] as boolean),
+    simulation: main?.["simulation"] === true,
+    sheddingDisabled: main?.["load_shedding_disabled"] === true,
+    maxJobs: num("max_jobs"),
+    idleProcesses: num("idle_processes"),
+    idleConfigured: num("idle_processes_configured"),
+  };
 })();
-log(`worker: production=${String(workerMode.production)} max_jobs=${String(workerMode.maxJobs)} idle_processes=${String(workerMode.idleProcesses)}`);
+log(`worker: production=${String(workerMode.production)} simulation=${String(workerMode.simulation)} max_jobs=${String(workerMode.maxJobs)} idle_processes=${String(workerMode.idleProcesses)}/${String(workerMode.idleConfigured)}`);
 if (workerMode.production !== true && !ALLOW_DEV) {
   console.error(
     workerMode.production === null
       ? "[fleet] no online worker is reporting its mode. Start it with `pnpm start:worker` (production), or pass --allow-dev to measure anyway."
-      : "[fleet] the worker is in dev mode, where loadThreshold is Infinity and it can never shed load. Every number from this run would be unattributable. Use `pnpm start:worker`, or pass --allow-dev deliberately.",
+      : "[fleet] the worker is in dev mode: `tsx` rather than the bundle, debug logging, and the framework's development defaults. Every number from this run would be unattributable. Use `pnpm start:worker`, or pass --allow-dev deliberately.",
   );
   process.exit(1);
+}
+/**
+ * Separate from the dev-mode gate, because it is a separate fact and the two were conflated.
+ *
+ * `start --simulation` is `production: true` and would pass the gate above, and it is the mode in
+ * which `ServerOptions` forces `loadThreshold` to `Infinity` (`agents/dist/worker.js:166`) — so the
+ * worker never tells the SFU it is busy. Dev mode does *not* do that here: this worker passes 0.75
+ * explicitly and it survives, which is what the old message claimed the opposite of.
+ */
+if (workerMode.sheddingDisabled && !ALLOW_NO_SHEDDING) {
+  console.error("[fleet] the worker is running under --simulation, where loadThreshold is Infinity and it can never ask the SFU to prefer somebody else. Restart it without --simulation, or pass --allow-no-shedding deliberately.");
+  process.exit(1);
+}
+if (workerMode.idleProcesses !== null && workerMode.idleConfigured !== null && workerMode.idleProcesses < workerMode.idleConfigured) {
+  // Now visible because the heartbeat reports the pool's real count rather than the constant it was
+  // configured with. A short pool means the first calls pay a ~1.8 s cold start inside the call.
+  log(`warning: the warm pool is ${String(workerMode.idleProcesses)} of a configured ${String(workerMode.idleConfigured)}; the first calls will pay a cold start.`);
 }
 if (workerMode.maxJobs !== null && CALLS > Math.floor(workerMode.maxJobs * 0.75)) {
   // Not a refusal: the threshold is a margin, not a hard ceiling, and a run that is *meant* to find
@@ -295,7 +338,7 @@ const report = {
   stt_tts_provider: process.env["STT_TTS_PROVIDER"] ?? "inference",
   speech: speechDescribe,
   /** Which mode served the run, so no number in this file is ever again unattributable to it (W2). */
-  worker: { ...workerMode, allow_dev: ALLOW_DEV },
+  worker: { ...workerMode, allow_dev: ALLOW_DEV, allow_no_shedding: ALLOW_NO_SHEDDING },
   calls: CALLS,
   agent_hung_up: hungUp,
   equivalence_green: green,

@@ -87,6 +87,9 @@ EXPOSE 8081
 HEALTHCHECK --interval=15s --timeout=3s --start-period=45s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:8081/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-# `start`, not `dev`: dev mode sets `loadThreshold` to Infinity, so the worker can never report
-# itself full and the SFU dispatches straight through the CPU ceiling.
+# `start`, not `dev`. Not because dev disables load shedding — it does not here: `ServerOptions`
+# only forces `loadThreshold` to Infinity under `--simulation`, and this worker passes 0.75
+# explicitly, which survives (`agents/dist/worker.js:166`). It is because `dev` is `tsx` with debug
+# logging and the framework's development defaults, and every number in docs/loadtest was taken on
+# `start`. The fleet harness refuses a dev-mode worker for the same reason.
 CMD ["node", "dist/agent.js", "start"]
