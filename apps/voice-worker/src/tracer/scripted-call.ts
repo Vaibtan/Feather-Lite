@@ -80,8 +80,21 @@ export interface ScriptedLines {
  * Synthesise (or load from the WAV cache) the three borrower lines. Call once per process and share
  * the frames across every call in a fleet.
  */
-export const loadScriptedLines = async (): Promise<ScriptedLines> => {
-  const speech = buildSpeechStack(borrowerVoice());
+/**
+ * A persona: whose voice the borrower speaks in (issue #4, H9).
+ *
+ * D4 wants at least five, fixed per seed and reported by name, because the literature's one
+ * consistent finding is that accents cost most and cost provider-specifically — so a per-persona
+ * number is the only honest one and an average across them is not.
+ *
+ * A name here rather than a voice id: the id is provider-specific and the report has to stay
+ * readable when the provider changes. `undefined` is the voice `BORROWER_TTS_VOICE` selects, which
+ * is what every number recorded so far was taken on.
+ */
+export type BorrowerPersona = string;
+
+export const loadScriptedLines = async (persona?: BorrowerPersona): Promise<ScriptedLines> => {
+  const speech = buildSpeechStack(persona ?? borrowerVoice());
   const key = `${speech.provider}|${speech.describe}`;
   try {
     // Sequential on purpose: some TTS plugins (Cartesia was one) multiplex synthesis over a single
@@ -115,6 +128,11 @@ export interface ScriptedCallOptions {
   readonly borrowerName: string;
   readonly participantIdentity: string;
   /**
+   * What the borrower does on this call (H9). Defaults to the promise-to-pay conversation this
+   * harness has always run; a tier-3 scenario supplies its own.
+   */
+  readonly script?: BorrowerScript | undefined;
+  /**
    * Called when the agent starts and stops speaking, live (H1).
    *
    * The seam a tier-3 scenario needs — "interrupt 400 ms into the agent's second line" is a reaction
@@ -131,7 +149,6 @@ export interface ScriptedCallOptions {
    * invoked and the call is abandoned where it stands, with no further lines and no hangup. Only
    * `chaos-orphan.ts` uses it; every other harness leaves it unset and runs the full script.
    */
-  readonly abandonAfterFirstReply?: (() => void) | undefined;
 }
 
 /**
@@ -227,11 +244,149 @@ export interface ScriptedCallResult {
   readonly error: string | null;
 }
 
+/**
+ * Everything a borrower script is given, and nothing else (issue #4, H9).
+ *
+ * Deep on purpose: behind these few members sit the LiveKit room, the audio source, the RMS onset
+ * detector, the transcript join, the per-line word-error bookkeeping and the response-latency
+ * measurement. A script says "speak this, wait for that" and none of the rest is its business —
+ * which is what makes five scenarios a matter of writing five scripts rather than five forks of a
+ * 350-line function.
+ */
+export interface CallContext {
+  /** The persona's WAV-cached lines. */
+  readonly lines: ScriptedLines;
+  readonly borrowerName: string;
+  readonly log: (message: string) => void;
+  readonly sleep: (ms: number) => Promise<unknown>;
+  /**
+   * Play one line and close the previous one for scoring. Returns when playout finishes, which is
+   * the instant both the WER line and the response-latency measurement are anchored to.
+   */
+  readonly speak: (label: string, line: ScriptedLine) => Promise<void>;
+  /** Wait for an agent segment matching `pattern` after index `from`; returns the next index, or -1. */
+  readonly waitAgentSaid: (pattern: RegExp, from: number, timeoutMs: number) => Promise<number>;
+  /** Wait until the agent is actually producing audio, rather than until it has said something. */
+  readonly waitAgentSpeaking: (timeoutMs: number) => Promise<boolean>;
+  /** Every agent segment so far, in order. Read-only to a script. */
+  readonly agentSaid: ReadonlyArray<{ readonly at: number; readonly text: string }>;
+  /** Whether the agent has left the room. */
+  readonly agentGone: boolean;
+  /** Wait for the agent to hang up, or give up. Returns whether it did. */
+  readonly waitForHangup: (timeoutMs: number) => Promise<boolean>;
+}
+
+/**
+ * One borrower's behaviour for one call.
+ *
+ * A `name` because it goes in the report: a run whose borrower behaved differently is a different
+ * measurement, and "which script" is the first thing to know about a tier-3 number.
+ */
+export interface BorrowerScript {
+  readonly name: string;
+  readonly run: (ctx: CallContext) => Promise<void>;
+}
+
+/** How long to wait for the agent to start speaking at all. */
+const SPEECH_START_WAIT_MS = SPEECH_START_TIMEOUT_MS;
+
+/**
+ * The promise-to-pay conversation this harness has always run, now one implementation of the seam
+ * rather than the only thing the file can do.
+ *
+ * Unchanged in behaviour, deliberately: H9's verification is that tier 2 is unchanged, because the
+ * script is the same script.
+ */
+export const promiseToPayScript: BorrowerScript = {
+  name: "promise-to-pay",
+  run: async (ctx) => {
+    const firstNameOf = (full: string) => full.trim().split(/\s+/)[0] ?? full;
+    // 1. opening (non-interruptible): wait for the right-party question, then a short pause for playout
+    ctx.log("waiting for opening to finish...");
+    let cursor = await ctx.waitAgentSaid(new RegExp(`speak with ${firstNameOf(ctx.borrowerName)}`, "i"), 0, 60_000);
+    await ctx.sleep(1500);
+    // 2. right-party confirmation
+    await ctx.speak("yes this is the borrower", ctx.lines.yes);
+    // 3. wait for the reply to *start*, then barge in ~2s into it.
+    //    The wait must be generous: against LiveKit Cloud the STT -> turn -> TTS round trip has been
+    //    seen to take 25s+, and barging in before the agent speaks is not a barge-in — the line lands
+    //    in silence, the agent then talks over it, and the turn is lost.
+    ctx.log("waiting for agent reply to start...");
+    if (await ctx.waitAgentSpeaking(SPEECH_START_WAIT_MS)) {
+      await ctx.sleep(2000);
+      await ctx.speak("BARGE-IN: I can pay 550 on Friday", ctx.lines.pay);
+    } else {
+      ctx.log("agent did not start speaking; speaking anyway");
+      await ctx.speak("I can pay 550 on Friday", ctx.lines.pay);
+    }
+    // 4. wait for the read-back ("Please say yes to confirm"), then confirm. If the agent asks a
+    //    clarifying question about the amount instead of proposing, answer it once and keep
+    //    waiting — a real borrower would, and the deaf alternative is two NO_INPUT timeouts and a
+    //    NO_ANSWER close.
+    ctx.log("waiting for read-back...");
+    {
+      const readback = /say yes to confirm/i;
+      const askedAmount = /amount|how much/i;
+      const start = Date.now();
+      // Anchor past everything already said: the broad amount-pattern must only ever see segments
+      // that came after the barge-in, not the earlier account statement.
+      let from = Math.max(cursor, ctx.agentSaid.length);
+      let clarified = false;
+      let rb = -1;
+      while (Date.now() - start < READBACK_TIMEOUT_MS && !ctx.agentGone) {
+        const idx = ctx.agentSaid.findIndex((seg, i) => i >= from && (readback.test(seg.text) || (!clarified && askedAmount.test(seg.text))));
+        if (idx >= 0) {
+          if (readback.test(ctx.agentSaid[idx]!.text)) {
+            rb = idx + 1;
+            break;
+          }
+          clarified = true;
+          from = idx + 1;
+          await ctx.sleep(2500); // the transcript stream closes before audio playout finishes
+          await ctx.speak("the full balance", ctx.lines.amount);
+        }
+        await ctx.sleep(100);
+      }
+      if (rb < 0) ctx.log("no read-back seen before the timeout; confirming anyway (the ledger check will catch it)");
+      else cursor = rb;
+    }
+    await ctx.sleep(2500); // the transcript stream closes before audio playout finishes
+    await ctx.speak("yes, that's correct", ctx.lines.confirm);
+    // 5. wait for hangup
+    ctx.log("waiting for agent to hang up...");
+    ctx.log((await ctx.waitForHangup(40_000)) ? "agent hung up" : "agent did not hang up within 40s");
+  },
+};
+
+/**
+ * The borrower who stops mid-call and never says goodbye — what a killed worker leaves behind.
+ *
+ * The second implementation, and the reason this is a seam rather than a hypothetical one: the chaos
+ * probe used to reach this behaviour through an `abandonAfterFirstReply` callback threaded into the
+ * middle of the one script, which is the shape H9 exists to remove.
+ */
+export const abandonAfterFirstReplyScript = (onAbandon: () => void): BorrowerScript => ({
+  name: "abandon-after-first-reply",
+  run: async (ctx) => {
+    ctx.log("waiting for agent reply to start...");
+    if (!(await ctx.waitAgentSpeaking(SPEECH_START_WAIT_MS))) ctx.log("agent never replied; abandoning anyway");
+    // No more lines, no hangup, nothing that would let the control plane learn the call is over.
+    onAbandon();
+  },
+});
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const firstName = (full: string) => full.trim().split(/\s+/)[0] ?? full;
 
 /** Bootstrap the room through the real control plane, or (TRACER_RAW=1) with a raw agent dispatch. */
-const bootstrapRoom = async (opts: ScriptedCallOptions): Promise<{ roomName: string; token: string; conversationId: string | null }> => {
+/**
+ * Join the room the agent will be dispatched to, and hand back what a call needs to run in it (H9).
+ *
+ * Exported because a tier-3 scenario that is not a `runScriptedCall` — a third party dialling in, a
+ * borrower that only listens — still has to get into the room the same way, and copying twelve lines
+ * of token minting is how two harnesses come to disagree about how a call starts.
+ */
+export const bootstrapRoom = async (opts: ScriptedCallOptions): Promise<{ roomName: string; token: string; conversationId: string | null }> => {
   const url = process.env["LIVEKIT_URL"] ?? "";
   const key = process.env["LIVEKIT_API_KEY"] ?? "";
   const secret = process.env["LIVEKIT_API_SECRET"] ?? "";
@@ -544,90 +699,40 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       return false;
     };
 
-    // 1. opening (non-interruptible): wait for the right-party question, then a short pause for playout
-    log("waiting for opening to finish...");
-    let cursor = await waitAgentSaid(new RegExp(`speak with ${firstName(opts.borrowerName)}`, "i"), 0, 60_000);
-    await sleep(1500);
-    // 2. right-party confirmation
-    await speak("yes this is the borrower", opts.lines.yes);
-    // 3. wait for the reply to *start*, then barge in ~2s into it.
-    //    The wait must be generous: against LiveKit Cloud the STT -> turn -> TTS round trip has been
-    //    seen to take 25s+, and barging in before the agent speaks is not a barge-in — the line lands
-    //    in silence, the agent then talks over it, and the turn is lost.
-    log("waiting for agent reply to start...");
-    if (opts.abandonAfterFirstReply) {
-      // Abandon the call mid-conversation: no more lines, no hangup, nothing that would let the
-      // control plane learn the call is over. That is exactly the state a killed worker leaves.
-      const replied = await waitAgentSpeaking(SPEECH_START_TIMEOUT_MS);
-      if (!replied) log("agent never replied; abandoning anyway");
-      opts.abandonAfterFirstReply();
-      closeCurrentLine();
-      return {
-        label: opts.label,
-        borrowerName: opts.borrowerName,
-        conversationId,
-        roomName,
-        hungUp: false,
-        agentSegments: agentSaid.map((s) => s.text),
-        agentAudioFrames: audioFrames,
-        durationMs: Date.now() - t0,
-        endedAtMs: Date.now(),
-        turnLatencies: [...turnLatencies],
-        werLines: [...werLines],
-        rmsSamples: [...rmsSamples],
-        liveStretchCount: liveStretches,
-        unmatchedTranscripts: [...unmatchedTranscripts],
-        unansweredTurns: [...unansweredTurns],
-        error: null,
-      };
-    }
-    if (await waitAgentSpeaking(SPEECH_START_TIMEOUT_MS)) {
-      await sleep(2000);
-      await speak("BARGE-IN: I can pay 550 on Friday", opts.lines.pay);
-    } else {
-      log("agent did not start speaking; speaking anyway");
-      await speak("I can pay 550 on Friday", opts.lines.pay);
-    }
-    // 4. wait for the read-back ("Please say yes to confirm"), then confirm. If the agent asks a
-    //    clarifying question about the amount instead of proposing, answer it once and keep
-    //    waiting — a real borrower would, and the deaf alternative is two NO_INPUT timeouts and a
-    //    NO_ANSWER close.
-    log("waiting for read-back...");
-    {
-      const readback = /say yes to confirm/i;
-      const askedAmount = /amount|how much/i;
-      const start = Date.now();
-      // Anchor past everything already said: the broad amount-pattern must only ever see segments
-      // that came after the barge-in, not the earlier account statement.
-      let from = Math.max(cursor, agentSaid.length);
-      let clarified = false;
-      let rb = -1;
-      while (Date.now() - start < READBACK_TIMEOUT_MS && !agentGone) {
-        const idx = agentSaid.findIndex(
-          (seg, i) => i >= from && (readback.test(seg.text) || (!clarified && askedAmount.test(seg.text))),
-        );
-        if (idx >= 0) {
-          if (readback.test(agentSaid[idx]!.text)) {
-            rb = idx + 1;
-            break;
-          }
-          clarified = true;
-          from = idx + 1;
-          await sleep(2500); // the transcript stream closes before audio playout finishes
-          await speak("the full balance", opts.lines.amount);
-        }
-        await sleep(100);
-      }
-      if (rb < 0) log("no read-back seen before the timeout; confirming anyway (the ledger check will catch it)");
-      else cursor = rb;
-    }
-    await sleep(2500); // the transcript stream closes before audio playout finishes
-    await speak("yes, that's correct", opts.lines.confirm);
-    // 5. wait for hangup
-    log("waiting for agent to hang up...");
-    const waitStart = Date.now();
-    while (!agentGone && Date.now() - waitStart < 40_000) await sleep(200);
-    log(agentGone ? "agent hung up" : "agent did not hang up within 40s");
+    /**
+     * What a borrower script is given (issue #4, H9).
+     *
+     * The call was one ~350-line function with the script inlined — hard-coded regexes, hard-coded
+     * sleeps, and the promise-to-pay conversation interleaved with the room, the tracks, the RMS
+     * detector and the WER bookkeeping. D4 needs five scenarios out of that, and the spec calls the
+     * shape it would otherwise take a fork risk.
+     *
+     * So this is the seam, and everything above it stays where it is: the context is **deep** —
+     * behind five methods sit the LiveKit room, the audio source, the onset detector, the transcript
+     * join, the per-line WER and the response-latency bookkeeping — and a script never sees any of
+     * it. A scenario says "speak this, wait for that", which is what a scenario is.
+     */
+    const ctx: CallContext = {
+      lines: opts.lines,
+      borrowerName: opts.borrowerName,
+      log,
+      sleep,
+      speak,
+      waitAgentSaid,
+      waitAgentSpeaking,
+      agentSaid,
+      get agentGone() {
+        return agentGone;
+      },
+      waitForHangup: async (timeoutMs: number) => {
+        const waitStart = Date.now();
+        while (!agentGone && Date.now() - waitStart < timeoutMs) await sleep(200);
+        return agentGone;
+      },
+    };
+
+    await (opts.script ?? promiseToPayScript).run(ctx);
+
     abandonPendingReply("before the call ended");
     // The last line's transcripts have had the whole hangup wait to arrive.
     closeCurrentLine();

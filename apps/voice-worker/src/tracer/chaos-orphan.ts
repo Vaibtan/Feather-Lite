@@ -36,7 +36,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
 import { initializeLogger } from "@livekit/agents";
-import { loadScriptedLines, runScriptedCall } from "./scripted-call.js";
+import { abandonAfterFirstReplyScript, loadScriptedLines, runScriptedCall } from "./scripted-call.js";
 import { harnessJsonHeaders } from "@feather-lite/load-test/harness-http";
 
 loadEnv({ path: fileURLToPath(new URL("../../../../.env", import.meta.url)) });
@@ -205,10 +205,12 @@ const call = await runScriptedCall({
   participantIdentity: "borrower-chaos",
   label: "chaos",
   log,
-  abandonAfterFirstReply: () => {
+  // The borrower who stops mid-call and never says goodbye, as its own script rather than a callback
+  // threaded into the middle of the promise-to-pay one (H9).
+  script: abandonAfterFirstReplyScript(() => {
     killed = killWorkerJobs();
     log(`killed ${killed} worker process(es) mid-call`);
-  },
+  }),
 });
 conversationId = call.conversationId;
 
