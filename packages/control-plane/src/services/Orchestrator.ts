@@ -940,8 +940,66 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
 
     /* ---------------------------- processSignal ---------------------------- */
 
+    /**
+     * `turn_metrics` is pure telemetry and takes neither the row lock nor the ledger (C7).
+     *
+     * It merges one idempotent patch into the `conversation_turns` row that already holds `ttft_ms`,
+     * and hands the same numbers to the tracer, which has been holding this turn's span open waiting
+     * for exactly them. Neither needs the conversation row and neither needs the event log.
+     *
+     * It used to take both, because `processSignal` locked and called `listEvents` before looking at
+     * what kind of signal it had. The worker posts this a few hundred milliseconds after a turn's
+     * audio finishes — which on a barge-in is exactly when the *next* turn's T1 holds that lock — so
+     * telemetry waited on the live path and held a pool connection while it waited.
+     *
+     * The conversation is still read, so a signal for an id that does not exist is still a 404; it
+     * is read without `FOR UPDATE`. No transaction, because there is one statement to run.
+     */
+    const recordTurnMetrics = (conversationId: string, signal: Extract<Signal, { kind: "turn_metrics" }>) =>
+      Effect.gen(function* () {
+        const row = yield* conv.findConversation(conversationId).pipe(
+          Effect.flatMap(Option.match({ onNone: () => Effect.fail(new NotFound({ entity: "conversation", id: conversationId })), onSome: Effect.succeed })),
+        );
+        const latency = {
+          eou_delay_ms: signal.eouDelayMs ?? null,
+          transcription_delay_ms: signal.transcriptionDelayMs ?? null,
+          tts_ttfb_ms: signal.ttsTtfbMs ?? null,
+        };
+        // TTS shape lands in the same row but is not part of the latency waterfall: it is the input
+        // to the chars-per-second heuristic (D5), not a component of reply time.
+        const ttsShape = {
+          ...(signal.ttsAudioMs !== undefined ? { tts_audio_ms: signal.ttsAudioMs } : {}),
+          ...(signal.ttsChars !== undefined ? { tts_chars: signal.ttsChars } : {}),
+        };
+        yield* conv.mergeTurnResult({ conversationId: row.id, turnId: signal.turnId, patch: { ...latency, ...ttsShape } });
+        yield* tracing.turnLatency(row.id, signal.turnId, {
+          eouDelayMs: latency.eou_delay_ms,
+          transcriptionDelayMs: latency.transcription_delay_ms,
+          ttsTtfbMs: latency.tts_ttfb_ms,
+        });
+        return {
+          turnId: `signal-${signal.kind}`,
+          agentText: "",
+          newState: row.currentState,
+          toolCalled: null,
+          callControlAction: null,
+          outcome: null,
+          endCall: false,
+          degraded: false,
+          ttftMs: null,
+        } satisfies TurnResult;
+      });
+
     const processSignal = (conversationId: string, signal: Signal) =>
-      sql.withTransaction(
+      /**
+       * The tap below covers **both** branches, and has to: on a voice call `turn_metrics` is the
+       * signal that finalizes the trace. `processTurn` deliberately does not finalize a voice call
+       * when the turn ends, because the EOU/STT/TTS numbers are still a few hundred milliseconds
+       * away, so publishing there would export the last turn with half its waterfall missing.
+       */
+      (signal.kind === "turn_metrics"
+        ? recordTurnMetrics(conversationId, signal)
+        : sql.withTransaction(
         Effect.gen(function* () {
           const at = DateTime.toDateUtc(yield* DateTime.now);
           const row = yield* lockOrFail(conversationId);
@@ -957,28 +1015,6 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
             ...r,
           });
 
-          if (signal.kind === "turn_metrics") {
-            // Pure telemetry: merged into the turn row that already holds ttft_ms, and handed to the
-            // tracer, which has been holding this turn's span open waiting for exactly these numbers.
-            const latency = {
-              eou_delay_ms: signal.eouDelayMs ?? null,
-              transcription_delay_ms: signal.transcriptionDelayMs ?? null,
-              tts_ttfb_ms: signal.ttsTtfbMs ?? null,
-            };
-            // TTS shape lands in the same row but is not part of the latency waterfall: it is the
-            // input to the chars-per-second heuristic (D5), not a component of reply time.
-            const ttsShape = {
-              ...(signal.ttsAudioMs !== undefined ? { tts_audio_ms: signal.ttsAudioMs } : {}),
-              ...(signal.ttsChars !== undefined ? { tts_chars: signal.ttsChars } : {}),
-            };
-            yield* conv.mergeTurnResult({ conversationId: row.id, turnId: signal.turnId, patch: { ...latency, ...ttsShape } });
-            yield* tracing.turnLatency(row.id, signal.turnId, {
-              eouDelayMs: latency.eou_delay_ms,
-              transcriptionDelayMs: latency.transcription_delay_ms,
-              ttsTtfbMs: latency.tts_ttfb_ms,
-            });
-            return done({ agentText: "", newState: row.currentState });
-          }
           if (signal.kind === "playout") {
             yield* append(row.id, { type: "AGENT_TURN_PLAYOUT", payload: { turn_id: signal.turnId, heard_text: signal.heardText, interrupted: signal.interrupted } }, at);
             return done({ agentText: "", newState: row.currentState });
@@ -1036,7 +1072,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           yield* finalize({ row, ctx, currentState: row.currentState, outcome, metadata: { reason: signal.reason ?? "hangup" }, at });
           return done({ agentText: "", newState: "COMPLETED", callControlAction: { action: "HANGUP", action_id: logged.action_id }, outcome, endCall: true });
         }),
-      ).pipe(Effect.tap(finalizeTracingIfEnded(conversationId)), Effect.annotateLogs({ conversation_id: conversationId, path: `signal:${signal.kind}` }));
+      )).pipe(Effect.tap(finalizeTracingIfEnded(conversationId)), Effect.annotateLogs({ conversation_id: conversationId, path: `signal:${signal.kind}` }));
 
     return { processTurn, processNoInput, processSignal } as const;
   }),
