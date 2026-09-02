@@ -104,3 +104,33 @@ export const parseWorkerLimits = (
   if (messages.length > 0) return { ok: false, messages };
   return { ok: true, maxJobs: ceiling, idleProcesses: idleProcesses.ok ? idleProcesses.value : IDLE_PROCESSES.fallback };
 };
+
+/**
+ * Which interruption strategy the session asks for (issue #4, W1).
+ *
+ * The worker asked for `"adaptive"`, and on this deployment it has never run. Adaptive detection is
+ * LiveKit's hosted ML model: the self-hosted profile has no credentials for it, every job logged
+ * `adaptive interruption disabled due to unrecoverable error, falling back to VAD-based
+ * interruption` (the line is in the installed 1.6.4 dist, `voice/agent_activity.js`), and the
+ * session ran on VAD. Issue #2 amendment 1 recorded that and said the config should be corrected;
+ * it never was, so every barge-in number this project has published — including the one Phase 1 is
+ * about to baseline — is a VAD number produced by a config that claims otherwise.
+ *
+ * So the default is the truth, and the lie needs an environment variable to tell. `"adaptive"` is
+ * still selectable, because on LiveKit Cloud it does run and D5's A/B will want it.
+ *
+ * Unset is `"vad"`, a typo is a refusal rather than a silent fall back to the framework's
+ * auto-detect: "I asked for adaptive and got VAD without being told" is precisely the failure this
+ * is fixing, and it should not be reachable through a misspelling either.
+ */
+export type InterruptionMode = "adaptive" | "vad";
+
+export const interruptionMode = (raw: string | undefined): { readonly ok: true; readonly value: InterruptionMode } | { readonly ok: false; readonly message: string } => {
+  const text = (raw ?? "").trim();
+  if (text === "") return { ok: true, value: "vad" };
+  if (text === "vad" || text === "adaptive") return { ok: true, value: text };
+  return {
+    ok: false,
+    message: `WORKER_INTERRUPTION_MODE=${JSON.stringify(raw)} is not a mode. It selects how the session decides a barge-in; give "vad" (the only one a self-hosted profile can run) or "adaptive" (LiveKit Cloud), or leave it unset for "vad".`,
+  };
+};

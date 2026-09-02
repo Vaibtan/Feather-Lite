@@ -179,6 +179,10 @@ services:
       # The worker has always read this; it is listed now so it and the server agree about whether
       # an outbound call can be placed at all (C4).
       LIVEKIT_SIP_OUTBOUND_TRUNK_ID: ${LIVEKIT_SIP_OUTBOUND_TRUNK_ID:-}
+      # `vad` unless told otherwise, because `vad` is what this profile runs: adaptive interruption
+      # is LiveKit's hosted detector and self-hosted has no credentials for it (W1). Set `adaptive`
+      # on a Cloud deployment.
+      WORKER_INTERRUPTION_MODE: ${WORKER_INTERRUPTION_MODE:-vad}
     # The arithmetic, from `docker stats` on this container rather than from host processes — which
     # is the only honest source now that the worker only ever runs here (2026-09-01, W11):
     #

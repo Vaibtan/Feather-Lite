@@ -10,7 +10,7 @@
  * The table is the point. Every row is a value an operator can actually type.
  */
 import { describe, expect, it } from "vitest";
-import { MAX_JOBS, IDLE_PROCESSES, parseCount, parseWorkerLimits } from "../src/env.js";
+import { MAX_JOBS, IDLE_PROCESSES, parseCount, parseWorkerLimits, interruptionMode } from "../src/env.js";
 
 describe("parseCount", () => {
   it("takes a whole number at or above the minimum", () => {
@@ -93,5 +93,31 @@ describe("the warm pool's default against the ceiling", () => {
     // It costs memory and nothing else, and quietly rewriting what an operator typed is how a
     // compose file and a running process come to disagree about the configuration.
     expect(parseWorkerLimits({ WORKER_MAX_JOBS: "2", WORKER_IDLE_PROCESSES: "6" })).toEqual({ ok: true, maxJobs: 2, idleProcesses: 6 });
+  });
+});
+
+describe("interruptionMode (W1)", () => {
+  it("defaults to vad, which is what this deployment actually runs", () => {
+    // Not a preference: the self-hosted profile has no credentials for the hosted detector, so
+    // asking for `adaptive` got a 401 and a silent fall back to VAD on every job.
+    expect(interruptionMode(undefined)).toEqual({ ok: true, value: "vad" });
+    expect(interruptionMode("")).toEqual({ ok: true, value: "vad" });
+    expect(interruptionMode("   ")).toEqual({ ok: true, value: "vad" });
+  });
+
+  it("takes either mode when one is named", () => {
+    expect(interruptionMode("vad")).toEqual({ ok: true, value: "vad" });
+    // Still selectable: on LiveKit Cloud it runs, and D5's A/B wants to turn it on.
+    expect(interruptionMode("adaptive")).toEqual({ ok: true, value: "adaptive" });
+  });
+
+  it("refuses a typo rather than quietly picking one", () => {
+    // The whole point of W1 is that "I asked for adaptive and silently got VAD" was invisible; a
+    // misspelling must not be another way to reach it.
+    for (const bad of ["Adaptive", "VAD", "auto", "true", "1"]) {
+      const r = interruptionMode(bad);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.message).toContain("WORKER_INTERRUPTION_MODE");
+    }
   });
 });

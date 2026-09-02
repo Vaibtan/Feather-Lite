@@ -17,7 +17,7 @@ import { config as loadEnv } from "dotenv";
 import { type AgentServer, inference, type JobContext, type JobProcess, ServerOptions, cli, defineAgent, voice } from "@livekit/agents";
 import { RoomServiceClient, SipClient } from "livekit-server-sdk";
 import { createAdmissionController } from "./admission.js";
-import { parseWorkerLimits } from "./env.js";
+import { interruptionMode, parseWorkerLimits } from "./env.js";
 import { ControlPlaneClient } from "./control-plane-client.js";
 import { FeatherAgent } from "./feather-agent.js";
 import { buildSpeechStack } from "./speech.js";
@@ -54,6 +54,14 @@ const SIP_OUTBOUND_TRUNK_ID = process.env["LIVEKIT_SIP_OUTBOUND_TRUNK_ID"] ?? nu
  * someone chose rather than a CPU average nobody controls.
  */
 const LIMITS = parseWorkerLimits(process.env);
+const INTERRUPTION = interruptionMode(process.env["WORKER_INTERRUPTION_MODE"]);
+if (!INTERRUPTION.ok) {
+  // Same rule as the limits below: a setting the operator got wrong is a setting nobody has decided.
+  process.stderr.write(`${INTERRUPTION.message}
+`);
+  process.exit(1);
+}
+const INTERRUPTION_MODE = INTERRUPTION.ok ? INTERRUPTION.value : "vad";
 if (!LIMITS.ok) {
   /**
    * Fail closed, at boot, on stderr (review #18).
@@ -254,7 +262,21 @@ export default defineAgent({
         // leaving 500/3000 here would have silently cancelled the swap. Unset keys now fall back to
         // the tighter streamingEndpointingOptions (300/2500) that 1.6.4 applies when the detector is
         // a streaming audio model.
-        interruption: { enabled: true, mode: "adaptive", falseInterruptionTimeout: 2000, resumeFalseInterruption: true, discardAudioIfUninterruptible: false },
+        /**
+         * `mode` says what actually runs (W1).
+         *
+         * It used to say `"adaptive"`, and adaptive has never run here. It is LiveKit's hosted
+         * detector, the self-hosted profile has no credentials for it, and every job logged
+         * `adaptive interruption disabled due to unrecoverable error, falling back to VAD-based
+         * interruption` (`agent_activity.js` in the installed 1.6.4) before running on VAD anyway.
+         * Issue #2 amendment 1 recorded that and said to correct the config; until now it was not,
+         * so every barge-in number this project has published is a VAD number taken under a config
+         * that claimed otherwise — including the baseline issue #1's Phase 1 is about to take.
+         *
+         * `WORKER_INTERRUPTION_MODE=adaptive` selects it back for a Cloud deployment, where it does
+         * run and where D5's A/B will want it.
+         */
+        interruption: { enabled: true, mode: INTERRUPTION_MODE, falseInterruptionTimeout: 2000, resumeFalseInterruption: true, discardAudioIfUninterruptible: false },
         preemptiveGeneration: { enabled: false }, // one control-plane turn per confirmed user turn
       },
       userAwayTimeout: 12,
