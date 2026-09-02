@@ -15,7 +15,7 @@
  * `processSignal` (AMD / hangup / no-answer / barge-in / playout) and `processNoInput`
  * are single-transaction runtime paths on the same event log.
  */
-import { DateTime, Effect, Either, Option, Stream } from "effect";
+import { DateTime, Duration, Effect, Either, Option, Stream } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import type {
   CallAttemptStatus,
@@ -155,6 +155,15 @@ const readBackVerdict = (events: ReadonlyArray<EventRecord>, readBackTurnId: str
 };
 
 const unheardDetail = (v: ReadBackVerdict): string => (v === "interrupted" ? READBACK_INTERRUPTED_DETAIL : READBACK_UNCONFIRMED_DETAIL);
+
+/**
+ * How long a re-send of a still-running turn waits for the copy that holds it (C5), and how often it
+ * looks. Ten seconds is longer than any turn this system has measured — the whole waterfall is
+ * ~2.4 s at p50 and `ttft_ms` has been seen at 4.6 s — and short enough that a borrower is not left
+ * on a silent line by a wedged one.
+ */
+const SAME_TURN_ATTACH_MS = 10_000;
+const SAME_TURN_ATTACH_POLL_MS = 100;
 
 const attemptStatusFor = (o: Outcome): CallAttemptStatus =>
   o === "NO_ANSWER" ? "NO_ANSWER" : o === "VOICEMAIL_LEFT" ? "VOICEMAIL" : o === "FAILED" ? "FAILED" : "COMPLETED";
@@ -495,14 +504,37 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
         const nowDate = DateTime.toDateUtc(startedAt);
 
         /* ---------- T1 ---------- */
-        const t1 = yield* sql.withTransaction(
+        const runT1 = sql.withTransaction(
           Effect.gen(function* () {
             const row = yield* lockOrFail(params.conversationId);
             // Idempotency first: the same turn_id again (retry / reconnect) replays the recorded
             // result even if that turn completed the conversation.
             const existing = yield* conv.findTurn({ conversationId: row.id, turnId: params.turnId });
             if (Option.isSome(existing) && existing.value.status === "DONE" && existing.value.result) {
-              return { replay: existing.value.result as unknown as TurnResult, row, ctx: null, events: [] as ReadonlyArray<EventRecord> };
+              return { replay: existing.value.result as unknown as TurnResult, row, ctx: null, events: [] as ReadonlyArray<EventRecord>, attach: false as const };
+            }
+            /**
+             * The same turn id, sent again while the first copy is still running (C5).
+             *
+             * This is a re-send after a reconnect, not a second turn: the guard below already treats
+             * `activeTurnId === params.turnId` as "not a conflict", and `claimTurn` then refused it
+             * anyway on `active_turn_id IS NULL`, so the caller got a `TurnInProgress` naming its
+             * *own* turn as the blocker.
+             *
+             * It is **not** fixed by relaxing that predicate, which is the obvious change and the
+             * wrong one: both copies would then pass T1, append a second `USER_TURN_FINAL` for the
+             * borrower's line, decide twice and append a second `AGENT_TURN`. The tool is idempotent
+             * by `tool_call_id` and would not fire twice, but the transcript would carry every line
+             * of that turn twice, which is worse than the 409.
+             *
+             * So the re-send attaches instead: it waits for the copy that is running to finish and
+             * replays its recorded result, which is the same answer the `DONE` branch above gives a
+             * reconnect that arrives a moment later. `TurnRunner` already does this in-process for
+             * up to `TURN_MAX_LIFETIME_SECONDS`; this is the same promise kept in the database, so it
+             * survives that window and a second replica.
+             */
+            if (Option.isSome(existing) && existing.value.status === "RUNNING" && row.activeTurnId === params.turnId) {
+              return { replay: null, row, ctx: null, events: [] as ReadonlyArray<EventRecord>, attach: true as const };
             }
             if (row.finalOutcome !== null || row.currentState === "COMPLETED") {
               return yield* Effect.fail(new ConversationCompleted({ conversationId: row.id }));
@@ -535,9 +567,28 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
             );
             const ctx = yield* ctxBuilder.forConversation(row, startedAt);
             const events = yield* conv.listEvents(row.id);
-            return { replay: null, row, ctx, events };
+            return { replay: null, row, ctx, events, attach: false as const };
           }),
         );
+
+        /**
+         * T1, retried while a copy of this same turn is still running (C5).
+         *
+         * Bounded, because the alternative to waiting is not "wait longer" but "answer wrongly":
+         * if the copy that holds the turn is wedged or its process is gone, the honest answer is the
+         * `TurnInProgress` this used to give immediately, and the caller can supersede. The bound is
+         * generous against a turn — a slow decide is a second or two, and `ttft_ms` has been seen at
+         * 4.6 s (ADR 0008) — and short against a borrower, who is on the phone.
+         */
+        let t1 = yield* runT1;
+        for (let waited = 0; t1.attach && waited < SAME_TURN_ATTACH_MS; waited += SAME_TURN_ATTACH_POLL_MS) {
+          yield* Effect.sleep(Duration.millis(SAME_TURN_ATTACH_POLL_MS));
+          t1 = yield* runT1;
+        }
+        if (t1.attach) {
+          // Still running after the bound: the copy holding it is wedged or its process is gone.
+          return yield* Effect.fail(new TurnInProgress({ conversationId: t1.row.id, activeTurnId: params.turnId }));
+        }
 
         if (t1.replay) {
           const r = t1.replay;
