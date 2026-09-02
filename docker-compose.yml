@@ -141,6 +141,10 @@ services:
     build:
       context: .
       dockerfile: apps/voice-worker/Dockerfile
+      # **Explicit since the harness stage was added** (issue #4, Phase D). A build with no `target`
+      # takes the *last* stage in the file, so appending `harness` silently turned this service into
+      # the harness image — same tag, no `dist/`, exit 0 with no log line at all.
+      target: runtime
     image: feather-lite-worker:local
     container_name: feather-lite-worker
     depends_on:
@@ -218,6 +222,73 @@ services:
     # The fixed term is the whole reason W11 mattered: with the Silero plugin the same idle tree was
     # 1651 MB, and `onnxruntime-node` was 513 MB of binaries hand-pruned in the Dockerfile.
     mem_limit: 5g
+
+  # ------------------------------------------------------------------ harness
+  #
+  # The borrower harness (issue #4, Phase D / decision R2).
+  #
+  # It was the last piece of the system on the host, and it is the piece that decides whether every
+  # number is comparable: a measurement whose measurer sits on the other side of the NAT is not the
+  # same measurement as one taken beside the thing measured.
+  #
+  # Its own profile, because it is not part of the running system — it is a thing you run *at* the
+  # running system, and `--profile app` must not start a load generator.
+  #
+  #   pnpm loadtest:tier2:docker -- --calls 5
+  harness:
+    profiles: ["harness"]
+    build:
+      context: .
+      dockerfile: apps/voice-worker/Dockerfile
+      target: harness
+    image: feather-lite-harness:local
+    container_name: feather-lite-harness
+    depends_on:
+      worker:
+        condition: service_healthy
+    environment:
+      # Compose-network addresses, not the repo `.env`'s: inside here `127.0.0.1` is this container.
+      CONTROL_PLANE_URL: http://server:8080
+      # P5: tier 1 read `LOAD_TEST_API` for the same thing the fleet reads `CONTROL_PLANE_URL` for.
+      # Both are set to the same value so neither arm can drift; the code now prefers the latter.
+      LOAD_TEST_API: http://server:8080
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/feather_lite
+      # **Signalling only.** Media is answered by `LIVEKIT_NODE_IP` on the `livekit` service: the SFU
+      # advertises that candidate to everyone, and this container reaches the host address the same
+      # way the worker does. R3 keeps it the host LAN address for Phase D's first run; `rtc.addresses`
+      # is a later trial.
+      LIVEKIT_URL: ws://livekit:7880
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
+      STT_TTS_PROVIDER: ${STT_TTS_PROVIDER:-plugins}
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:-}
+      DEEPGRAM_TTS_MODEL: ${DEEPGRAM_TTS_MODEL:-aura-2-asteria-en}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # The same secret the server has, or the run is shed by its own middleware (O9).
+      RATE_LIMIT_BYPASS_TOKEN: ${RATE_LIMIT_BYPASS_TOKEN:-}
+    # The socket inside the Docker Desktop VM is `root:root` mode 660, so a non-root user needs group
+    # 0 to read it. The container still *runs* as `node` — no root-owned files, no privileged
+    # operations — and the socket is mounted read-only; this is read access to it and nothing more.
+    # Without it the sampler silently falls back to procfs, which inside a container sees only this
+    # container's own namespace, and the per-core budget disappears from exactly the runs it is
+    # defined on. `validateReport` now refuses a report that claims a container basis it does not
+    # have, but the group is what makes the basis real.
+    group_add: ["0"]
+    volumes:
+      # Read-only: the sampler reads container memory and CPU through the CLI and never writes.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Reports land in the repo, so a containerised run is as reviewable as a host one.
+      - ./docs/loadtest:/repo/docs/loadtest
+      # The synthesised borrower lines, so a second run does not re-synthesise them — and so the two
+      # arms of Phase D's comparison speak byte-identical audio.
+      - ./apps/voice-worker/.cache:/repo/apps/voice-worker/.cache
+    working_dir: /repo
+    # `tsx` directly rather than through `pnpm`, because `pnpm run` verifies the dependency tree
+    # before every script and writes a temp file into `/repo` to do it — which this container runs as
+    # `node` and cannot write, and which would re-resolve `--production` and drop the very dev
+    # dependency (`tsx`) the harness runs on. The only paths written here are the two bind mounts.
+    entrypoint: ["/repo/node_modules/.bin/tsx"]
+    command: ["apps/voice-worker/src/tracer/fake-borrower-fleet.ts"]
 
 volumes:
   feather_lite_pg:

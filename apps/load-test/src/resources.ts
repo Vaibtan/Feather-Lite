@@ -73,7 +73,9 @@ export const classifyProcess = (commandLine: string, repoRoot: string = REPO_ROO
   if (c.includes("/ipc/job_proc_lazy_main")) return "worker-job";
   // The harness itself, so a fleet run's own cost is reported beside the worker's rather than
   // being invisible (W8) — and, because these roles are in neither budget subset, never folded in.
-  if (c.includes("borrower-proc")) return "harness-borrower";
+  // `sim-borrower` is issue #1 Phase 1's tier-3 borrower; it costs what `borrower-proc` costs and
+  // belongs in the same role, so a tier-3 run's own cost is reported rather than unclassified.
+  if (c.includes("borrower-proc") || c.includes("sim-borrower")) return "harness-borrower";
   if (/(fake-borrower|chaos-orphan|tier1|idle-sample|load-test)/.test(c)) return "harness";
 
   // pnpm's corepack launcher: two per app (`pnpm start:worker` and the `--filter` re-exec). Neither
@@ -262,7 +264,16 @@ export interface ResourceSamplerOptions {
  * was silently unavailable. `docker stats` ignores names that are not running, so listing all five
  * costs nothing when only some are up.
  */
-const DEFAULT_CONTAINERS = ["feather-lite-livekit", "feather-lite-postgres", "feather-lite-server", "feather-lite-worker"] as const;
+/**
+ * The containers a run samples.
+ *
+ * `feather-lite-harness` is here since Phase D put the harness in one (issue #4): when the harness
+ * runs on the host its cost is sampled as a *process* role, and when it runs in a container that
+ * process is invisible from outside the VM. Sampling it as a container puts the measurer's own cost
+ * on the same basis as the worker's, which is the only way a per-core budget taken beside a load
+ * generator means anything. It is in neither budget subset, so it is reported and never folded in.
+ */
+const DEFAULT_CONTAINERS = ["feather-lite-livekit", "feather-lite-postgres", "feather-lite-server", "feather-lite-worker", "feather-lite-harness"] as const;
 
 /** The containers that carry the worker tree, for the per-core budget of a containerised run. */
 export const WORKER_CONTAINERS = ["feather-lite-worker"] as const;
@@ -913,6 +924,24 @@ export const validateReport = (report: unknown): string[] => {
     problems.push("resources.samples is 0 but no note says the run was not measured");
   }
   if (r.per_core === undefined) problems.push("report has no `per_core` block");
+  /**
+   * A container-basis run must have actually sampled the worker (issue #4, Phase D).
+   *
+   * `per_core.basis` says `containers: feather-lite-worker` so a container figure is never read as a
+   * host one — but the string was written from the *request*, not from what came back. A run whose
+   * sampler could not reach the docker socket, or whose worker container was named something else,
+   * produced a report that said "containers: feather-lite-worker" with no worker row behind it: the
+   * per-core budget, which is the whole of D1, silently missing from exactly the runs it is defined
+   * on. That happened once already, before the sampler knew about the application containers at all.
+   */
+  const perCore = r.per_core as { basis?: unknown } | undefined;
+  const basis = typeof perCore?.basis === "string" ? perCore.basis : "";
+  if (basis.startsWith("containers:")) {
+    const sampled = Array.isArray(res.containers) ? (res.containers as ReadonlyArray<{ name?: unknown }>) : [];
+    for (const name of basis.slice("containers:".length).split(",").map((n) => n.trim()).filter((n) => n.length > 0)) {
+      if (!sampled.some((c) => c.name === name)) problems.push(`per_core.basis names \`${name}\` but resources.containers has no row for it`);
+    }
+  }
   return problems;
 };
 

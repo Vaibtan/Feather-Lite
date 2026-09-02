@@ -89,3 +89,49 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=45s --retries=3 \
 # logging and the framework's development defaults, and every number in docs/loadtest was taken on
 # `start`. The fleet harness refuses a dev-mode worker for the same reason.
 CMD ["node", "dist/agent.js", "start"]
+
+# ------------------------------------------------------- harness runtime ----
+#
+# The borrower harness (issue #4, Phase D / decision R2).
+#
+# A separate target rather than a separate Dockerfile because it needs exactly what `build` above
+# already produced: the workspace, both patches, `packages/domain` and `packages/contracts`, and
+# `apps/load-test` for the resource sampler. What it needs *differently* is why it cannot reuse the
+# runtime stage — `pnpm deploy --prod` drops the dev dependencies, and the harness runs its
+# TypeScript through `tsx`, which is one of them.
+#
+# **Why the harness is in a container at all.** It was the last piece of the system on the host, and
+# it is the piece that decides whether every number is comparable: a measurement whose measurer sits
+# on the other side of the NAT is not the same measurement as one taken beside the thing measured.
+# Phase D's own verification is the delta between this and the host harness on the same hour.
+#
+# The docker CLI is here because the resource sampler reads container memory and CPU through it
+# (`docker stats`, and `cpu.stat` from the cgroup) — the socket is mounted read-only by compose.
+FROM node:22-bookworm-slim AS harness
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+  && install -m 0755 -d /etc/apt/keyrings \
+  && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+  && chmod a+r /etc/apt/keyrings/docker.asc \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends docker-ce-cli \
+  && rm -rf /var/lib/apt/lists/*
+
+ENV PNPM_HOME=/pnpm
+ENV PATH=$PNPM_HOME:$PATH
+RUN corepack enable
+WORKDIR /repo
+
+# The whole workspace, dev dependencies included: `tsx` runs the harness's sources directly, which
+# is also what the host arm does, so the two arms of Phase D's comparison run the same code the same
+# way rather than one bundled and one not.
+COPY --from=build --chown=node:node /repo /repo
+
+# `node`, not root, like the two service images. The bind mounts compose gives it (the report
+# directory and the WAV cache) are writable by this user.
+USER node
+
+# No CMD: every entry point is a different run (`tier1`, `fake-borrower-fleet`, `idle`), so compose
+# passes the command. A default here would only be a fourth way to spell one of them.

@@ -180,6 +180,50 @@ Turn latency p50/p95 3 009 / 3 313 ms and `total_ms` 2 405 / 2 746 ms on this ru
 calmer than the previous hour's (`ttft_ms` p95 1 236 against 3 651), which is OpenAI's variance and
 not this change.
 
+### 2026-09-02 — the harness moves into Docker (Phase D), and both arms measured
+
+The harness was the last piece of the system on the host, and it is the piece that decides whether
+every number is comparable. It now runs as a compose service (`--profile harness`,
+`pnpm loadtest:tier2:docker`). Both arms below were run **within the hour, on the same code, against
+the same stack** — the only difference is where the borrower lives.
+
+| | **container harness** | host harness |
+|---|---:|---:|
+| calls served / equivalent | **5/5** | 5/5 |
+| STT WER p50 / p95 | **0.000 / 0.000** | 0.000 / 0.111 |
+| **silent playouts** | **0 of 15** | 0 of 15 |
+| turn latency p50 / p95 (harness) | 3 212 / 5 454 ms | 3 037 / 3 752 ms |
+| `total_ms` p50 / p95 (ledger) | 2 647 / 3 688 ms | 2 357 / 3 304 ms |
+| `eou_delay_ms` p50 | 578 ms | 578 ms |
+| `transcription_delay_ms` p50 | 430 ms | 481 ms |
+| `ttft_ms` p50 | 1 084 ms | 945 ms |
+| `tts_ttfb_ms` p50 | 386 ms | 401 ms |
+
+**The media-path delta is +290 ms on `total_ms` p50 — and one N=5 pair cannot attribute it.** The
+per-stage p50s sum to 2 478 ms in the container and 2 405 ms on the host, a difference of 73 ms, and
+most of that is `ttft_ms` (+139 ms), which is OpenAI's variance and not a path this change touched.
+`eou_delay_ms` p50 is identical to the millisecond. So the honest statement is that the containerised
+harness costs **somewhere between nothing and about 300 ms at the median**, and separating the NAT
+hairpin from provider noise needs more than five calls. Nothing here should be read as an SLO delta
+until it is.
+
+What the container arm does have that the host arm does not is a **complete resource picture**:
+`per-core (containers: feather-lite-worker) cores used 0.671, MB/call 272`, with rows for all four
+containers. The host arm reports `cores used n/a`, because on this box the procfs sampler cannot see
+into the VM where the worker tree lives.
+
+### Two things the first containerised run found
+
+- **A worker race, and the harness's location is what exposed it.** `llmNode` switched
+  `currentTurnId` before reporting the previous turn, so that turn's trailing TTS metrics landed on
+  the next one and it was reported silent — a read-back the guard then repeats. `1/15 silent
+  playouts` and one `FAILED` call at 150 s. The host arm never showed it: the race needs the extra
+  latency to open. Fixed, and the re-run is the container column above.
+- **`docker compose build` takes the last stage when no `target` is given.** Appending the `harness`
+  stage to the worker's Dockerfile silently rebuilt `feather-lite-worker:local` from it — same tag,
+  no `dist/`, and a container that exits 0 with no log line at all. Both services name their target
+  explicitly now.
+
 ### W3 and W4 — the playout is the whole turn, attributed to the turn that spoke it
 
 Third N=5 of the day, same box, worker rebuilt, nothing else changed. This is the change that

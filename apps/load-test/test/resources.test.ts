@@ -197,6 +197,15 @@ describe("perCoreBudget", () => {
   });
 });
 
+describe("classifyProcess and the tier-3 borrower", () => {
+  it("counts sim-borrower as a harness borrower, like borrower-proc", () => {
+    // Issue #1 Phase 1's borrower costs what the tier-2 one costs and belongs in the same role, so a
+    // tier-3 run's own cost is reported beside the worker's rather than landing unclassified.
+    expect(classifyProcess("node /repo/apps/voice-worker/src/tracer/sim-borrower.ts")).toBe("harness-borrower");
+    expect(classifyProcess("node /repo/apps/voice-worker/src/tracer/borrower-proc.ts")).toBe("harness-borrower");
+  });
+});
+
 describe("validateReport", () => {
   const valid = { resources: report(), per_core: perCoreBudget(report(), { roles: SERVER_ROLES }) };
 
@@ -214,6 +223,26 @@ describe("validateReport", () => {
     expect(problems).toContain("resources.totals is missing");
     expect(problems).toContain("resources.subsets is missing");
     expect(problems).toContain("resources.steady_state is missing");
+  });
+
+  it("refuses a container basis with no container row behind it (Phase D)", () => {
+    // `per_core.basis` was written from the *request*, not from what came back — so a run whose
+    // sampler could not reach the docker socket produced a report claiming
+    // `containers: feather-lite-worker` with no worker row, and the per-core budget, which is the
+    // whole of D1, was silently absent from exactly the runs it is defined on.
+    const problems = validateReport({
+      resources: report({ containers: [] }),
+      per_core: { basis: "containers: feather-lite-worker" },
+    });
+    expect(problems).toContain("per_core.basis names `feather-lite-worker` but resources.containers has no row for it");
+  });
+
+  it("passes a container basis whose row is present", () => {
+    const problems = validateReport({
+      resources: report({ containers: [{ name: "feather-lite-worker" }] as never }),
+      per_core: { basis: "containers: feather-lite-worker" },
+    });
+    expect(problems).toEqual([]);
   });
 
   it("refuses an unmeasured run that does not admit to being unmeasured", () => {
