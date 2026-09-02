@@ -18,6 +18,8 @@ import { TurnRunner, liveTurnCount } from "../../src/http/TurnRunner.js";
 
 const resultOf = (p: TurnParams): TurnResult => ({
   turnId: p.turnId,
+  decider: "model",
+  disposition: "spoke",
   agentText: "one moment",
   newState: "CONFIRMING_OUTCOME",
   toolCalled: null,

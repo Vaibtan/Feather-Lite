@@ -74,7 +74,7 @@ import { OutboxService } from "./Outbox.js";
 import { SchedulingService } from "./Scheduling.js";
 import { Tracing } from "./Tracing.js";
 import { TurnDecider } from "./TurnDecider.js";
-import type { DeciderInput, TurnResult } from "./types.js";
+import type { DeciderInput, TurnDecisionSource, TurnResult } from "./types.js";
 
 /* ------------------------------------------------------------------ */
 /* Public input types                                                   */
@@ -618,8 +618,18 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
 
         /* ---------- decide (no tx) ---------- */
         const override = matchOverride(params.userText, { borrowerFirstName: ctx.borrowerFirstName });
-        let decisionResult: { decision: TurnDecision | null; streamedText: string; degraded: string | null; ttftMs: number | null } = {
+        /**
+         * One shape for every arm of the decide phase (F3).
+         *
+         * `decider` names the arm that produced the decision — the override that never reached a
+         * model, the model itself, the scripted stand-in, and D2's fast path when it lands. It is
+         * not `conversations.decider`, which names the service configured for the whole call and so
+         * reads the same on all of them.
+         */
+        let decisionResult: { decision: TurnDecision | null; decider: TurnDecisionSource; streamedText: string; degraded: string | null; ttftMs: number | null } = {
           decision: null,
+          // An override answered without consulting anything; the branch below overwrites this.
+          decider: "override",
           streamedText: "",
           degraded: null,
           ttftMs: null,
@@ -677,7 +687,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
             Effect.either,
           );
           const degraded = Either.isLeft(consumed) ? `${consumed.left._tag}: ${consumed.left.detail}` : decision === null ? "TurnDeciderInvalidOutput: stream ended without a decision" : null;
-          decisionResult = { decision, streamedText: streamed, degraded, ttftMs: ttft };
+          decisionResult = { decision, decider: cfg.turnDecider === "scripted" ? "scripted" : "model", streamedText: streamed, degraded, ttftMs: ttft };
         }
 
         /* ---------- T2 ---------- */
@@ -696,6 +706,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
             let outcome: Outcome | null = null;
             let metadata: Record<string, unknown> = {};
             let toolCalled: ToolCall | null = null;
+            let toolRejected = false;
             let callControlAction: { action: CallControlAction; action_id: string } | null = null;
             let degraded = false;
             let agentText = decisionResult.streamedText;
@@ -773,7 +784,12 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
                 outcome = r.outcome;
                 metadata = r.metadata;
                 nextState = r.nextState;
-                if (r.rejected) degraded = true;
+                if (r.rejected) {
+                  degraded = true;
+                  // Kept apart from `degraded` for the disposition: a tool the state machine refused
+                  // is the system working, not the model failing (F3).
+                  toolRejected = true;
+                }
                 if (r.executed && r.result && agentText.length === 0 && d.message.length > 0 && !r.says.length) agentText = d.message;
               } else if (Either.isRight(moved) && moved.right !== locked.currentState) {
                 if (moved.right === "WARM_TRANSFER_PENDING") {
@@ -845,6 +861,13 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
 
             const result: TurnResult = {
               turnId: params.turnId,
+              decider: decisionResult.decider,
+              /**
+               * Assembled once, here, from what the four branches above already knew. `rejected`
+               * sets `degraded`, so a rejection reads as `rejected` rather than being lost inside a
+               * boolean that also means "the model failed".
+               */
+              disposition: toolRejected ? "rejected" : degraded ? "degraded" : toolCalled !== null ? "tool" : "spoke",
               agentText: fullText,
               newState: nextState,
               toolCalled,
@@ -877,7 +900,19 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
             ttftMs: decisionResult.ttftMs,
           });
           yield* emit({ type: "error", turn_id: params.turnId, code: "SUPERSEDED", message: "turn superseded by a newer user turn" });
-          return { turnId: params.turnId, agentText: decisionResult.streamedText, newState: state, toolCalled: null, callControlAction: null, outcome: null, endCall: false, degraded: false, ttftMs: decisionResult.ttftMs } satisfies TurnResult;
+          return {
+            turnId: params.turnId,
+            decider: decisionResult.decider,
+            disposition: "superseded",
+            agentText: decisionResult.streamedText,
+            newState: state,
+            toolCalled: null,
+            callControlAction: null,
+            outcome: null,
+            endCall: false,
+            degraded: false,
+            ttftMs: decisionResult.ttftMs,
+          } satisfies TurnResult;
         }
         /* ---------- emit after commit ---------- */
         for (const s of t2.says) yield* emit({ type: "say", text: s.text, allow_interruptions: s.allowInterruptions });
@@ -954,10 +989,10 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
             const logged = yield* callControl.logAction({ conversationId: row.id, events, action: "NO_INPUT_CLOSE", actionId, payload: { count: strike }, now: at });
             yield* append(row.id, { type: "AGENT_TURN", payload: { text, state: row.currentState, speak_mode: "non_interruptible" } }, at);
             yield* finalize({ row, ctx, currentState: row.currentState, outcome: "NO_ANSWER", metadata: { reason: "no_input_timeout" }, at });
-            return { turnId: `no-input-${strike}`, agentText: text, newState: "COMPLETED", toolCalled: null, callControlAction: { action: "NO_INPUT_CLOSE", action_id: logged.action_id }, outcome: "NO_ANSWER", endCall: true, degraded: false, ttftMs: null } satisfies TurnResult;
+            return { turnId: `no-input-${strike}`, decider: "none", disposition: "none", agentText: text, newState: "COMPLETED", toolCalled: null, callControlAction: { action: "NO_INPUT_CLOSE", action_id: logged.action_id }, outcome: "NO_ANSWER", endCall: true, degraded: false, ttftMs: null } satisfies TurnResult;
           }
           yield* append(row.id, { type: "AGENT_TURN", payload: { text, state: row.currentState, speak_mode: "interruptible" } }, at);
-          return { turnId: `no-input-${strike}`, agentText: text, newState: row.currentState, toolCalled: null, callControlAction: null, outcome: null, endCall: false, degraded: false, ttftMs: null } satisfies TurnResult;
+          return { turnId: `no-input-${strike}`, decider: "none", disposition: "none", agentText: text, newState: row.currentState, toolCalled: null, callControlAction: null, outcome: null, endCall: false, degraded: false, ttftMs: null } satisfies TurnResult;
         }),
       ).pipe(Effect.tap(finalizeTracingIfEnded(conversationId)), Effect.annotateLogs({ conversation_id: conversationId, path: "no_input" }));
 
@@ -1002,6 +1037,9 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
         });
         return {
           turnId: `signal-${signal.kind}`,
+          // A metrics signal decided nothing; it reports on a turn that was decided elsewhere (F3).
+          decider: "none",
+          disposition: "none",
           agentText: "",
           newState: row.currentState,
           toolCalled: null,
@@ -1029,6 +1067,10 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           const events = yield* conv.listEvents(row.id);
           const done = (r: Partial<TurnResult> & { agentText: string; newState: ConversationState }): TurnResult => ({
             turnId: `signal-${signal.kind}`,
+            // A signal is not a decided turn; saying so keeps it out of the turn-level SLO predicate
+            // rather than relying on a rule someone has to remember (F3, F4).
+            decider: "none",
+            disposition: "none",
             toolCalled: null,
             callControlAction: null,
             outcome: null,

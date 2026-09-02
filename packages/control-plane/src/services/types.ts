@@ -30,8 +30,31 @@ export interface DeciderInput {
 
 export type { TurnChunk };
 
+/**
+ * Which arm of the decide phase produced this turn's decision (F3).
+ *
+ * Distinct from `conversations.decider`, which names the decider *service* configured for the whole
+ * call. Every turn of an `openai` call reads `openai` there whether the model was consulted or a
+ * regex answered in a microsecond, and averaging those into one latency window is how a fast path
+ * flatters a p95. `fast-path` is reserved for D2 and is not produced yet.
+ */
+export type TurnDecisionSource = "override" | "fast-path" | "model" | "scripted" | "none";
+
+/**
+ * How the turn ended, in one field instead of four (F3).
+ *
+ * `degraded`, `toolCalled`, the rejection branch and the superseded early return each carried a
+ * piece of this, and a reader had to reassemble it. `superseded` is not a failure and `rejected` is
+ * not degradation; keeping them apart is the point.
+ */
+export type TurnDisposition = "spoke" | "tool" | "rejected" | "degraded" | "superseded" | "none";
+
 export interface TurnResult {
   readonly turnId: string;
+  /** Which arm decided this turn — the turn-level predicate the SLO segment reads (F3, F4). */
+  readonly decider: TurnDecisionSource;
+  /** How this turn ended (F3). */
+  readonly disposition: TurnDisposition;
   readonly agentText: string;
   readonly newState: ConversationState;
   readonly toolCalled: ToolCall | null;
