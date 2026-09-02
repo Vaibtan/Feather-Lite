@@ -180,6 +180,39 @@ Turn latency p50/p95 3 009 / 3 313 ms and `total_ms` 2 405 / 2 746 ms on this ru
 calmer than the previous hour's (`ttft_ms` p95 1 236 against 3 651), which is OpenAI's variance and
 not this change.
 
+## 2026-09-02 — D1 `resume` is built, and it cannot fire: the SDK never pauses on this configuration
+
+D5.2 decided `resume` was needed, so it was built: `backchannel()` in `domain` (34 table tests),
+`resume-backchannel.ts` in the worker (7 tests), and the wiring on the interim transcript, reporting
+`resumed_ms` on the next `turn_metrics` so the ledger can tell a false interruption the system
+recovered from apart from a real one it did not.
+
+**It never fires, and the reason is in the SDK rather than in the code above.**
+
+Measured on a healthy run, logging every interim: `resumed on backchannel` appears **0** times, and
+across eight interims `_activity` is reachable, `startFalseInterruptionTimer` is a function, and
+`pausedSpeech` is **undefined every single time**.
+
+Read in the installed 1.6.4 rather than assumed (`voice/agent_activity.js`):
+
+- The pause happens in `onStartOfSpeech`, guarded by
+  `agentSession.agentState !== "speaking" && pauseEnabled() && ... allowInterruptions` (line 1079).
+- `startFalseInterruptionTimer` is only called `if (this.pausedSpeech)` (line 1105).
+- `pauseEnabled()` additionally requires `output.audio.canPause` (line 3471), and the SDK logs
+  *"resumeFalseInterruption is enabled but audio output does not support pause, it will be ignored"*
+  when that fails. **That warning is absent from our logs**, so `canPause` is not the blocker.
+
+So on this configuration the barge-in never pauses the agent's audio — it cuts the line outright —
+and the SDK's resume path, which D1 says to reach ("resumes the paused speech immediately through
+the SDK's existing resume path"), has nothing to resume.
+
+**The gate is therefore unmeasurable rather than unmet.** "False-interrupt resume p50 < 300 ms"
+cannot be computed when the count of resumes is structurally zero. The lexicon and wiring stay: they
+are correct, they are inert, and they fire the moment pausing engages — which is the next piece of
+work, and it is an SDK-behaviour question (why `agentState` is `"speaking"` at
+`onStartOfSpeech`, and whether the interruption path should be pausing at all under
+`mode: "vad"`), not a lexicon one.
+
 ## 2026-09-02 — Phase 2: two read-backs become one, and D5.2 decides `resume` is needed
 
 Deepgram came back (it had been unreachable — `curl` timing out at 15 s from the host, every TTS

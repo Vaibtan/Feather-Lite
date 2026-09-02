@@ -160,6 +160,28 @@ export class FeatherAgent extends voice.Agent {
   }
 
   /**
+   * A paused line was resumed because the borrower was only listening (issue #1, D1's `resume`).
+   *
+   * Reported so the ledger knows the agent's line was **not** cut — which is the difference between
+   * a false interruption the system recovered from and a real one it did not. Carries how long the
+   * pause lasted, because "resume p50 < 300 ms" is the gate D1 is measured against, and the
+   * two-second `falseInterruptionTimeout` is what it has to beat.
+   */
+  onResumed(pausedForMs: number): void {
+    this.resumes.push(pausedForMs);
+  }
+
+  /** Pause durations of every resume on this call, drained onto the next `turn_metrics`. */
+  private resumes: number[] = [];
+
+  /** What to report and forget. Empty on almost every turn. */
+  protected drainResumes(): ReadonlyArray<number> {
+    const out = this.resumes;
+    this.resumes = [];
+    return out;
+  }
+
+  /**
    * `tts_metrics` from the session, **accumulated per turn rather than posted per segment** (W2).
    *
    * Read from the installed 1.6.4 rather than assumed: `tts/tts.js` calls its `emit()` when a chunk
@@ -205,7 +227,9 @@ export class FeatherAgent extends voice.Agent {
     this.ttsAccum.delete(turnId);
     const eou = this.pendingEou;
     this.pendingEou = null;
-    if (!acc && !eou) return;
+    /** D1's `resume`: pauses this turn recovered from without cutting the agent's line. */
+    const resumes = this.drainResumes();
+    if (!acc && !eou && resumes.length === 0) return;
     await this.deps.client
       .signal(this.deps.conversationId, {
         kind: "turn_metrics",
@@ -219,6 +243,10 @@ export class FeatherAgent extends voice.Agent {
         // quality claim. Per segment it was measuring sentence length instead.
         ...(acc && acc.audioMs > 0 ? { tts_audio_ms: acc.audioMs } : {}),
         ...(acc && acc.chars > 0 ? { tts_chars: acc.chars } : {}),
+        // Absent on almost every turn. Present means the borrower said "mm-hm", the agent's audio
+        // paused, and it was resumed early rather than after the two-second false-interruption
+        // timeout — so the line was not cut and the pause is measurable against D1's 300 ms gate.
+        ...(resumes.length > 0 ? { resumed_ms: resumes } : {}),
       })
       .catch((e) => this.deps.log("turn_metrics signal failed", { error: String(e) }));
   }

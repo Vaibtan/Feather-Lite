@@ -182,6 +182,15 @@ export const SignalRequest = Schema.Union(
     /** Played audio duration and the characters synthesised for it (D5, TTS heuristics). */
     tts_audio_ms: Schema.optional(Schema.Number),
     tts_chars: Schema.optional(Schema.Number),
+    /**
+     * Pauses this turn recovered from without cutting the agent's line (issue #1, D1's `resume`).
+     *
+     * One entry per resume, each the milliseconds the audio was paused. Absent on almost every turn;
+     * present means the borrower said something like "mm-hm", the agent's audio paused, and it was
+     * resumed early instead of after the two-second false-interruption timeout. The ledger needs it
+     * to tell a false interruption the system recovered from apart from a real one it did not.
+     */
+    resumed_ms: Schema.optional(Schema.Array(Schema.Number)),
   }),
 );
 export type SignalRequest = typeof SignalRequest.Type;

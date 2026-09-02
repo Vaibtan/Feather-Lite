@@ -30,6 +30,7 @@ import {
   parseWorkerLimits,
 } from "./env.js";
 import { ControlPlaneClient } from "./control-plane-client.js";
+import { resumeIfBackchannel } from "./resume-backchannel.js";
 import { FeatherAgent } from "./feather-agent.js";
 import { buildSpeechStack } from "./speech.js";
 import { RemoteOrchestratorLLM } from "./tracer/remote-orchestrator-llm.js";
@@ -324,6 +325,27 @@ export default defineAgent({
     session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (ev) => {
       const item = ev.item;
       if (item.type === "message" && item.role === "assistant") agent.reportPlayout(item);
+    });
+    /**
+     * D1's `resume`: a backchannel resumes the paused line immediately (issue #1, Phase 2).
+     *
+     * On the **interim** transcript, because waiting for the final means waiting out the same delay
+     * this exists to remove. D5.2 measured the alternative first, as the spec requires: raising
+     * `interruption.minDuration` to 700 ms did not remove the pauses, so the knob was not the fix.
+     */
+    let pausedAtMs: number | null = null;
+    session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (ev) => {
+      if (ev.isFinal) {
+        pausedAtMs = null;
+        return;
+      }
+      const activity = (session as unknown as { _activity?: { pausedSpeech?: unknown; startFalseInterruptionTimer?: (ms: number) => void } })._activity;
+      if (activity?.pausedSpeech != null && pausedAtMs === null) pausedAtMs = Date.now();
+      if (!resumeIfBackchannel(ev.transcript, activity)) return;
+      const pausedFor = pausedAtMs === null ? 0 : Date.now() - pausedAtMs;
+      pausedAtMs = null;
+      log("resumed on backchannel", { transcript: ev.transcript, pausedForMs: pausedFor });
+      agent.onResumed(pausedFor);
     });
     session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev) => {
       if (ev.newState === "away") void agent.onSilence();

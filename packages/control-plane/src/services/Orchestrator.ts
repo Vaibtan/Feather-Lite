@@ -121,6 +121,8 @@ export type Signal =
       readonly ttsTtfbMs?: number | undefined;
       readonly ttsAudioMs?: number | undefined;
       readonly ttsChars?: number | undefined;
+      /** Pauses this turn recovered from without cutting the line (issue #1, D1's `resume`). */
+      readonly resumedMs?: ReadonlyArray<number> | undefined;
     };
 
 export type Emit = (frame: TurnFrame) => Effect.Effect<void>;
@@ -1107,6 +1109,11 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
         // TTS shape lands in the same row but is not part of the latency waterfall: it is the input
         // to the chars-per-second heuristic (D5), not a component of reply time.
         const ttsShape = {
+          /**
+           * D1's `resume`. Kept as the list rather than a count, because the gate is a **p50 of the
+           * pause durations** ("resume p50 < 300 ms") and a count cannot answer that.
+           */
+          ...(signal.resumedMs !== undefined && signal.resumedMs.length > 0 ? { resumed_ms: [...signal.resumedMs] } : {}),
           ...(signal.ttsAudioMs !== undefined ? { tts_audio_ms: signal.ttsAudioMs } : {}),
           ...(signal.ttsChars !== undefined ? { tts_chars: signal.ttsChars } : {}),
         };
