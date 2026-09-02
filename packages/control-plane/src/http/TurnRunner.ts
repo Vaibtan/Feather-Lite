@@ -10,6 +10,7 @@ import { Cause, Chunk, Clock, Deferred, Duration, Effect, Fiber, Queue, Schedule
 import type { TurnFrame } from "@feather-lite/contracts";
 import { turnStartErrorOf, type TurnStartError } from "../errors.js";
 import { Gauges } from "../services/Gauges.js";
+import { holdBudgetMs } from "@feather-lite/domain";
 import { Orchestrator, type TurnParams } from "../services/Orchestrator.js";
 
 /** T1's refusal, owned by the orchestrator's error module rather than redeclared here (F6). */
@@ -64,6 +65,15 @@ const MAX_LIFETIME_MS = Math.max(1, Number(process.env["TURN_MAX_LIFETIME_SECOND
  * came back to zero on an idle process.
  */
 const SWEEP_INTERVAL = Duration.seconds(10);
+
+/**
+ * How often the `held` phase asks the ledger whether the segment has finished (F2).
+ *
+ * 150 ms is a tenth of the shortest thing worth waiting for and costs one indexed read per tick on a
+ * conversation that is already mid-call. Tighter would spend queries to shave latency nobody can
+ * hear; looser would add its own delay to every held turn.
+ */
+const HOLD_POLL_MS = 150;
 
 export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/TurnRunner", {
   scoped: Effect.gen(function* () {
@@ -165,6 +175,42 @@ export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/Turn
     });
     yield* Effect.addFinalizer(() => releaseClaimedAtShutdown);
 
+    /**
+     * The `held` phase: wait for a non-interruptible segment to finish before claiming the turn
+     * (issue #1, D1 — F2).
+     *
+     * Before T1, never inside it. The claim transaction may not hold a row lock for the length of a
+     * spoken sentence, and the thing being waited for is reported by the **voice worker** — a
+     * different process — so the ledger is the only place every replica can observe it. That is also
+     * why this is a poll and not an in-process `Deferred` registry: a registry would be right on one
+     * replica and wrong on two.
+     *
+     * Bounded on both ends. `holdBudgetMs` caps the wait and refuses to hold a non-voice call at
+     * all; the loop stops the moment the playout report lands, which is the common case well before
+     * the budget. Returns how long it actually held, for `TurnResult.heldMs`.
+     */
+    const holdForPlayout = (conversationId: string): Effect.Effect<number> =>
+      Effect.gen(function* () {
+        const segment = yield* orch.unreportedNonInterruptible(conversationId);
+        if (segment === null) return 0;
+        const startedMs = yield* Clock.currentTimeMillis;
+        const budget = holdBudgetMs({
+          ttsAudioMs: segment.ttsAudioMs,
+          elapsedMs: startedMs - segment.startedAtMs,
+          channel: segment.channel,
+        });
+        if (budget === 0) return 0;
+        let waited = 0;
+        while (waited < budget) {
+          yield* Effect.sleep(Duration.millis(HOLD_POLL_MS));
+          waited = (yield* Clock.currentTimeMillis) - startedMs;
+          const still = yield* orch.unreportedNonInterruptible(conversationId);
+          // Gone, or a *different* segment: either way the one we were waiting on is reported.
+          if (still === null || still.turnId !== segment.turnId) break;
+        }
+        return waited;
+      });
+
     /** Start (or attach to) a turn. Fails with the T1 error if the turn cannot start. */
     const run = (params: TurnParams): Effect.Effect<Stream.Stream<TurnFrame>, StartError> =>
       Effect.gen(function* () {
@@ -237,7 +283,9 @@ export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/Turn
            * the one line this comment exists for logged with `annotations: []`. Under load, on the
            * failure of one of a hundred interleaved calls, that line said nothing about which call.
            */
-          orch.processTurn(params, emit).pipe(
+          holdForPlayout(params.conversationId).pipe(
+            Effect.flatMap((heldMs) => orch.processTurn(heldMs === 0 ? params : { ...params, heldMs }, emit)),
+          ).pipe(
             Effect.matchCauseEffect({
               onSuccess: () => finish(null),
               onFailure: (cause) =>

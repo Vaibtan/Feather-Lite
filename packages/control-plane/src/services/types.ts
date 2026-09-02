@@ -55,6 +55,15 @@ export interface TurnResult {
   readonly decider: TurnDecisionSource;
   /** How this turn ended (F3). */
   readonly disposition: TurnDisposition;
+  /**
+   * How long this turn waited for a non-interruptible segment to finish before it claimed (F2).
+   *
+   * Zero on almost every turn. Non-zero means the borrower spoke while the agent was saying
+   * something they may not talk over — the read-back — and the turn was held rather than committing
+   * a barge-in the fully-heard guard would refuse. It is in `TurnResult` because that is what lands
+   * in `conversation_turns.result`, so the cost of the hold is measurable per turn.
+   */
+  readonly heldMs?: number | undefined;
   readonly agentText: string;
   readonly newState: ConversationState;
   readonly toolCalled: ToolCall | null;

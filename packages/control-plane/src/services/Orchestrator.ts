@@ -88,6 +88,12 @@ export interface TurnParams {
   readonly playout?: { readonly turnId: string; readonly heardText: string; readonly interrupted: boolean } | undefined;
   /** Voice runtime barge-in: take over an in-flight turn instead of failing with TurnInProgress. */
   readonly supersede?: boolean | undefined;
+  /**
+   * How long the caller held this turn before claiming, waiting out a non-interruptible segment
+   * (issue #1 D1, F2). Passed in rather than measured here because the hold happens **before** T1,
+   * outside any transaction; the orchestrator's job is only to record it.
+   */
+  readonly heldMs?: number | undefined;
 }
 
 export type Signal =
@@ -862,6 +868,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
             const result: TurnResult = {
               turnId: params.turnId,
               decider: decisionResult.decider,
+              ...(params.heldMs === undefined ? {} : { heldMs: params.heldMs }),
               /**
                * Assembled once, here, from what the four branches above already knew. `rejected`
                * sets `degraded`, so a rejection reads as `rejected` rather than being lost inside a
@@ -1035,7 +1042,9 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           transcriptionDelayMs: latency.transcription_delay_ms,
           ttsTtfbMs: latency.tts_ttfb_ms,
         });
-        return {
+        // Annotated rather than `satisfies`: `satisfies` keeps `decider: "none"` a literal type, and
+        // the two branches of `processSignal` then have no common supertype (F3).
+        const done: TurnResult = {
           turnId: `signal-${signal.kind}`,
           // A metrics signal decided nothing; it reports on a turn that was decided elsewhere (F3).
           decider: "none",
@@ -1048,8 +1057,19 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           endCall: false,
           degraded: false,
           ttftMs: null,
-        } satisfies TurnResult;
+        };
+        return done;
       });
+
+    /**
+     * The `held` phase's read, exposed for `TurnRunner` (issue #1 D1, F2).
+     *
+     * On the orchestrator rather than reached for directly from `TurnRunner`, so the runner keeps
+     * the dependency set it had — its unit tests drive a fake orchestrator and must not need a
+     * database to check turn retention — and so the one caller sees conversation orchestration
+     * through one interface. The read itself takes no lock and joins no transaction; see the repo.
+     */
+    const unreportedNonInterruptible = (conversationId: string) => conv.unreportedNonInterruptible(conversationId);
 
     const processSignal = (conversationId: string, signal: Signal) =>
       /**
@@ -1153,7 +1173,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
       // cleared is no worse off than it was before this existed.
       conv.releaseTurn(conversationId, turnId).pipe(Effect.ignore);
 
-    return { processTurn, processNoInput, processSignal, releaseStrandedTurn } as const;
+    return { processTurn, processNoInput, processSignal, unreportedNonInterruptible, releaseStrandedTurn } as const;
   }),
   dependencies: [ConversationRepo.Default, CrmRepo.Default, IdGen.Default, ContextBuilder.Default, CallControl.Default, SchedulingService.Default, OutboxService.Default],
 }) {}

@@ -35,6 +35,8 @@ const failsInT1 = Layer.succeed(
       ) as unknown as Effect.Effect<TurnResult>,
     processNoInput: () => Effect.die("not exercised"),
     processSignal: () => Effect.die("not exercised"),
+    // Nothing is playing, so the `held` phase is a no-op and these tests time exactly what they did (F2).
+    unreportedNonInterruptible: () => Effect.succeed(null),
     releaseStrandedTurn: () => Effect.void,
   }),
 );

@@ -477,6 +477,56 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
     });
 
     /** Events decoded into the domain union. Rows that fail to decode are skipped (logged upstream). */
+    /**
+     * The non-interruptible segment this conversation is still playing, if any (issue #1 D1, F2).
+     *
+     * An `AGENT_TURN` with `speak_mode: 'non_interruptible'` and **no** `AGENT_TURN_PLAYOUT` behind
+     * it: the agent was told to say something the borrower may not talk over, and the worker has not
+     * yet reported that it finished. That is the window in which a barge-in produces the repeated
+     * read-back — the borrower's "yes" commits a turn, the fully-heard guard refuses it because the
+     * read-back was not heard in full, and eight seconds play again.
+     *
+     * **No `FOR UPDATE`, and no transaction.** The thing being waited for is reported by a different
+     * process, so the ledger is the only place every replica can observe it; and holding a row lock
+     * for the length of a spoken sentence is not something a claim transaction may do. This is why
+     * `held` is a phase before T1 rather than a step inside it.
+     *
+     * `ttsAudioMs` is usually null here: it reaches `conversation_turns.result` on the later
+     * `turn_metrics` signal, which the worker sends *after* the segment finishes. `holdPolicy` has a
+     * bounded default for exactly that.
+     */
+    const unreportedNonInterruptible = (conversationId: string) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<{ turnId: string | null; channel: string; createdAt: Date; ttsAudioMs: number | null }>`
+          SELECT e.payload->>'turn_id'              AS turn_id,
+                 c.channel                          AS channel,
+                 e.created_at                       AS created_at,
+                 (t.result->>'tts_audio_ms')::float8 AS tts_audio_ms
+          FROM conversation_events e
+          JOIN conversations c ON c.id = e.conversation_id
+          LEFT JOIN conversation_turns t
+            ON t.conversation_id = e.conversation_id AND t.turn_id = e.payload->>'turn_id'
+          WHERE e.conversation_id = ${conversationId}
+            AND e.type = 'AGENT_TURN'
+            AND e.payload->>'speak_mode' = 'non_interruptible'
+            -- The opening is reported by the opening_played signal, never by an AGENT_TURN_PLAYOUT,
+            -- so it is permanently unreported and would hold the first real turn of every voice call
+            -- for evidence that never arrives. Found by running it: a live call took heldMs 4257 on
+            -- turn one, superseded the borrower payment offer, and ended NO_ANSWER with no promise.
+            AND e.payload->>'turn_id' IS DISTINCT FROM 'opening'
+            AND NOT EXISTS (
+              SELECT 1 FROM conversation_events p
+              WHERE p.conversation_id = e.conversation_id
+                AND p.type = 'AGENT_TURN_PLAYOUT'
+                AND p.payload->>'turn_id' = e.payload->>'turn_id'
+            )
+          ORDER BY e.sequence_no DESC
+          LIMIT 1`.pipe(Effect.orDie);
+        const row = rows[0];
+        if (row === undefined || row.turnId === null) return null;
+        return { turnId: row.turnId, channel: row.channel, startedAtMs: row.createdAt.getTime(), ttsAudioMs: row.ttsAudioMs };
+      });
+
     const listEvents = (conversationId: string) =>
       listEventRows(conversationId).pipe(
         Effect.map((rows) =>
@@ -598,6 +648,7 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
       releaseTurn,
       updateConversation,
       appendEvent,
+      unreportedNonInterruptible,
       contextForConversation,
       listEvents,
       insertTurn,

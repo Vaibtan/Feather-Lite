@@ -20,5 +20,6 @@ export * from "./tts.js";
 export * from "./wer.js";
 export * from "./percentile.js";
 export * from "./turnTaking.js";
+export * from "./holdPolicy.js";
 export * from "./speechWindows.js";
 export * from "./redact.js";
