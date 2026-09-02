@@ -58,6 +58,33 @@ export const SCORE_NAMES = [
   "latency.response_ms",
   "latency.slo_pass",
 
+  /**
+   * Turn-taking, from the tier-3 simulator (HARNESS) — issue #1 D4, added by issue #4 H8.
+   *
+   * All six are rates or milliseconds over one call's borrower events and agent speech stretches,
+   * computed by `turnTakingMetrics`. They are **harness metrics** in the same sense `stt.wer` is:
+   * they need ground truth about what the borrower did, which only a scripted borrower has.
+   *
+   * A stretch with no playout report behind it is excluded from every one of them and counted
+   * separately (H11), so a thin denominator is visible rather than flattering.
+   */
+  "turn.response_rate",
+  "turn.yield_rate",
+  "turn.yield_latency_ms",
+  "turn.false_interrupt_rate",
+  "turn.agent_interrupt_rate",
+  "turn.selectivity",
+  /** The barge-in T90 from an interrupt-offset sweep: the offset by which 90 % of yields have landed. */
+  "turn.barge_in_t90",
+
+  /**
+   * Entity error rate for the amounts, dates and names the borrower actually said (D3).
+   *
+   * Beside `stt.wer` and not folded into it, because a call can transcribe at WER 0.000 and still
+   * hear the wrong amount — and an amount error is a wrong promise, not a degraded transcript.
+   */
+  "stt.entity_er",
+
   /** Harness and suite outcomes. */
   "harness.equivalence_pass",
   "scenario.pass_rate",
@@ -120,6 +147,17 @@ export const SCORE_DATA_TYPE_BY_NAME: Readonly<Record<ScoreName, ScoreDataType>>
   "tts.chars_per_second": "NUMERIC",
   "latency.response_ms": "NUMERIC",
   "latency.slo_pass": "BOOLEAN",
+  // Turn-taking (H8). Every one is NUMERIC: they are rates and milliseconds, not verdicts — nothing
+  // here has a pass/fail until D4 says what the floor is, and rendering a rate as a chip would
+  // invent one.
+  "turn.response_rate": "NUMERIC",
+  "turn.yield_rate": "NUMERIC",
+  "turn.yield_latency_ms": "NUMERIC",
+  "turn.false_interrupt_rate": "NUMERIC",
+  "turn.agent_interrupt_rate": "NUMERIC",
+  "turn.selectivity": "NUMERIC",
+  "turn.barge_in_t90": "NUMERIC",
+  "stt.entity_er": "NUMERIC",
   "harness.equivalence_pass": "BOOLEAN",
   "scenario.pass_rate": "NUMERIC",
   "system.orphan_detect_ms": "NUMERIC",
