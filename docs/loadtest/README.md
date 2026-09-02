@@ -106,6 +106,62 @@ CPU-seconds per turn is 9 %.
   differently from the one being described.
 - **`JUDGE_ENABLED=false`.** A C=50 run would otherwise enqueue fifty reasoning-model calls.
 
+## 2026-09-02 — N=5 on the Phase C tree, and the interruption mode that was never running
+
+Not a re-baseline: this is the run Phase C's own verifications needed, taken on the corrected
+control plane and worker. `2026-09-02-tier2-n5.json`.
+
+Box: `pnpm stack:quiet` green (11 GB free in the container VM), Langfuse down, `JUDGE_ENABLED=false`,
+`LANGFUSE_ENABLED=false`, `TURN_DECIDER=openai`, `RATE_LIMIT_BYPASS_TOKEN` on both sides,
+`WORKER_MAX_JOBS=14`, `LIVEKIT_NODE_IP=192.168.1.4`. Everything in containers except the borrower
+harness, which Phase D moves.
+
+| | 2026-09-01 N=5 | **2026-09-02 N=5 (Phase C)** |
+|---|---:|---:|
+| calls served | 5/5 | **5/5** |
+| equivalence | 5/5 | **5/5 green** |
+| STT WER p50 / p95 | 0.000 / 0.000 | 0.000 / 0.111 (gate 0.20) |
+| silent playouts | 0 of 15 | **0 of 15** |
+| turn latency p50 / p95 (harness) | 3 115 / 4 501 ms | 3 019 / 5 672 ms |
+| TTS TTFB p50 / p95 | 391 / 417 ms | **392 / 413 ms** |
+| worker container peak | 2 018–2 095 MB | 2 027 MB |
+| MB per call | ~240 | 253 |
+
+`/api/system/latency?calls=5` on the same 15 turns: `eou_delay_ms` 578 / 580, `transcription_delay_ms`
+461 / 514, `ttft_ms` 1 070 / 3 651, `tts_ttfb_ms` 392 / 413, `total_ms` 2 460 / 5 061.
+
+**Nothing in Phase C moved a number**, which is the point of running it: fifteen commits of
+correctness work — the read-back guard, the claim lease, the SIP re-dial, the turn attach, the
+shutdown release — and the waterfall is where it was. The p95 tail is wider than 2026-09-01's
+(5 672 vs 4 501 ms) and it is `ttft_ms` that carries it, at 3 651 p95 against 1 070 p50: OpenAI's
+tail, which ADR 0008 records as varying 0.8–4.6 s on identical prompts and not ours to control.
+
+### The interruption mode (W1), verified on live calls
+
+The finding was that `interruption: { mode: "adaptive" }` had **never run** here: adaptive detection
+is LiveKit's hosted model, the self-hosted profile has no credentials for it, and every job logged
+`adaptive interruption disabled due to unrecoverable error, falling back to VAD-based interruption`
+before running on VAD anyway.
+
+**Measured on this run: 5 jobs started, 0 fallback lines.** Before the change every job logged one.
+The session now asks for `vad`, which is what it was always getting — so the config and the
+behaviour agree for the first time, and Phase 1's turn-taking baseline can be labelled honestly.
+
+### And the reason this run took two attempts
+
+The first attempt refused to start: `no online worker is reporting its mode`, with
+`production=null max_jobs=null`. All four containers were healthy and `/readyz` was green.
+
+The cause was three layers away and was introduced by C2's own commit. Compose began passing
+`API_BEARER_TOKEN: ${API_BEARER_TOKEN:-}` so the server and worker would agree about the token; the
+repo `.env` does not set it; and `API_BEARER_TOKEN=` reads as `Some("")` rather than `None`. That
+switched authentication **on** with an empty secret, so every worker heartbeat 401'd — silently,
+because that call is fire-and-forget — and the fleet's dev-mode gate correctly refused to measure a
+worker it could not see.
+
+Worth writing down because the gate did its job: it declined to produce a number rather than
+producing a wrong one, and the failure surfaced only under a real run.
+
 ## 2026-09-01 — the N=10 acceptance run, and the first SLO verdict that means anything
 
 The efficiency spec's acceptance bar (its Phase 9), due since Q8 said it runs after Phase 0 + W11
