@@ -5,7 +5,7 @@ Raw reports are the JSON files beside this one; this page is the reading of them
 ```bash
 pnpm loadtest:tier1 -- --concurrency 100 --ramp 2      # control plane, closed loop (heavy)
 pnpm loadtest:tier1 -- --rate 30 --duration 300        # control plane, open-loop soak
-pnpm loadtest:tier2 -- --calls 5                       # real voice calls (modest)
+pnpm loadtest:tier2 -- --calls 5 --label n5-baseline   # real voice calls (modest)
 pnpm loadtest:idle  -- --seconds 90 --label start-mode # what the trees cost doing nothing
 ```
 
@@ -179,6 +179,30 @@ the N=10 table's 385 ms was not.
 Turn latency p50/p95 3 009 / 3 313 ms and `total_ms` 2 405 / 2 746 ms on this run; the tail is
 calmer than the previous hour's (`ttft_ms` p95 1 236 against 3 651), which is OpenAI's variance and
 not this change.
+
+### Known open: the containerised sampler takes no container rows
+
+**A containerised fleet run currently reports `cores used n/a` and no container rows**, and says so
+in a note rather than leaving the absence to be read as zero. The per-core budget from a container
+run is therefore not available yet; the numbers above it — equivalence, WER, silent playouts, the
+latency waterfall — are unaffected.
+
+Narrowed, not closed. Each command the sampler issues works from inside the harness container when
+run by hand: `docker ps` 55 ms, `docker stats --no-stream` **2 040 ms returning all four rows**,
+`docker exec … cat /sys/fs/cgroup/cpu.stat` 70–82 ms. Under the sampler's own `spawn` options
+(`stdio: ["ignore", "pipe", "ignore"]`) the `stats` call never settles: instrumentation showed the
+poll entered three times in fourteen seconds and the line after the `stats` await never reached.
+
+The earlier N=5 container run in the table below **did** produce container rows — it ran an image
+built before `feather-lite-harness` joined the default container set, and `docker stats` fails the
+whole call if any one name is absent (`docker compose run` names its container
+`feather-lite-harness-run-<hash>`, so that name never exists). Filtering to running containers fixed
+that specific failure and did not make the rows come back, so there is a second cause.
+
+What is in place meanwhile: the sampler filters to containers that exist, refuses to re-enter a poll
+while one is in flight, and **names the absence in the report's notes**; `validateReport` refuses a
+report whose `per_core.basis` claims a container it has no row for. So the failure is loud, and no
+run can publish a container-basis figure it did not measure.
 
 ### 2026-09-02 — the harness moves into Docker (Phase D), and both arms measured
 

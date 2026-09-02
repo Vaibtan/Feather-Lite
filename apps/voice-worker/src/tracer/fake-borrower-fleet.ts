@@ -29,15 +29,23 @@ import { buildHarnessScores, postHarnessScores, summariseWer } from "./harness-s
 import type { ScriptedCallResult } from "./scripted-call.js";
 import type { BorrowerProcMessage, BorrowerProcRequest } from "./borrower-proc.js";
 import { harnessJsonHeaders } from "@feather-lite/load-test/harness-http";
+import { parseFleetArgs, reportFileName } from "./fleet-args.js";
 
 loadEnv({ path: fileURLToPath(new URL("../../../../.env", import.meta.url)) });
 
-const flag = (name: string, fallback: string): string => {
-  const i = process.argv.indexOf(`--${name}`);
-  return i >= 0 && process.argv[i + 1] !== undefined ? process.argv[i + 1]! : fallback;
-};
+/**
+ * Parsed rather than scanned (H6). The old `flag()` read one name at a time and never looked at what
+ * else was on the line, so an unknown flag — `--label` included — was accepted and ignored.
+ */
+const PARSED = parseFleetArgs(process.argv);
+if (!PARSED.ok) {
+  process.stderr.write(`${PARSED.message}
+`);
+  process.exit(2);
+}
+const ARGS = PARSED.ok ? PARSED.args : null!;
 
-const CALLS = Number(flag("calls", "5"));
+const CALLS = ARGS.calls;
 /**
  * STT regression gate (D4). A provider or model change that degrades transcription is otherwise
  * invisible: the call still completes, the ledger still replays, and equivalence still passes,
@@ -51,13 +59,13 @@ const CALLS = Number(flag("calls", "5"));
  * would fail an otherwise healthy run. 0.20 leaves ~80% headroom over the measured structural
  * worst while still failing a run whose transcription genuinely degrades.
  */
-const MAX_WER = Number(flag("max-wer", "0.20"));
+const MAX_WER = ARGS.maxWer;
 /**
  * Borrowers run in a forked child by default (W8). `--in-proc` keeps the old single-process shape
  * for a quick one-off; every committed measurement uses the forked one, because a run that reports
  * the worker's latency while N Opus encoders share its event loop is measuring the harness.
  */
-const IN_PROC = process.argv.includes("--in-proc");
+const IN_PROC = ARGS.inProc;
 /**
  * Every fleet number taken before 2026-08-27 was measured against a `dev`-mode worker and nothing
  * said so, which is why a `dev`-mode run is a refusal rather than a footnote. `--allow-dev` is
@@ -70,9 +78,9 @@ const IN_PROC = process.argv.includes("--in-proc");
  * survives dev mode. `--simulation` is its own refusal with its own flag, below: it is a different
  * fact — a `--simulation` worker is `production: true` — and one flag must not wave through two.
  */
-const ALLOW_DEV = process.argv.includes("--allow-dev");
+const ALLOW_DEV = ARGS.allowDev;
 /** Deliberately measuring a worker that can never ask the SFU to prefer somebody else. */
-const ALLOW_NO_SHEDDING = process.argv.includes("--allow-no-shedding");
+const ALLOW_NO_SHEDDING = ARGS.allowNoShedding;
 const CONTROL_PLANE_URL = (process.env["CONTROL_PLANE_URL"] ?? "http://127.0.0.1:8080").replace(/\/$/, "");
 const REPORT_DIR = fileURLToPath(new URL("../../../../docs/loadtest/", import.meta.url));
 
@@ -332,6 +340,8 @@ for (const { call, eq, eqError } of equivalences) {
 
 const report = {
   tier: "2-voice",
+  /** What this run was called (H6). In the filename too, so an archived report identifies itself. */
+  label: ARGS.label,
   livekit_url: process.env["LIVEKIT_URL"] ?? null,
   stt_tts_provider: process.env["STT_TTS_PROVIDER"] ?? "inference",
   speech: speechDescribe,
@@ -384,7 +394,11 @@ const report = {
 const reportProblems = validateReport(report);
 if (reportProblems.length > 0) throw new Error(`report is not a valid measurement: ${reportProblems.join("; ")}`);
 mkdirSync(REPORT_DIR, { recursive: true });
-const path = `${REPORT_DIR}${new Date().toISOString().slice(0, 10)}-tier2-n${CALLS}.json`;
+/**
+ * The label is in the filename (H6), so a second run on the same day at the same N cannot overwrite
+ * the first. It used to, silently — a tracked report was lost that way on 2026-09-02.
+ */
+const path = `${REPORT_DIR}${reportFileName(new Date().toISOString().slice(0, 10), CALLS, ARGS.label)}`;
 writeFileSync(path, `${JSON.stringify(report, null, 2)}\n`);
 log(`report written: ${path}`);
 

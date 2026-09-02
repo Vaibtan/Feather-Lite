@@ -455,8 +455,49 @@ export const startResourceSampler = (opts: ResourceSamplerOptions = {}): Resourc
     const value = Number(line?.split(/\s+/)[1]);
     return Number.isFinite(value) ? value : null;
   };
+  /**
+   * Which of the requested containers are actually up (issue #4, Phase D).
+   *
+   * `docker stats` fails the **whole** call if any one name does not exist — `Error response from
+   * daemon: No such container: ...` and nothing else — so a single absent name silently costs every
+   * container row in the run. Not hypothetical: `feather-lite-harness` joined the default set when
+   * the harness moved into a container, and `docker compose run` names its container
+   * `feather-lite-harness-run-<hash>`, so that name is never present. The next run lost its whole
+   * per-core budget and fell back to host roles, which inside a container see nothing.
+   *
+   * Resolved per poll rather than once, so a container restarted mid-run rejoins the sample.
+   */
+  const runningAmong = async (wanted: ReadonlyArray<string>): Promise<string[]> => {
+    const out = await runCommand("docker", ["ps", "--format", "{{.Names}}"]).catch(() => null);
+    if (out === null) return [];
+    const up = new Set(out.split("\n").map((n) => n.trim()).filter(Boolean));
+    return wanted.filter((n) => up.has(n));
+  };
+
+  /**
+   * One poll at a time (issue #4, Phase D).
+   *
+   * Every docker call from inside a container is a round trip to the host daemon, and a poll makes
+   * one `ps`, one `stats` and one `exec` per container — so it can take longer than the five-second
+   * interval that schedules it. `setInterval` does not care: it starts another, they pile up, the
+   * daemon serialises them, and each one gets slower still. The observable result is a run that
+   * samples **no** containers at all while every one of those commands works perfectly when you try
+   * it by hand, which is exactly how long this took to find.
+   */
+  let polling = false;
   const pollContainers = async (): Promise<void> => {
-    if (containers.length === 0) return;
+    if (containers.length === 0 || polling) return;
+    polling = true;
+    try {
+      await pollContainersOnce();
+    } finally {
+      polling = false;
+    }
+  };
+
+  const pollContainersOnce = async (): Promise<void> => {
+    const present = await runningAmong(containers);
+    if (present.length === 0) return;
     const out = await runCommand("docker", ["stats", "--no-stream", "--format", "{{.Name}}\t{{.MemUsage}}\t{{.CPUPerc}}", ...containers]).catch(() => null);
     if (out === null) return;
     for (const line of out.split("\n")) {
@@ -489,6 +530,17 @@ export const startResourceSampler = (opts: ResourceSamplerOptions = {}): Resourc
 
   const stop = async (): Promise<ResourceReport> => {
     if (report) return report;
+    /**
+     * A run that asked for container samples and got none says so (issue #4, Phase D).
+     *
+     * It used to be silent, and `perCoreBudget` then fell back to host roles — which inside a
+     * container see only the harness's own namespace, so the per-core budget came back `n/a` with no
+     * indication that the *sampler* had failed rather than the tree being idle. That is the shape
+     * this whole file exists to prevent: a number that is absent reading as a number that is zero.
+     */
+    if (containers.length > 0 && containerStats.size === 0) {
+      notes.push(`no container samples: ${containers.length} container(s) were requested and none was sampled; the per-core budget below is not a container figure`);
+    }
     if (containerLoop) clearInterval(containerLoop);
     if (procfsTimer) clearInterval(procfsTimer);
     // One last tick has usually just landed; give the pipe a moment rather than truncating it.

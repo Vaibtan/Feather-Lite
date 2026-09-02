@@ -234,7 +234,12 @@ services:
   # Its own profile, because it is not part of the running system — it is a thing you run *at* the
   # running system, and `--profile app` must not start a load generator.
   #
-  #   pnpm loadtest:tier2:docker -- --calls 5
+  #   pnpm loadtest:tier2:docker -- --calls 5 --label n5-container
+  #
+  # The root scripts pass `--build`, and that is not politeness. This image is a **snapshot of the
+  # sources** (`COPY --from=build /repo /repo`), so without it a `run` measures whatever the image
+  # was built from — which happened once already: an H6 run wrote its report under the old filename
+  # because the container was still on the previous commit, and nothing said so.
   harness:
     profiles: ["harness"]
     build:
