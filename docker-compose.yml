@@ -122,6 +122,11 @@ services:
       RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-120}
       RATE_LIMIT_BYPASS_TOKEN: ${RATE_LIMIT_BYPASS_TOKEN:-}
       DAILY_TURN_CAP: ${DAILY_TURN_CAP:-5000}
+      # Unset by default, as it has always been. It is listed on **both** this service and the
+      # worker because it only works as a pair: the worker authenticates every request it makes,
+      # so a token reaching the server and not the worker would 401 the turn stream and - since
+      # C2 - the heartbeat too, and the sweeper would then orphan calls that were being served.
+      API_BEARER_TOKEN: ${API_BEARER_TOKEN:-}
     mem_limit: 768m
     ports:
       - "8080:8080"
@@ -163,6 +168,9 @@ services:
       WORKER_JOB_MEMORY_WARN_MB: ${WORKER_JOB_MEMORY_WARN_MB:-400}
       WORKER_JOB_MEMORY_LIMIT_MB: ${WORKER_JOB_MEMORY_LIMIT_MB:-800}
       RATE_LIMIT_BYPASS_TOKEN: ${RATE_LIMIT_BYPASS_TOKEN:-}
+      # The other half of the pair on the server service above. The worker presents this on the
+      # turn stream, on signals and on the heartbeat.
+      API_BEARER_TOKEN: ${API_BEARER_TOKEN:-}
     # The arithmetic, from `docker stats` on this container rather than from host processes — which
     # is the only honest source now that the worker only ever runs here (2026-09-01, W11):
     #

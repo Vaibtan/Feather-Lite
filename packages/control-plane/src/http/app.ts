@@ -61,7 +61,21 @@ export const securityMiddleware = HttpMiddleware.make((app) =>
     const req = yield* HttpServerRequest.HttpServerRequest;
     const url = req.url;
     const method = req.method;
-    const open = method === "GET" || method === "OPTIONS" || url.startsWith("/healthz") || url.startsWith("/readyz") || url.startsWith("/docs") || url.startsWith("/api/agents/heartbeat");
+    /**
+     * `/api/agents/heartbeat` is **not** here (C2). It reads like telemetry and is not: it upserts
+     * `conversation_liveness` for whatever conversation ids the caller names, which is the column
+     * the orphaned-call sweeper filters on, so an unauthenticated beat keeps any call un-swept and
+     * its borrower blocked behind an active call nobody is serving. The worker already presents the
+     * bearer on every request it makes, this one included.
+     *
+     * **And it is deliberately not in `RATE_LIMITED_PREFIXES` either**, though C2 names it as
+     * un-rate-limited. A budget is the wrong control for liveness: every job process beats its own
+     * conversation every 10 s and the main worker beats every 10 s, so ten concurrent calls are 66
+     * beats a minute from one container address against a default budget of 120 — and a *shed*
+     * beat is not a dropped metric, it is the sweeper finalizing a call somebody is serving. Auth
+     * is what this endpoint needed; a per-IP budget on it would turn load into orphaned calls.
+     */
+    const open = method === "GET" || method === "OPTIONS" || url.startsWith("/healthz") || url.startsWith("/readyz") || url.startsWith("/docs");
     if (!open && cfg.apiBearerToken !== null) {
       const auth = req.headers["authorization"] ?? "";
       if (auth !== `Bearer ${Redacted.value(cfg.apiBearerToken)}`) {
