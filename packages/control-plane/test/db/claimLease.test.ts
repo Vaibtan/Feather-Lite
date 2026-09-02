@@ -257,3 +257,30 @@ describe("an abandoned claim", () => {
     expect(out.afterLease).toBe(1);
   });
 });
+
+describe("the agents list ages out what has stopped reporting (P6)", () => {
+  it("drops a heartbeat older than a day and keeps a recent one", async () => {
+    /**
+     * A `feather-lite-agent-container` row from 2026-08-28 was still listed on `/status` on
+     * 2026-09-02, five days after that container last existed. `online` is computed from
+     * `last_seen_at`, so it read `false` — correct, and still misleading: an operator scanning the
+     * status page cannot tell a worker that died this minute from one retired last week, and the
+     * list grows a row per name anyone ever ran.
+     */
+    const out = await rt.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* PgClient.PgClient;
+        const sched = yield* SchedulingRepo;
+        yield* sql`TRUNCATE agent_heartbeats`;
+        const now = new Date();
+        const old = new Date(now.getTime() - 26 * 60 * 60_000);
+        yield* sql`INSERT INTO agent_heartbeats (agent_name, last_seen_at, meta) VALUES ('retired-container', ${old}, '{}'::jsonb), ('live-worker', ${now}, '{}'::jsonb)`;
+        const beats = yield* sched.listHeartbeats();
+        // camelCase: `transformResultNames: snakeToCamel` is on the client, and `Queries.heartbeats`
+        // is what maps back to the wire shape.
+        return beats.map((b) => b.agentName);
+      }),
+    );
+    expect(out).toEqual(["live-worker"]);
+  });
+});

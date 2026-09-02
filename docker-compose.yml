@@ -255,7 +255,8 @@ services:
       # Compose-network addresses, not the repo `.env`'s: inside here `127.0.0.1` is this container.
       CONTROL_PLANE_URL: http://server:8080
       # P5: tier 1 read `LOAD_TEST_API` for the same thing the fleet reads `CONTROL_PLANE_URL` for.
-      # Both are set to the same value so neither arm can drift; the code now prefers the latter.
+      # Tier 1 now prefers `CONTROL_PLANE_URL`; this stays so an existing invocation does not
+      # silently change target, and both are the same value so neither arm can drift.
       LOAD_TEST_API: http://server:8080
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/feather_lite
       # **Signalling only.** Media is answered by `LIVEKIT_NODE_IP` on the `livekit` service: the SFU

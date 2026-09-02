@@ -51,7 +51,16 @@ const DURATION_SECONDS = Number(flag("duration", "300"));
 const MODE: "closed" | "soak" = RATE > 0 ? "soak" : "closed";
 /** Appended to the report filename so runs at the same C but different server config stay distinct. */
 const LABEL = flag("label", "");
-const BASE = (process.env["LOAD_TEST_API"] ?? flag("api", "http://127.0.0.1:8080")).replace(/\/$/, "");
+/**
+ * One name for the control plane across all three tiers (P5).
+ *
+ * Tier 1 read `LOAD_TEST_API` while the fleet, the chaos probe and the worker read
+ * `CONTROL_PLANE_URL` — two names for one address, which is how a containerised run comes to measure
+ * a different server from the one it thinks it is measuring. `CONTROL_PLANE_URL` wins;
+ * `LOAD_TEST_API` still works so an existing invocation does not silently change target, and the
+ * compose file sets both to the same value so neither arm can drift.
+ */
+const BASE = (process.env["CONTROL_PLANE_URL"] ?? process.env["LOAD_TEST_API"] ?? flag("api", "http://127.0.0.1:8080")).replace(/\/$/, "");
 const DATABASE_URL = process.env["DATABASE_URL"] ?? "postgres://postgres:postgres@localhost:5434/feather_lite";
 const REPORT_DIR = fileURLToPath(new URL("../../../docs/loadtest/", import.meta.url));
 

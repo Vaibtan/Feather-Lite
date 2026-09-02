@@ -180,6 +180,28 @@ Turn latency p50/p95 3 009 / 3 313 ms and `total_ms` 2 405 / 2 746 ms on this ru
 calmer than the previous hour's (`ttft_ms` p95 1 236 against 3 651), which is OpenAI's variance and
 not this change.
 
+## How to start a stack you may quote numbers from (P4)
+
+The load-run configuration is a **file** now, not something to remember:
+
+```
+docker compose --env-file .env --env-file compose.loadrun.env   --profile app --profile livekit up -d
+```
+
+Both files, in that order. `--env-file` **replaces** the default `.env` rather than adding to it, so
+`compose.loadrun.env` alone brings the stack up with `OPENAI_API_KEY: ""` and no decider. Later files
+win, so `.env` supplies the secrets and `compose.loadrun.env` pins the four values a run must not
+inherit: `JUDGE_ENABLED=false`, `LANGFUSE_ENABLED=false`, `TURN_DECIDER=openai` and a
+`RATE_LIMIT_BYPASS_TOKEN`. Both forms were checked with `docker compose ... config` before this was
+written.
+
+Why it matters: compose interpolates those from the repo `.env` unless they are in the shell at `up`
+time, so a fleet run started in a fresh terminal quietly measured a server with the LLM judge on —
+billing a reasoning-model call per conversation and putting its latency inside the window under
+measurement. Tier 1's judge gate caught it once. It should not have to.
+
+`pnpm stack:quiet` green and `pnpm lf:down` still come first.
+
 ## 2026-09-02 — tier 3, and the read-back defect reproduced on demand (issue #1 Phase 1)
 
 Tier 3 is one seeded scenario, one call, and the ledger shape that call must leave. It is a

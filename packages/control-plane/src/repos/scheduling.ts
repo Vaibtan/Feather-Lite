@@ -240,7 +240,17 @@ export class SchedulingRepo extends Effect.Service<SchedulingRepo>()("@feather-l
     const listHeartbeats = SqlSchema.findAll({
       Request: Schema.Void,
       Result: HeartbeatRow,
-      execute: () => sql`SELECT agent_name, last_seen_at, meta FROM agent_heartbeats ORDER BY agent_name`,
+      /**
+       * A day, because a worker that has not reported in a day is not a worker (P6).
+       *
+       * A `feather-lite-agent-container` row from 2026-08-28 was still on `/status` five days after
+       * that container last existed. `online` was correctly `false`, and the row was still
+       * misleading: an operator cannot tell a worker that died this minute from one retired last
+       * week, and the list grows a row for every name anyone ever ran. The row stays in the table —
+       * `agent_name` is the conflict key, so a returning worker resumes its own row.
+       */
+      execute: () => sql`SELECT agent_name, last_seen_at, meta FROM agent_heartbeats
+        WHERE last_seen_at > now() - interval '1 day' ORDER BY agent_name`,
     });
 
     return {

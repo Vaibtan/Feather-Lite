@@ -19,12 +19,12 @@ the PRD (`PRD.md`) and implementation spec (`SPEC.md`) are the requirements, thi
 v1 came first and was rewritten after the review in `docs/reviews/`; it is gone from the tree (ADR
 0005 records why TypeScript won) and lives on only in git history.
 
-## What is here (v2, verified 2026-09-01)
+## What is here (v2, verified 2026-09-02)
 
 | Area | Status | Evidence |
 |---|---|---|
-| Pure domain (`packages/domain`): states, adjacency, overrides, tool matrix, event union, replay reducer, pre-call policy, scripts, percentiles, redaction, turn-taking metrics | done | 246 unit tests |
-| Control plane (`packages/control-plane`): Effect services, Postgres via `@effect/sql-pg`, three-phase turn, tools with idempotency, scheduled-action + outbox workers, scripted + OpenAI deciders, Langfuse tracing | done | 86 unit + 74 DB tests (73 pass, 1 skipped as issue #3), incl. **20/20 scenarios** on real Postgres |
+| Pure domain (`packages/domain`): states, adjacency, overrides, tool matrix, event union, replay reducer, pre-call policy, scripts, percentiles, redaction, turn-taking metrics | done | 274 unit tests. The turn-taking metrics carry a segment: they are **VAD-interruption** numbers from the tier-3 simulator, `harness: "sim"`, excluded from the real-call SLO window (user story 35) |
+| Control plane (`packages/control-plane`): Effect services, Postgres via `@effect/sql-pg`, three-phase turn, tools with idempotency, scheduled-action + outbox workers, scripted + OpenAI deciders, Langfuse tracing | done | 89 unit + 99 DB tests (99 pass, 0 skipped — issue #3 closed by C14), incl. **20/20 scenarios** on real Postgres |
 | HTTP API (`packages/contracts` + `apps/server`): Effect HttpApi, 25 routes, OpenAPI at `/docs`, SSE turn stream, bearer/rate-limit middleware with counted rejections | done | live smoke: start / turn(SSE) / replay / 409 / 422 / scenarios |
 | Voice worker (`apps/voice-worker`): LiveKit Agents 1.6 `llmNode` → `/turn`, barge-in heard-text, interruptible read-back guard, AMD-gated SIP path, heartbeats | done (browser path) | automated real voice call on LiveKit Cloud with GPT-4.1; scripted voice call == simulation scenario (state path, tools, outcome) |
 | Operator console (`apps/console`): conversations, transcript + timeline + replay, simulate (streaming), **call me in the browser**, scenario matrix, status/seed | done | headless run: 20/20 matrix, PTP simulation, browser call joined LiveKit Cloud with live transcript |
@@ -254,8 +254,8 @@ set it before a tier-1 load run, which would otherwise export a span per scripte
 ### Tests
 
 ```bash
-pnpm check                       # typecheck + unit tests (domain 94, control-plane 30)
-pnpm test:db                     # 29 DB tests on Postgres: 20 scenarios, repos, concurrency, superseded transcript, workers, LLM leak
+pnpm check                       # typecheck + unit tests (domain 274, control-plane 89, voice-worker 94, load-test 48)
+pnpm test:db                     # 99 DB tests on Postgres: 20 scenarios, repos, concurrency, superseded transcript, workers, LLM leak, SLO segments
 pnpm --filter @feather-lite/voice-worker text-run      # LiveKit text-mode harness against the fake control plane
 pnpm --filter @feather-lite/voice-worker fake-borrower # automated real voice call + SPEC §10.5 equivalence assertion
 pnpm loadtest:tier1 -- --concurrency 100 --ramp 2      # control-plane load: 100 concurrent conversations
