@@ -25,6 +25,14 @@ export interface StartCallInput {
    * are the browser-facing ones; a `simulated` call has no leg at all.
    */
   readonly origin?: "browser" | "sip" | undefined;
+  /**
+   * Which harness placed this call (issue #1, D4). `"sim"` is the tier-3 simulator.
+   *
+   * Recorded so the SLO's default segment can exclude it: a simulator call is `channel: "voice"`
+   * served by the real decider, which is exactly what that segment selects, and its audio is
+   * deliberately harder than a real call's. Undefined — a real caller — is every row so far.
+   */
+  readonly harness?: string | undefined;
   /** Reuse an existing workflow (scheduled callback / retry). */
   readonly workflowExecutionId?: string | undefined;
   readonly workflowType?: WorkflowType | undefined;
@@ -124,6 +132,7 @@ export class WorkflowService extends Effect.Service<WorkflowService>()("@feather
             startedAt: nowDate,
             channel: input.channel,
             origin: input.channel === "voice" ? (input.origin ?? "browser") : "simulated",
+            harness: input.harness ?? null,
             // Recorded now, from the config that will actually serve it, rather than inferred later:
             // the SLO window has to be able to exclude scripted turns, and by the time the report is
             // built nothing on the row says which decider ran (O2).

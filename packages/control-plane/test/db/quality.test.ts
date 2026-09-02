@@ -245,6 +245,46 @@ describe("quality report", () => {
     expect(out.slo.breaches).not.toContain("eou_delay_ms");
   });
 
+  it("keeps a simulator call out of the real-call SLO window (issue #1, D4)", async () => {
+    /**
+     * The harder case than the one below, and why `harness` is its own column: a tier-3 call is
+     * `channel: "voice"` served by the **real** decider — exactly what the default segment selects —
+     * so neither `channel` nor `decider` can separate it. Its audio is deliberately harder than a
+     * real call's, so leaving it in would move the number the product's latency claim is made from.
+     *
+     * Asserted against `latencyAggregateForSegment` directly, with two rows differing **only** in
+     * `harness`: driving it through `sloStatus` would have the scripted decider exclude the row for
+     * a different reason and the test would pass with the filter removed, which it did on the first
+     * attempt.
+     */
+    const out = await rt.runPromise(
+      withFrozenClock(NOW)(
+        Effect.gen(function* () {
+          const sql = yield* PgClient.PgClient;
+          const queries = yield* Queries;
+          const real = yield* seedBorrower("Real Caller");
+          const simulated = yield* seedBorrower("Sim Caller");
+          const wf = yield* WorkflowService;
+          const a = yield* wf.startCall({ borrowerId: real.borrowerId, contactPointId: real.cpId, channel: "voice", now: NOW });
+          const b = yield* wf.startCall({ borrowerId: simulated.borrowerId, contactPointId: simulated.cpId, channel: "voice", harness: "sim", now: NOW });
+          // The same decider on both, so `harness` is the only thing that can tell them apart.
+          yield* sql`UPDATE conversations SET decider = 'openai' WHERE id IN (${a.conversationId}, ${b.conversationId})`;
+
+          const def = yield* queries.latencyAggregateForSegment({ channel: "voice", decider: "openai" }, 50);
+          const sim = yield* queries.latencyAggregateForSegment({ channel: "voice", decider: "openai", harness: "sim" }, 50);
+          // Put them back before leaving: these two rows are `voice` + `openai`, which is exactly
+          // what the next test asserts is empty, and the file shares one database.
+          yield* sql`UPDATE conversations SET decider = 'scripted' WHERE id IN (${a.conversationId}, ${b.conversationId})`;
+          return { def: def.found, sim: sim.found };
+        }),
+      ),
+    );
+    // The real call is in the default window and the simulator's is not...
+    expect(out.def).toBe(1);
+    // ...and the simulator's is findable when asked for, so this is a filter and not a lost row.
+    expect(out.sim).toBe(1);
+  });
+
   it("keeps a scripted load run out of the voice segment's SLO window (O2)", async () => {
     // The defect this segmentation exists for: a tier-1 run added 36 scripted turns to the "last 50
     // calls" window and `ttft_ms` fell 3228 -> 1252 ms, dropping off the breach list. Nothing got

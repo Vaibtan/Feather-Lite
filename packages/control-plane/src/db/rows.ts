@@ -148,6 +148,8 @@ export const ConversationRow = Schema.Struct({
   channel: Schema.String,
   /** How the voice leg was established: "browser", "sip", or "simulated". Null before 0008. */
   origin: Schema.NullOr(Schema.String),
+  /** Which harness placed the call ("sim" for tier 3); null means a real caller did (D4). */
+  harness: Schema.NullOr(Schema.String),
   transferTarget: Schema.NullOr(Schema.String),
   protectedContextUnlocked: Schema.Boolean,
   currentState: ConversationState,

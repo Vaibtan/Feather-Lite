@@ -336,15 +336,31 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
      * makes a green verdict readable.
      */
     const latencyAggregateForSegment = (
-      segment: { readonly channel: string | null; readonly decider: string | null },
+      segment: { readonly channel: string | null; readonly decider: string | null; readonly harness?: string | null | undefined },
       calls: number,
     ): Effect.Effect<{ aggregate: LatencyAggregate; found: number }, never, PgClient.PgClient> =>
       Effect.gen(function* () {
         const sql = yield* PgClient.PgClient;
+        /**
+         * Harness calls are excluded unless one is asked for (issue #1, D4's segment rule).
+         *
+         * A tier-3 call is `channel: 'voice'` served by the real decider — exactly what the default
+         * segment selects — and its audio is deliberately harder than a real call's: degraded
+         * channel, seeded interruptions, accent personas. Left in, the simulator would move the
+         * number the product's latency claim is made from.
+         *
+         * Not hypothetical: a tier-1 load run put 36 scripted turns into the "last 50 calls" window
+         * and `ttft_ms` fell 3 228 -> 1 252 ms. Nothing got faster.
+         *
+         * `undefined` means the default — real callers only. An explicit `"sim"` asks for the
+         * simulator's own segment, which is how its numbers are read.
+         */
+        const wanted = segment.harness ?? null;
         const ids = yield* sql<{ id: string }>`
           SELECT id FROM conversations
           WHERE (${segment.channel}::text IS NULL OR channel = ${segment.channel}::text)
             AND (${segment.decider}::text IS NULL OR decider = ${segment.decider}::text)
+            AND harness IS NOT DISTINCT FROM ${wanted}::text
           ORDER BY started_at DESC, id DESC LIMIT ${calls}`.pipe(Effect.orDie);
         const aggregate = yield* latencyAggregateFor(ids.map((r) => r.id));
         return { aggregate, found: ids.length };

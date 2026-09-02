@@ -31,7 +31,7 @@ import {
 } from "../db/rows.js";
 
 const CONV_COLS =
-  "id, call_attempt_id, borrower_id, agent_version_id, started_at, ended_at, final_outcome, final_outcome_metadata, channel, origin, transfer_target, protected_context_unlocked, current_state, active_turn_id, pending_proposal, no_input_count";
+  "id, call_attempt_id, borrower_id, agent_version_id, started_at, ended_at, final_outcome, final_outcome_metadata, channel, origin, harness, transfer_target, protected_context_unlocked, current_state, active_turn_id, pending_proposal, no_input_count";
 const WF_COLS = "id, borrower_id, loan_id, workflow_type, status, current_attempt_no, scheduled_for";
 const ATTEMPT_COLS = "id, workflow_execution_id, contact_point_id, direction, provider_call_id, attempt_status, started_at, ended_at";
 
@@ -178,6 +178,8 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
       channel: string;
       /** How the voice leg was established, so a re-dial knows whether it can be placed (C4). */
       origin: string;
+      /** Which harness placed the call; null means a real caller did (issue #1, D4). */
+      harness: string | null;
       /** Which conversationalist will serve this call, for the SLO segment (O2). */
       decider: string;
     }) => sql`INSERT INTO conversations ${sql.insert({ ...row, finalOutcomeMetadata: sql.json({}), currentState: "GREETING" })}`.pipe(Effect.asVoid);

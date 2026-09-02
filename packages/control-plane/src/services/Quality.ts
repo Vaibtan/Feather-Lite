@@ -270,8 +270,8 @@ export class Quality extends Effect.Service<Quality>()("@feather-lite/Quality", 
      * the real decider by default: that is the population the targets were set from, and the one an
      * operator means when they ask whether the agent is fast enough.
      */
-    const sloUncached = (calls: number, segment: { channel?: string | null; decider?: string | null }) =>
-      queries.latencyAggregateForSegment({ channel: segment.channel ?? null, decider: segment.decider ?? null }, calls).pipe(
+    const sloUncached = (calls: number, segment: { channel?: string | null; decider?: string | null; harness?: string | null | undefined }) =>
+      queries.latencyAggregateForSegment({ channel: segment.channel ?? null, decider: segment.decider ?? null, harness: segment.harness ?? null }, calls).pipe(
         Effect.orDie,
         Effect.map(({ aggregate, found }) =>
           sloFrom(aggregate, { channel: segment.channel ?? null, decider: segment.decider ?? null, calls_requested: calls, calls_found: found }),
@@ -300,8 +300,11 @@ export class Quality extends Effect.Service<Quality>()("@feather-lite/Quality", 
     const STATUS_CALLS = 50;
     const sloStatusCached = yield* Effect.cachedWithTTL(sloUncached(STATUS_CALLS, STATUS_SEGMENT), Duration.seconds(5));
 
-    const sloStatus = (calls: number, segment: { channel?: string | null; decider?: string | null } = STATUS_SEGMENT) =>
-      calls === STATUS_CALLS && (segment.channel ?? null) === STATUS_SEGMENT.channel && (segment.decider ?? null) === STATUS_SEGMENT.decider
+    const sloStatus = (calls: number, segment: { channel?: string | null; decider?: string | null; harness?: string | null | undefined } = STATUS_SEGMENT) =>
+      calls === STATUS_CALLS &&
+      (segment.channel ?? null) === STATUS_SEGMENT.channel &&
+      (segment.decider ?? null) === STATUS_SEGMENT.decider &&
+      (segment.harness ?? null) === null
         ? sloStatusCached
         : sloUncached(calls, segment);
 
