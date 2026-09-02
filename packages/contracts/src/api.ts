@@ -574,6 +574,14 @@ export const TurnLatencyRow = Schema.Struct({
   turn_id: Schema.String,
   started_at: Schema.String,
   status: Schema.String,
+  /**
+   * What the control plane decided about this turn (issue #1, D1): respond, wait, resume or held.
+   *
+   * Here because this is the harness's per-turn seam, and a tier-3 scenario asserting "the hold
+   * produced a `wait`" needs the ledger's own answer — a silence is also what a slow model looks
+   * like. Null on turns written before the field existed.
+   */
+  disposition: Schema.NullOr(Schema.String),
   state: Schema.NullOr(Schema.String),
   eou_delay_ms: Schema.NullOr(Schema.Number),
   transcription_delay_ms: Schema.NullOr(Schema.Number),

@@ -36,6 +36,14 @@ export interface ExpectedLedger {
   /** Text that must never appear in any agent line — the compliance half (third-party pickup). */
   readonly neverSaid?: ReadonlyArray<RegExp> | undefined;
   /**
+   * Dispositions the call must have recorded, in any order (D4; issue #1's D1).
+   *
+   * The half of "hold request expects `wait`" that can be asserted from outside. The ledger says
+   * what the control plane decided, so a scenario can require that a `wait` actually happened rather
+   * than inferring it from a silence — which is also what a slow model looks like.
+   */
+  readonly dispositions?: ReadonlyArray<string> | undefined;
+  /**
    * No agent line was cut off (D4: backchannel mid-line "expects no truncated agent line").
    *
    * Read from the ledger's `AGENT_TURN_PLAYOUT.interrupted`, which is the only durable record of
@@ -245,6 +253,8 @@ export const TIER3_SCENARIOS: ReadonlyArray<Tier3Scenario> = [
       finalOutcome: "PROMISE_TO_PAY",
       tools: ["confirm_right_party", "propose_promise_to_pay", "record_promise_to_pay"],
       readBacks: { atLeast: 1 },
+      /** D4's own expectation for this scenario, assertable now that issue #1's D1 `wait` exists. */
+      dispositions: ["wait"],
     },
     /**
      * **Not marked `expectedToFail`, and the reason is worth keeping.** One run on seed 3 ended
@@ -263,6 +273,18 @@ export const TIER3_SCENARIOS: ReadonlyArray<Tier3Scenario> = [
         await ctx.waitAgentSaid(new RegExp(`speak with ${firstNameOf(ctx.borrowerName)}`, "i"), 0, 60_000);
         await ctx.sleep(1500);
         await ctx.speak("yes this is the borrower", ctx.lines.yes);
+        /**
+         * **Let the agent answer first, and let the STT close the previous utterance.**
+         *
+         * Spoken back-to-back, the endpointer merges the two lines into one turn: a live run
+         * produced `"Yes. This is Jordan. Hold on. Let me get my card."` as a single final, which
+         * carries content and is therefore correctly *not* a hold. The scenario then passed without
+         * ever exercising `wait`. A hold has to arrive as its own turn — which in a real call it
+         * does, because the borrower answers, the agent replies, and only then does she ask for a
+         * moment.
+         */
+        await ctx.waitAgentSpeaking(60_000);
+        await ctx.sleep(2500);
         await ctx.speak("hold on, let me get my card", ctx.lines.hold);
         // The silence the hold buys. Until D1's `wait` exists the agent fills it, and the scenario's
         // job is to make that visible rather than to pass regardless.
@@ -334,6 +356,8 @@ export const checkExpectedLedger = (
     readonly agentLines: ReadonlyArray<string>;
     /** The ledger's playout rows — the only durable answer to "did that line finish?". */
     readonly playouts?: ReadonlyArray<{ readonly interrupted: boolean }> | undefined;
+    /** What the control plane decided about each turn (issue #1, D1). */
+    readonly dispositions?: ReadonlyArray<string> | undefined;
   },
 ): ReadonlyArray<string> => {
   const failures: string[] = [];
@@ -355,6 +379,11 @@ export const checkExpectedLedger = (
     const n = actual.agentLines.filter((l) => READBACK.test(l)).length;
     if (expected.readBacks.atLeast !== undefined && n < expected.readBacks.atLeast) failures.push(`${String(n)} read-back(s), expected at least ${String(expected.readBacks.atLeast)}`);
     if (expected.readBacks.atMost !== undefined && n > expected.readBacks.atMost) failures.push(`${String(n)} read-back(s), expected at most ${String(expected.readBacks.atMost)}`);
+  }
+  for (const wanted of expected.dispositions ?? []) {
+    if (!(actual.dispositions ?? []).includes(wanted)) {
+      failures.push(`no turn recorded disposition ${JSON.stringify(wanted)} (saw ${JSON.stringify(actual.dispositions ?? [])})`);
+    }
   }
   if (expected.noTruncatedAgentLine === true) {
     const playouts = actual.playouts ?? [];

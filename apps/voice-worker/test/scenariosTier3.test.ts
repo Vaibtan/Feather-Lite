@@ -156,3 +156,33 @@ describe("verdictFor — a known-red scenario is a tripwire, not a permanent fai
   });
 });
 
+describe("checkExpectedLedger — dispositions (D4: the hold scenario expects a `wait`)", () => {
+  const base = { finalOutcome: null, tools: [], agentLines: [], playouts: [] };
+
+  it("FAILS when the wait never happened, which is the whole point of asserting it", () => {
+    // Written because the first version of this check passed on `["respond","respond","respond"]`:
+    // the edit that added the expectation never landed, and a green run said the hold produced a
+    // wait when no turn had. A silence is also what a slow model looks like.
+    const out = checkExpectedLedger({ finalOutcome: null, tools: [], dispositions: ["wait"] }, { ...base, dispositions: ["respond", "respond", "respond"] });
+    expect(out).toHaveLength(1);
+    expect(out[0]).toContain('no turn recorded disposition "wait"');
+  });
+
+  it("passes when one turn recorded it", () => {
+    expect(checkExpectedLedger({ finalOutcome: null, tools: [], dispositions: ["wait"] }, { ...base, dispositions: ["respond", "wait", "respond"] })).toEqual([]);
+  });
+
+  it("fails when the ledger returned no dispositions at all, rather than passing vacuously", () => {
+    const out = checkExpectedLedger({ finalOutcome: null, tools: [], dispositions: ["wait"] }, base);
+    expect(out).toHaveLength(1);
+  });
+
+  it("says nothing when the scenario does not ask about dispositions", () => {
+    expect(checkExpectedLedger({ finalOutcome: null, tools: [] }, { ...base, dispositions: ["respond"] })).toEqual([]);
+  });
+
+  it("the hold scenario is the one that asks for a wait", () => {
+    expect(scenarioById("hold-request")?.expected.dispositions).toEqual(["wait"]);
+  });
+});
+

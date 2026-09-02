@@ -132,7 +132,22 @@ const playouts = detail.event_timeline
   .map((e) => ({ atMs: Date.parse(e.created_at), interrupted: e.payload["interrupted"] === true }))
   .filter((p) => Number.isFinite(p.atMs));
 
-const failures = checkExpectedLedger(scenario.expected, { finalOutcome: detail.conversation.final_outcome, tools, agentLines, playouts });
+/**
+ * What the control plane decided about each turn (issue #1, D1). Read from `/latency`, which is the
+ * per-turn seam; the conversation detail is per-event and has no turn rows.
+ */
+const dispositions = await (async () => {
+  try {
+    const res = await fetch(`${CONTROL_PLANE_URL}/api/conversations/${call.conversationId}/latency`, { headers: harnessJsonHeaders() });
+    if (!res.ok) return [];
+    const rows = (await res.json()) as Array<{ disposition: string | null }>;
+    return rows.map((r) => r.disposition).filter((d): d is string => d !== null);
+  } catch {
+    return [];
+  }
+})();
+
+const failures = checkExpectedLedger(scenario.expected, { finalOutcome: detail.conversation.final_outcome, tools, agentLines, playouts, dispositions });
 
 /** D4's six numbers, from the stretches this call actually produced. */
 const agent = withPlayoutTruth(speechWindows(call.rmsSamples), playouts);
@@ -241,6 +256,7 @@ const report = {
     not_yet_asserted: scenario.notYetAsserted ?? [],
   },
   turn_taking: metrics,
+  dispositions,
   slo,
   compliance,
   /**

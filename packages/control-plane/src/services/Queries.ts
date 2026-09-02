@@ -223,6 +223,7 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
           turnId: string;
           startedAt: Date;
           status: string;
+          disposition: string | null;
           state: string | null;
           eouDelayMs: number | null;
           transcriptionDelayMs: number | null;
@@ -235,6 +236,7 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
           SELECT t.turn_id,
                  t.started_at,
                  t.status,
+                 t.result->>'disposition'                          AS disposition,
                  t.result->>'newState'                             AS state,
                  (t.result->>'eou_delay_ms')::float8               AS eou_delay_ms,
                  (t.result->>'transcription_delay_ms')::float8     AS transcription_delay_ms,
@@ -302,6 +304,7 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
             turn_id: r.turnId,
             started_at: r.startedAt.toISOString(),
             status: r.status,
+            disposition: r.disposition,
             state: r.state,
             eou_delay_ms: eou,
             transcription_delay_ms: stt,
