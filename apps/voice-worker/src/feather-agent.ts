@@ -144,27 +144,65 @@ export class FeatherAgent extends voice.Agent {
   }
 
   /**
-   * `tts_metrics` from the session: the last piece of the turn's waterfall. Reporting here means one
-   * signal per turn carrying all three worker-side numbers, rather than a channel per metric.
+   * `tts_metrics` from the session, **accumulated per turn rather than posted per segment** (W2).
+   *
+   * Read from the installed 1.6.4 rather than assumed: `tts/tts.js` calls its `emit()` when a chunk
+   * arrives with `audio.final` — the end of one segment's synthesis — and then resets `ttfb`,
+   * `audioDurationMs` and `#startedHrTime` for the next. A turn the framework splits into three
+   * sentences therefore raises three events, each describing one sentence.
+   *
+   * This posted a `turn_metrics` signal per event, and the control plane merges each into the same
+   * turn row, so **the last segment's numbers won**. `tts_ttfb_ms` in the ledger was the time to the
+   * last sentence's first byte, not the turn's; `tts_audio_ms` and `tts_chars` were that sentence's
+   * alone, which made the chars-per-second heuristic a measure of sentence length. The 385 ms p50 in
+   * the N=10 table is a last-segment number.
+   *
+   * So: the **first** segment's TTFB, because time-to-first-byte for a turn is when the borrower
+   * first hears anything; summed audio and characters, because those are quantities of a turn's
+   * whole speech; and one signal, flushed when the turn's playout is reported, which is the moment
+   * the turn has finished speaking.
    */
-  async onTtsMetrics(m: { ttfbMs?: number | undefined; audioDurationMs?: number | undefined; charactersCount?: number | undefined }): Promise<void> {
+  private ttsAccum = new Map<string, { ttfbMs?: number; audioMs: number; chars: number }>();
+
+  onTtsMetrics(m: { ttfbMs?: number | undefined; audioDurationMs?: number | undefined; charactersCount?: number | undefined }): void {
     const turnId = this.currentTurnId;
     if (!turnId) return; // the opening and other say()s are not control-plane turns
     this.ttsProducedAudio.add(turnId);
+    const acc = this.ttsAccum.get(turnId) ?? { audioMs: 0, chars: 0 };
+    // First one wins: `ttfbMs` is per segment, and the turn's is the first segment's.
+    if (acc.ttfbMs === undefined && m.ttfbMs !== undefined && m.ttfbMs >= 0) acc.ttfbMs = m.ttfbMs;
+    acc.audioMs += m.audioDurationMs ?? 0;
+    acc.chars += m.charactersCount ?? 0;
+    this.ttsAccum.set(turnId, acc);
+  }
+
+  /**
+   * Post one turn's worker-side waterfall: the EOU numbers measured before the turn existed, and the
+   * TTS numbers accumulated across its segments (W2).
+   *
+   * Called when the turn's playout is reported, which is after its speech is over — so the sum is
+   * complete. A turn that produced no TTS at all still posts its EOU numbers, because a turn whose
+   * synthesis failed is exactly the one whose latency an operator wants to see.
+   */
+  private async flushTurnMetrics(turnId: string): Promise<void> {
+    const acc = this.ttsAccum.get(turnId);
+    this.ttsAccum.delete(turnId);
     const eou = this.pendingEou;
     this.pendingEou = null;
+    if (!acc && !eou) return;
     await this.deps.client
       .signal(this.deps.conversationId, {
         kind: "turn_metrics",
         turn_id: turnId,
         ...(eou?.eouDelayMs !== undefined ? { eou_delay_ms: eou.eouDelayMs } : {}),
         ...(eou?.transcriptionDelayMs !== undefined ? { transcription_delay_ms: eou.transcriptionDelayMs } : {}),
-        ...(m.ttfbMs !== undefined ? { tts_ttfb_ms: m.ttfbMs } : {}),
-        // D5: how much audio was produced for how many characters. Together these give a
-        // chars-per-second reading, which is a *heuristic* for "did the voice sound broken" — a
-        // wildly slow or fast turn shows up as an outlier — and deliberately not a quality claim.
-        ...(m.audioDurationMs !== undefined ? { tts_audio_ms: m.audioDurationMs } : {}),
-        ...(m.charactersCount !== undefined ? { tts_chars: m.charactersCount } : {}),
+        ...(acc?.ttfbMs !== undefined ? { tts_ttfb_ms: acc.ttfbMs } : {}),
+        // D5: how much audio was produced for how many characters, over the whole turn now. Together
+        // they give a chars-per-second reading, which is a *heuristic* for "did the voice sound
+        // broken" — a wildly slow or fast turn shows up as an outlier — and deliberately not a
+        // quality claim. Per segment it was measuring sentence length instead.
+        ...(acc && acc.audioMs > 0 ? { tts_audio_ms: acc.audioMs } : {}),
+        ...(acc && acc.chars > 0 ? { tts_chars: acc.chars } : {}),
       })
       .catch((e) => this.deps.log("turn_metrics signal failed", { error: String(e) }));
   }
@@ -192,6 +230,9 @@ export class FeatherAgent extends voice.Agent {
         { provider: `tts:${process.env["STT_TTS_PROVIDER"] === "plugins" ? "deepgram" : "livekit-inference"}`, kind: "timeout", stage: "tts", message: `no audio produced for turn ${turnId}`, conversation_id: this.deps.conversationId },
       ]);
     }
+    // The turn has finished speaking, so its segments are all in: post the accumulated waterfall
+    // before the playout, so the ledger has the turn's numbers by the time the guard reads them.
+    await this.flushTurnMetrics(turnId);
     await this.deps.client
       .signal(this.deps.conversationId, {
         kind: "playout",

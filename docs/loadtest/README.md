@@ -147,6 +147,39 @@ before running on VAD anyway.
 The session now asks for `vad`, which is what it was always getting — so the config and the
 behaviour agree for the first time, and Phase 1's turn-taking baseline can be labelled honestly.
 
+### W2 — the TTS numbers were the last sentence's, and now they are the turn's
+
+Re-run on the same box within the hour, worker rebuilt, nothing else changed.
+
+| | before (per segment) | **after (per turn)** |
+|---|---:|---:|
+| `tts_ttfb_ms` p50 / p95 (harness) | 392 / 413 ms | **375 / 456 ms** |
+| `tts_ttfb_ms` p50 / p95 (ledger) | 392 / 413 ms | **375 / 456 ms** |
+| chars/s median | 12.8 | 12.8 |
+| **chars/s turns beyond ±40 %** | **5 of 15** | **0 of 15** |
+| equivalence | 5/5 | 5/5 |
+| STT WER p50 / p95 | 0.000 / 0.111 | 0.000 / 0.111 |
+| silent playouts | 0 of 15 | 0 of 15 |
+
+**The chars-per-second line is the finding, not the TTFB.** `tts/tts.js` emits one
+`metrics_collected` per synthesised segment and resets its accumulators between them, so a turn
+split into three sentences raised three events and the last one won. `tts_chars` was therefore one
+sentence's length and `tts_audio_ms` one sentence's audio — and the ratio of two quantities from the
+same sentence looks fine until you compare it against a median taken over turns of different shapes.
+Before the change, **five of fifteen turns** read as outliers at +74 % to +76 %. After it, **none**
+do, from the same five calls speaking the same script. The heuristic was measuring how the framework
+had chosen to split the sentences.
+
+`tts_ttfb_ms` p50 moves 392 → 375 ms because the turn's first byte is by definition no later than
+its last segment's, and p95 widens 413 → 456 ms for the same reason — the first segment carries
+whatever the stream's initial connect cost, which the later segments never see. Both numbers now
+mean "when the borrower first heard this turn", which is what a latency waterfall is for and what
+the N=10 table's 385 ms was not.
+
+Turn latency p50/p95 3 009 / 3 313 ms and `total_ms` 2 405 / 2 746 ms on this run; the tail is
+calmer than the previous hour's (`ttft_ms` p95 1 236 against 3 651), which is OpenAI's variance and
+not this change.
+
 ### And the reason this run took two attempts
 
 The first attempt refused to start: `no online worker is reporting its mode`, with
