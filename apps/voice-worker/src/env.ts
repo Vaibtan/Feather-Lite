@@ -256,7 +256,15 @@ export const JOB_MEMORY_LIMIT_MB: CountSpec = {
  */
 export const STT_FILLER_WORDS: FlagSpec = {
   name: "WORKER_STT_FILLER_WORDS",
-  fallback: false,
+  /**
+   * **On**, measured rather than assumed.
+   *
+   * It was off while its cost was unknown. The cost is what it does to the word-error gate, and two
+   * N=5 fleet runs answered that: **WER p50/p95 0 / 0.1111 in both arms**, identical. With it off,
+   * D1's `resume` can never fire in the shipping configuration — the backchannel is not transcribed
+   * at all — so leaving it off ships a disposition that is dead code.
+   */
+  fallback: true,
   means: "transcribe filler words and backchannels, which D1's `resume` classifier needs as input",
 };
 

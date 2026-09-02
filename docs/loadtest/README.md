@@ -180,6 +180,31 @@ Turn latency p50/p95 3 009 / 3 313 ms and `total_ms` 2 405 / 2 746 ms on this ru
 calmer than the previous hour's (`ttft_ms` p95 1 236 against 3 651), which is OpenAI's variance and
 not this change.
 
+## 2026-09-02 — filler words cost nothing on the WER gate, so they are on by default now
+
+`WORKER_STT_FILLER_WORDS` shipped off while its cost was unknown, and with it off D1's `resume` can
+never fire — the backchannel is not transcribed at all, so the disposition is dead code in the
+shipping configuration. Two N=5 fleet runs measured the cost:
+
+| arm | equivalent | silent playouts | **WER p50 / p95** | TTS websocket timeouts |
+|---|---:|---:|---:|---:|
+| fillers **off** | 4/5 | 0/15 | **0 / 0.1111** | 0 |
+| fillers **on** | 3/5 | 1/14 | **0 / 0.1111** | 5 |
+
+**The word-error gate is identical in both arms**, which is the question that was open. The default
+is now on.
+
+The equivalence difference is **not** attributable: both arms ran while Deepgram's TTS websocket was
+timing out (a first attempt at the "on" arm was discarded outright — 0/5 equivalent, 50 % silent
+playouts and **20** `Deepgram TTS WebSocket connect timeout` errors — and is not in the table). The
+last clean equivalence evidence on this stack is the pair of **5/5** runs earlier in the day
+(`phase-f-owed` and `phase2-d1`), both with 0/15 silent playouts.
+
+**So Phase 2's "N=5 equivalence twice" gate is not met on the final tree**, and the reason is the
+provider rather than the diff: 5 and 20 TTS connect timeouts in runs where every other signal —
+WER 0.000 p50, the turn waterfall, the ledger shapes — looks normal. It is owed, and it needs a
+window where Deepgram's TTS is stable.
+
 ## 2026-09-02 — D1 `resume` fires, and its gate is measured and NOT met: p50 378 ms against < 300 ms
 
 Four blocking links, all found by running it and all now fixed. The gate has a number for the first

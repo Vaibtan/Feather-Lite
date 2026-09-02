@@ -192,7 +192,7 @@ services:
       WORKER_INTERRUPTION_MIN_DURATION_MS: ${WORKER_INTERRUPTION_MIN_DURATION_MS:-500}
       # D1's `resume` needs backchannels transcribed; Deepgram filters them by default, which is why
       # the "Mm-hm." line scores WER 1.000 while every other line in the same call scores 0.
-      WORKER_STT_FILLER_WORDS: ${WORKER_STT_FILLER_WORDS:-false}
+      WORKER_STT_FILLER_WORDS: ${WORKER_STT_FILLER_WORDS:-true}
       # The point at which this worker asks the SFU to prefer another one. Listed because the
       # admitted concurrency is `floor(WORKER_MAX_JOBS x this)`, not `WORKER_MAX_JOBS` — the
       # arithmetic the N=10 acceptance run walked into — and `composeLimits.test.ts` reads it from
