@@ -17,6 +17,7 @@ import {
   SchedulingService,
   ScriptedTurnDeciderLive,
   WorkflowService,
+  withFrozenClock,
   FROZEN_NOW,
 } from "../../src/index.js";
 import { makeInfraLayer, makeRuntime, truncateAll } from "./harness.js";
@@ -231,41 +232,44 @@ describe("scheduled-action worker", () => {
 
 describe("outbox worker", () => {
   /**
-   * Skipped 2026-09-01 (issue #3). **The coverage is gone, not merely failing.**
+   * Fixed 2026-09-02 (issue #3, C14 — the user approved the second candidate).
    *
-   * This test pins two clocks and not the third. `now` below governs `startCall` and
-   * `outbox.runOnce`, but `processTurn` takes no `now` — and the opt-out it sends finalizes the
-   * call, which is where `Outbox.enqueuePostCall` stamps the jobs with `availableAt` from the
-   * **service clock**, i.e. real wall-clock time. The claim query is `available_at <= ${now}`
-   * (`repos/scheduling.ts:117`), so the jobs are available today, `runOnce` is asked for work
-   * available in August 2026, and it correctly claims nothing: `expected 0 to be greater than or
-   * equal to 3`. It passed only while real time was before the pinned instant.
+   * It used to pin two clocks and not the third. `now` governed `startCall` and `outbox.runOnce`,
+   * but `processTurn` takes none — and the opt-out it sends finalizes the call, which is where
+   * `Outbox.enqueuePostCall` stamps `available_at` from the **service clock**, i.e. real wall-clock
+   * time. The claim query is `available_at <= ${now}`, so the jobs were available today while
+   * `runOnce` was asked for work available in August 2026, and it correctly claimed nothing:
+   * `expected 0 to be greater than or equal to 3`. It passed only while real time was before the
+   * pinned instant, and stopped on 2026-08-16.
    *
-   * Skipped rather than left red because it was the only failure in `pnpm test:db` and in CI's
-   * `check` job, and a permanently red CI cannot tell a regression from the status quo.
+   * So the fix is not to unpin the date — the instant is load-bearing, `09:00Z == 14:30 IST` being
+   * inside this borrower's TCPA window where 14:00 EDT is not — but to give the whole test **one**
+   * clock. `withFrozenClock` is the seam the scenario runner already uses; under it the explicit
+   * `now` arguments are redundant and are dropped, which is the point: there is now nothing to keep
+   * in step, because there is only one clock to read.
    *
-   * **Do not simply unpin the date.** The instant is load-bearing for the borrower's TCPA window —
-   * see the comment inside — so a fix has to keep 09:00Z-in-Asia/Kolkata while making one clock
-   * govern the whole test. Issue #3 sets out the three candidates.
+   * The `available_at` assertion below is the guard. It is the value that diverged, and asserting
+   * it makes a future divergence fail on the cause rather than on a count of claimed jobs three
+   * layers away.
    */
-  it.skip("processes SUMMARY / EVALUATION / VECTOR_INDEX for a completed call and records OUTBOX_PROCESSED", async () => {
+  it("processes SUMMARY / EVALUATION / VECTOR_INDEX for a completed call and records OUTBOX_PROCESSED", async () => {
+    // 14:00 EDT == 23:30 IST -> outside window; 09:00Z == 14:30 IST is inside it.
+    const FROZEN = DateTime.unsafeMake("2026-08-16T09:00:00Z");
     const out = await rt.runPromise(
-      Effect.gen(function* () {
+      withFrozenClock(FROZEN)(Effect.gen(function* () {
         const { borrowerId, cpId } = yield* seedBorrower("Outbox Person", "Asia/Kolkata", "+919800002003");
         const wf = yield* WorkflowService;
         const orch = yield* Orchestrator;
         const outbox = yield* OutboxService;
         const q = yield* Queries;
-        // 14:00 EDT == 23:30 IST -> outside window; use a time inside IST window: 09:00Z == 14:30 IST
-        const now = DateTime.unsafeMake("2026-08-16T09:00:00Z");
-        const first = yield* wf.startCall({ borrowerId, contactPointId: cpId, channel: "simulated", now });
+        const first = yield* wf.startCall({ borrowerId, contactPointId: cpId, channel: "simulated" });
         yield* orch.processTurn({ conversationId: first.conversationId, turnId: "t1", userText: "please stop calling me" }, () => Effect.void);
-        const results = yield* outbox.runOnce(20, now);
-        const again = yield* outbox.runOnce(20, now);
+        const results = yield* outbox.runOnce(20);
+        const again = yield* outbox.runOnce(20);
         const detail = yield* q.conversationDetail(first.conversationId);
         const jobs = yield* q.outboxJobsFor(first.conversationId);
-        return { results, again, detail, jobs };
-      }),
+        return { results, again, detail, jobs, frozen: DateTime.toDateUtc(FROZEN) };
+      })),
     );
     // Earlier tests in this file left jobs too; every claimed job must be DONE and none may remain.
     expect(out.results.length).toBeGreaterThanOrEqual(3);
@@ -276,5 +280,9 @@ describe("outbox worker", () => {
     expect(processed).toHaveLength(3);
     const evaluation = out.jobs.find((j) => j.jobType === "EVALUATION");
     expect(evaluation?.result["compliance_ok"]).toBe(true);
+    // The value that diverged, asserted directly: every job was stamped from the same instant the
+    // claim asks about. Without this, a third clock creeping back in would fail as "0 jobs claimed"
+    // and send the next reader looking at the claim query.
+    expect(out.jobs.map((j) => j.availableAt.toISOString())).toEqual(out.jobs.map(() => out.frozen.toISOString()));
   });
 });
