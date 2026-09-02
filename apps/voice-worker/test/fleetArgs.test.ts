@@ -16,7 +16,7 @@ const ok = (argv: string[]) => {
 describe("parseFleetArgs", () => {
   it("takes the documented flags, with the documented defaults", () => {
     const a = ok(["--label", "n5-baseline"]);
-    expect(a).toEqual({ calls: 5, maxWer: 0.2, label: "n5-baseline", inProc: false, allowDev: false, allowNoShedding: false });
+    expect(a).toEqual({ calls: 5, maxWer: 0.2, label: "n5-baseline", inProc: false, allowDev: false, allowNoShedding: false, allowShed: false });
   });
 
   it("reads values and booleans together", () => {
@@ -82,5 +82,14 @@ describe("reportFileName", () => {
   it("puts the label in the name, so two runs a day cannot collide", () => {
     expect(reportFileName("2026-09-02", 5, "before-w2")).toBe("2026-09-02-tier2-n5-before-w2.json");
     expect(reportFileName("2026-09-02", 5, "after-w2")).toBe("2026-09-02-tier2-n5-after-w2.json");
+  });
+});
+
+describe("--allow-shed (H4)", () => {
+  it("is off unless asked for, so a run past the ceiling refuses", () => {
+    // The capacity gate was a warning, and a warning is what the first N=10 attempt printed and was
+    // read past: nine calls served, the tenth `NEVER_SERVED`, and the run reported a WER breach.
+    expect(ok(["--label", "x"]).allowShed).toBe(false);
+    expect(ok(["--label", "x", "--allow-shed"]).allowShed).toBe(true);
   });
 });

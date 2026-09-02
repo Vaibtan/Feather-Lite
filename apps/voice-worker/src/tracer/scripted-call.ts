@@ -37,7 +37,7 @@ import { AccessToken, AgentDispatchClient, RoomServiceClient } from "livekit-ser
 import { wordErrorRate } from "@feather-lite/domain";
 import { buildSpeechStack, speechProvider } from "../speech.js";
 import { synthesizeCached } from "./line-cache.js";
-import { harnessJsonHeaders } from "@feather-lite/load-test/harness-http";
+import { harnessHeaders, harnessJsonHeaders } from "@feather-lite/load-test/harness-http";
 
 /**
  * A different voice than the agent's, so a human listening can tell the two apart.
@@ -226,7 +226,11 @@ const bootstrapRoom = async (opts: ScriptedCallOptions): Promise<{ roomName: str
     return { roomName, token: await at.toJwt(), conversationId: null };
   }
 
-  const dir = (await (await fetch(`${opts.controlPlaneUrl}/api/borrowers`)).json()) as Array<{ borrower_id: string; name: string; contact_points: Array<{ contact_point_id: string }> }>;
+  // Through `harnessHeaders`, like every other request this harness makes (H5). A bare `fetch` here
+  // is exempt from nothing: it is the one call in the run that the server's own per-IP budget can
+  // shed, and a run that cannot read the borrower directory fails in a way that looks like a missing
+  // fixture rather than a 429.
+  const dir = (await (await fetch(`${opts.controlPlaneUrl}/api/borrowers`, { headers: harnessHeaders() })).json()) as Array<{ borrower_id: string; name: string; contact_points: Array<{ contact_point_id: string }> }>;
   const b = dir.find((x) => x.name === opts.borrowerName);
   if (!b) throw new Error(`borrower ${opts.borrowerName} not found in ${opts.controlPlaneUrl}/api/borrowers`);
   const res = await fetch(`${opts.controlPlaneUrl}/api/voice/sessions`, {

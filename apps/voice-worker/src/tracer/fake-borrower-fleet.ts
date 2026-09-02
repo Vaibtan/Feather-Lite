@@ -156,10 +156,29 @@ if (workerMode.idleProcesses !== null && workerMode.idleConfigured !== null && w
   log(`warning: the warm pool is ${String(workerMode.idleProcesses)} of a configured ${String(workerMode.idleConfigured)}; the first calls will pay a cold start.`);
 }
 if (workerMode.maxJobs !== null && CALLS > Math.floor(workerMode.maxJobs * 0.75)) {
-  // Not a refusal: the threshold is a margin, not a hard ceiling, and a run that is *meant* to find
-  // the shedding point is a legitimate run. But an unexpected "one call never got a worker" should
-  // not have to be diagnosed twice.
-  log(`warning: ${String(CALLS)} calls exceeds the worker's admitted concurrency (~${String(Math.floor(workerMode.maxJobs * 0.75))} at max_jobs=${String(workerMode.maxJobs)}); expect the surplus to be refused. Raise WORKER_MAX_JOBS to carry them.`);
+  /**
+   * A refusal now, not a warning (H4).
+   *
+   * It was a warning on the argument that a run *meant* to find the shedding point is legitimate —
+   * which is true, and is what `--allow-shed` is for. What the warning could not stop is the far
+   * commoner case: a run configured past the ceiling by accident, whose surplus calls are refused,
+   * and whose report then reads as a **quality** failure rather than a capacity one.
+   *
+   * Measured, on the first N=10 acceptance attempt (2026-09-01): `WORKER_MAX_JOBS=10` served nine
+   * calls, the tenth finalized `NEVER_SERVED` with no transcript, and the harness scored its three
+   * lines at WER 1.000 — so the run came back "8/10 with the WER gate breached" and the gate that
+   * actually failed was the ceiling. The warning was printed and read past.
+   */
+  const admitted = Math.floor(workerMode.maxJobs * 0.75);
+  const detail =
+    `${String(CALLS)} calls exceeds the worker's admitted concurrency (~${String(admitted)} at max_jobs=${String(workerMode.maxJobs)}): ` +
+    `the surplus is refused, finalizes NEVER_SERVED with no transcript, and scores WER 1.000 — so the run reads as a quality failure rather than a capacity one.`;
+  if (!ARGS.allowShed) {
+    console.error(`[fleet] refusing to start: ${detail}`);
+    console.error(`[fleet] raise WORKER_MAX_JOBS to ${String(Math.ceil(CALLS / 0.75))} to carry ${String(CALLS)} calls, or pass --allow-shed to measure the shedding point on purpose.`);
+    process.exit(1);
+  }
+  log(`warning (--allow-shed): ${detail}`);
 }
 
 const fixturesRes = await fetch(`${CONTROL_PLANE_URL}/api/demo/load-fixtures`, {
@@ -260,13 +279,29 @@ const turnMs = results.flatMap((r) => r.turnLatencies.map((t) => t.ms)).sort((a,
 const turnPct = (p: number) => percentile(turnMs, p) ?? 0;
 const unanswered = results.reduce((n, r) => n + r.unansweredTurns.length, 0);
 
-// Every borrower line across the fleet, so the gate is over the whole run rather than per call.
-const werValues = results
+/**
+ * Every borrower line across the fleet — **from the calls a worker actually served** (H4).
+ *
+ * A call the SFU never assigned finalizes `NEVER_SERVED` with no transcript, so every one of its
+ * lines scores WER 1.000: perfect deletions against a hypothesis nobody produced. That is not a
+ * transcription result, and folding it into the gate turns a capacity failure into a quality one.
+ *
+ * Measured, on the first N=10 acceptance attempt (2026-09-01): nine calls served, the tenth never
+ * assigned, and the run reported "8/10 with the WER gate breached" — a breach caused entirely by the
+ * call that had no audio to transcribe.
+ *
+ * "Served" is `agentAudioFrames > 0`: the borrower heard the agent speak, so there was something to
+ * transcribe. The excluded calls are counted and reported rather than quietly dropped, because a run
+ * that silently narrows its own denominator is the other way to get a flattering number.
+ */
+const servedResults = results.filter((r) => r.agentAudioFrames > 0);
+const neverServedCalls = results.length - servedResults.length;
+const werValues = servedResults
   .flatMap((r) => r.werLines.map((l) => l.wer))
   .filter((v): v is number => v !== null)
   .sort((a, b) => a - b);
 const werPct = (p: number) => percentile(werValues, p);
-const worstLine = results.flatMap((r) => r.werLines).reduce<{ turn: string; wer: number; reference: string; hypothesis: string } | null>(
+const worstLine = servedResults.flatMap((r) => r.werLines).reduce<{ turn: string; wer: number; reference: string; hypothesis: string } | null>(
   (worst, l) => (l.wer !== null && (worst === null || l.wer > worst.wer) ? { turn: l.turn, wer: l.wer, reference: l.reference, hypothesis: l.hypothesis } : worst),
   null,
 );
@@ -312,6 +347,9 @@ console.log(`  turn latency  n       ${turnMs.length} (${unanswered} unanswered)
 console.log(`  turn latency p50/p95  ${turnPct(50)}ms / ${turnPct(95)}ms`);
 console.log(`  stt wer  n            ${werValues.length}${unmatched > 0 ? `  (${unmatched} unmatched transcript(s) — pairing may be off)` : ""}`);
 console.log(`  stt wer  p50/p95      ${werPct(50) === null ? "n/a" : werPct(50)!.toFixed(3)} / ${werP95 === null ? "n/a" : werP95.toFixed(3)}   (gate ${MAX_WER}${werBreached ? " — BREACHED" : ""})`);
+if (neverServedCalls > 0) {
+  console.log(`  stt wer  excluded     ${String(neverServedCalls)} call(s) no worker served — no transcript to score, so they are not a transcription result (H4)`);
+}
 if (worstLine && worstLine.wer > 0) {
   console.log(`  stt wer  worst line   ${worstLine.wer.toFixed(3)} (${worstLine.turn})`);
   console.log(`      ref: ${JSON.stringify(worstLine.reference)}`);
@@ -349,6 +387,8 @@ const report = {
   worker: { ...workerMode, allow_dev: ALLOW_DEV, allow_no_shedding: ALLOW_NO_SHEDDING },
   calls: CALLS,
   agent_hung_up: hungUp,
+  /** Calls no worker served, excluded from the WER denominator because they have no transcript (H4). */
+  never_served_calls: neverServedCalls,
   equivalence_green: green,
   duration_ms: { p50: pct(50), p95: pct(95), max: durations.at(-1) ?? 0 },
   turn_latency_ms: { n: turnMs.length, unanswered, p50: turnPct(50), p95: turnPct(95), max: turnMs.at(-1) ?? 0 },

@@ -28,6 +28,7 @@ const BOOLEAN_FLAGS = {
   "in-proc": "run the borrowers in this process instead of a forked child",
   "allow-dev": "measure a dev-mode worker on purpose",
   "allow-no-shedding": "measure a worker that cannot shed load on purpose",
+  "allow-shed": "run more calls than the worker will admit, to measure the shedding point on purpose (H4)",
 } as const;
 
 export interface FleetArgs {
@@ -38,6 +39,8 @@ export interface FleetArgs {
   readonly inProc: boolean;
   readonly allowDev: boolean;
   readonly allowNoShedding: boolean;
+  /** Deliberately running past the worker's admitted concurrency (H4). */
+  readonly allowShed: boolean;
 }
 
 export type ParsedFleetArgs = { readonly ok: true; readonly args: FleetArgs } | { readonly ok: false; readonly message: string };
@@ -113,6 +116,7 @@ export const parseFleetArgs = (argv: ReadonlyArray<string>): ParsedFleetArgs => 
       inProc: booleans.has("in-proc"),
       allowDev: booleans.has("allow-dev"),
       allowNoShedding: booleans.has("allow-no-shedding"),
+      allowShed: booleans.has("allow-shed"),
     },
   };
 };
