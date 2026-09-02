@@ -180,7 +180,51 @@ Turn latency p50/p95 3 009 / 3 313 ms and `total_ms` 2 405 / 2 746 ms on this ru
 calmer than the previous hour's (`ttft_ms` p95 1 236 against 3 651), which is OpenAI's variance and
 not this change.
 
-## 2026-09-02 — D1 `resume`: the chain, link by link, and which links are fixed
+## 2026-09-02 — D1 `resume` fires, and its gate is measured and NOT met: p50 378 ms against < 300 ms
+
+Four blocking links, all found by running it and all now fixed. The gate has a number for the first
+time, and the number does not pass.
+
+| # | link | what was wrong | fixed by |
+|---|---|---|---|
+| 1 | the harness speaks a backchannel | — | — |
+| 2 | the transcriber emits it | Deepgram filters fillers: **WER 1.000, 0 finals** on the "Mm-hm." line while every other line scored 0 | `WORKER_STT_FILLER_WORDS=true` |
+| 3 | it arrives as its own utterance | the endpointer merged it: `"Mhmm. Actually,"` as one final, which carries content | 3 500 ms gap in the scenario |
+| 4 | the lexicon recognises it | Deepgram writes **"Mhmm."**; the lexicon had `mhm`, `mmhm`, `mm` — not `mhmm` | the transcriber's own spellings, with a table |
+| 5 | the classifier sees it at all | **a backchannel produces no interim** — six interims in a run, none of them the backchannel; it is too short to publish before it closes | read the **final** too (deviation from D1, below) |
+
+### The deviation from D1, and why
+
+D1 says `resume` runs "on the interim transcript". Measured, that cannot work: `"Mhmm."` reaches the
+ledger as a **final** with no interim event ever emitted for it. A classifier that only reads interims
+cannot see the one kind of utterance it exists for.
+
+The intent of "interim" is *do not wait for the turn to be settled*, and that intent is kept: reading
+the final as it arrives still beats the 2 000 ms false-interruption timeout by more than a second.
+`pausedSpeech` remains the guard either way — if nothing is paused there is nothing to resume, so a
+final arriving after a real interruption does nothing.
+
+### The gate
+
+```
+resumed on backchannel {"transcript":"Mhmm.","pausedForMs":402}
+```
+
+Four measurements: **147, 354, 402, 463 ms → p50 378 ms**. The gate is **< 300 ms**, so it is **not
+met**. Against the 2 000 ms timeout it replaces this is a ~5× improvement, and it is still short of
+what D1 asks for.
+
+The remaining latency is **Deepgram's finalisation time for a very short utterance** — the price of
+reading the final, which link 5 shows is the only thing there is to read. Closing the last ~80 ms is
+an STT-configuration question (endpointing/utterance-end settings), not a classifier one.
+
+**The first version of this number was wrong and worth recording as a lesson.** It read
+`pausedForMs: 0` on every resume, because the clock was started in the same handler that stopped it.
+It is now measured from `agent_state_changed` leaving `"speaking"` — when the borrower actually
+starts hearing silence, which is what the gate is about. A resume whose pause was never observed
+reports nothing rather than zero.
+
+## 2026-09-02 — (superseded) D1 `resume`: the chain, link by link
 
 **This supersedes the section below it, which was written on an inference that later evidence
 refined.** That section concluded "the SDK never pauses on this configuration". The stronger reading

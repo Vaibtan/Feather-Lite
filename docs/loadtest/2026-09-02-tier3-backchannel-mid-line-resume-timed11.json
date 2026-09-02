@@ -1,0 +1,110 @@
+{
+  "tier": "3-sim",
+  "scenario": "backchannel-mid-line",
+  "seed": {
+    "given": "11",
+    "resolved": 11
+  },
+  "persona": null,
+  "interruption_mode": "vad",
+  "label": "resume-timed11",
+  "conversation_id": "5860f9fb-37ac-42a5-86d4-ddae2fb811ea",
+  "harness": "sim",
+  "expected": {
+    "failures": [
+      "1 agent line(s) were cut off, expected none"
+    ],
+    "verdict": "failed as expected — VAD stops the agent for a backchannel, which is the false interruption D4 named; D5's `interruption.minDuration` sweep (issue #1, Phase 2) is what changes it",
+    "exit_code": 0,
+    "expected_to_fail": {
+      "reason": "VAD stops the agent for a backchannel, which is the false interruption D4 named",
+      "until": "D5's `interruption.minDuration` sweep (issue #1, Phase 2)",
+      "matches": {}
+    },
+    "outcome": "PROMISE_TO_PAY",
+    "tools": [
+      "confirm_right_party",
+      "propose_promise_to_pay",
+      "record_promise_to_pay"
+    ],
+    "not_yet_asserted": [
+      "a recorded `resume` decision (D4) — `resume` is issue #1's D2 and does not exist yet"
+    ]
+  },
+  "turn_taking": {
+    "response_rate": 0.5,
+    "yield_rate": 0.3333,
+    "yield_latency_ms": 736,
+    "false_interrupt_rate": null,
+    "agent_interrupt_rate": 0,
+    "selectivity": null,
+    "counts": {
+      "lines": 4,
+      "interruptions": 3,
+      "non_directed": 0,
+      "non_directed_during_agent_speech": 0,
+      "unknown_truncation": 1
+    }
+  },
+  "dispositions": [
+    "respond",
+    "respond",
+    "respond",
+    "respond"
+  ],
+  "slo": {
+    "verdict": "breach",
+    "segment": {
+      "channel": null,
+      "decider": null,
+      "calls_requested": 50,
+      "calls_found": 50
+    },
+    "breaches": [
+      "total_ms",
+      "eou_delay_ms",
+      "transcription_delay_ms",
+      "ttft_ms"
+    ],
+    "insufficient": [],
+    "window_conversations": 50,
+    "excluded_by_rule": "harness IS NOT DISTINCT FROM null (Queries.latencyAggregateForSegment)"
+  },
+  "compliance": {
+    "checks": {
+      "compliance.mini_miranda_first": true,
+      "compliance.no_promise_without_readback": true,
+      "compliance.no_protected_before_rpc": true
+    },
+    "failed": [],
+    "count": 3
+  },
+  "entities": {
+    "measured": false,
+    "entity_er": null,
+    "note": "stt.entity_er is D3 (Phase 3); not measured"
+  },
+  "agent_stretches": {
+    "live": 5,
+    "post_hoc": 5
+  },
+  "stt_wer": [
+    {
+      "turn": "yes this is the borrower",
+      "wer": 0
+    },
+    {
+      "turn": "mm-hm (backchannel)",
+      "wer": 1
+    },
+    {
+      "turn": "I can pay 550 on Friday",
+      "wer": 0.1111
+    },
+    {
+      "turn": "yes, that's correct",
+      "wer": 0
+    }
+  ],
+  "duration_ms": 92325
+}

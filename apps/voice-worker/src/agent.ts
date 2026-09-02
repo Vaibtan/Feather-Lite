@@ -329,20 +329,43 @@ export default defineAgent({
     /**
      * D1's `resume`: a backchannel resumes the paused line immediately (issue #1, Phase 2).
      *
-     * On the **interim** transcript, because waiting for the final means waiting out the same delay
-     * this exists to remove. D5.2 measured the alternative first, as the spec requires: raising
+     * **On the interim transcript *and* the final, which is a deliberate deviation from D1.**
+     *
+     * D1 says "run by the worker on the interim transcript". Measured, a backchannel never produces
+     * one: with `filler_words` on, `"Mhmm."` reaches the ledger as a **final** with no interim event
+     * emitted for it at all — six interims in that run, none of them the backchannel. The utterance
+     * is too short for the recogniser to publish anything before it closes. A classifier that only
+     * reads interims therefore cannot see the one kind of utterance it exists for.
+     *
+     * The intent of "interim" is *do not wait for the turn to be settled*, and reading the final as
+     * it arrives still beats the two-second false-interruption timeout by well over a second — which
+     * is what the 300 ms gate is about. `pausedSpeech` is the guard either way: if nothing is paused
+     * there is nothing to resume, so a final that arrives after a real interruption does nothing.
+     *
+     * D5.2 measured the cheaper alternative first, as the spec requires: raising
      * `interruption.minDuration` to 700 ms did not remove the pauses, so the knob was not the fix.
      */
+    /**
+     * When the agent's audio actually stopped, so the resume can be timed against it.
+     *
+     * Measured from the state change rather than from the transcript that triggers the resume: the
+     * first version read `pausedForMs: 0` on every resume, because it started the clock in the same
+     * handler that stopped it. The gate is "resume p50 < 300 ms" and the thing it is asking about is
+     * how long the borrower hears silence, which starts when the agent stops speaking.
+     */
     let pausedAtMs: number | null = null;
+    session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev) => {
+      if (ev.oldState === "speaking" && ev.newState !== "speaking") pausedAtMs = Date.now();
+      if (ev.newState === "speaking") pausedAtMs = null;
+    });
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (ev) => {
-      if (ev.isFinal) {
-        pausedAtMs = null;
+      const activity = (session as unknown as { _activity?: { pausedSpeech?: unknown; startFalseInterruptionTimer?: (ms: number) => void } })._activity;
+      if (!resumeIfBackchannel(ev.transcript, activity)) {
+        if (ev.isFinal) pausedAtMs = null;
         return;
       }
-      const activity = (session as unknown as { _activity?: { pausedSpeech?: unknown; startFalseInterruptionTimer?: (ms: number) => void } })._activity;
-      if (activity?.pausedSpeech != null && pausedAtMs === null) pausedAtMs = Date.now();
-      if (!resumeIfBackchannel(ev.transcript, activity)) return;
-      const pausedFor = pausedAtMs === null ? 0 : Date.now() - pausedAtMs;
+      // Null means the agent was not observed to stop, so there is no honest duration to report.
+      const pausedFor = pausedAtMs === null ? -1 : Date.now() - pausedAtMs;
       pausedAtMs = null;
       log("resumed on backchannel", { transcript: ev.transcript, pausedForMs: pausedFor });
       agent.onResumed(pausedFor);

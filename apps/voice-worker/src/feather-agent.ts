@@ -168,7 +168,10 @@ export class FeatherAgent extends voice.Agent {
    * two-second `falseInterruptionTimeout` is what it has to beat.
    */
   onResumed(pausedForMs: number): void {
-    this.resumes.push(pausedForMs);
+    // -1 means the agent was never observed to stop speaking, so there is no duration to report and
+    // a zero would be a claim rather than a measurement. The resume still happened; only the timing
+    // is unknown, and the ledger says so by omission rather than by inventing a number.
+    if (pausedForMs >= 0) this.resumes.push(pausedForMs);
   }
 
   /** Pause durations of every resume on this call, drained onto the next `turn_metrics`. */

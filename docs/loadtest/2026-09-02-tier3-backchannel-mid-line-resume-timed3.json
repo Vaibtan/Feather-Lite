@@ -7,50 +7,45 @@
   },
   "persona": null,
   "interruption_mode": "vad",
-  "label": "resume-live",
-  "conversation_id": "21c51198-4d6b-409f-ac46-c393e880071a",
+  "label": "resume-timed3",
+  "conversation_id": "5549c88e-5c56-4930-8690-68e0c33e195e",
   "harness": "sim",
   "expected": {
     "failures": [
-      "1 agent line(s) were cut off, expected none"
+      "outcome NO_ANSWER != expected PROMISE_TO_PAY",
+      "tool confirm_right_party missing (saw [])",
+      "0 read-back(s), expected at least 1",
+      "no playout evidence, so 'no truncated agent line' cannot be confirmed (C1: absence is not a pass)"
     ],
-    "verdict": "failed as expected — VAD stops the agent for a backchannel, which is the false interruption D4 named; D5's `interruption.minDuration` sweep (issue #1, Phase 2) is what changes it",
-    "exit_code": 0,
+    "verdict": "failed, and not only in the expected way — 3 other failure(s): outcome NO_ANSWER != expected PROMISE_TO_PAY; tool confirm_right_party missing (saw []); 0 read-back(s), expected at least 1",
+    "exit_code": 1,
     "expected_to_fail": {
       "reason": "VAD stops the agent for a backchannel, which is the false interruption D4 named",
       "until": "D5's `interruption.minDuration` sweep (issue #1, Phase 2)",
       "matches": {}
     },
-    "outcome": "PROMISE_TO_PAY",
-    "tools": [
-      "confirm_right_party",
-      "propose_promise_to_pay",
-      "record_promise_to_pay"
-    ],
+    "outcome": "NO_ANSWER",
+    "tools": [],
     "not_yet_asserted": [
       "a recorded `resume` decision (D4) — `resume` is issue #1's D2 and does not exist yet"
     ]
   },
   "turn_taking": {
-    "response_rate": 0.6667,
-    "yield_rate": null,
+    "response_rate": 0.25,
+    "yield_rate": 0,
     "yield_latency_ms": null,
     "false_interrupt_rate": null,
     "agent_interrupt_rate": 0,
     "selectivity": null,
     "counts": {
-      "lines": 3,
-      "interruptions": 0,
+      "lines": 4,
+      "interruptions": 1,
       "non_directed": 0,
       "non_directed_during_agent_speech": 0,
-      "unknown_truncation": 0
+      "unknown_truncation": 2
     }
   },
-  "dispositions": [
-    "respond",
-    "respond",
-    "respond"
-  ],
+  "dispositions": [],
   "slo": {
     "verdict": "breach",
     "segment": {
@@ -72,11 +67,10 @@
   "compliance": {
     "checks": {
       "compliance.mini_miranda_first": true,
-      "compliance.no_promise_without_readback": true,
       "compliance.no_protected_before_rpc": true
     },
     "failed": [],
-    "count": 3
+    "count": 2
   },
   "entities": {
     "measured": false,
@@ -84,22 +78,26 @@
     "note": "stt.entity_er is D3 (Phase 3); not measured"
   },
   "agent_stretches": {
-    "live": 3,
-    "post_hoc": 3
+    "live": 2,
+    "post_hoc": 2
   },
   "stt_wer": [
     {
       "turn": "yes this is the borrower",
-      "wer": 0
+      "wer": 1
+    },
+    {
+      "turn": "mm-hm (backchannel)",
+      "wer": 1
     },
     {
       "turn": "I can pay 550 on Friday",
-      "wer": 0
+      "wer": 1
     },
     {
       "turn": "yes, that's correct",
-      "wer": 0
+      "wer": 1
     }
   ],
-  "duration_ms": 140714
+  "duration_ms": 121461
 }
