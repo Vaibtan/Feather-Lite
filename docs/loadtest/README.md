@@ -180,6 +180,33 @@ Turn latency p50/p95 3 009 / 3 313 ms and `total_ms` 2 405 / 2 746 ms on this ru
 calmer than the previous hour's (`ttft_ms` p95 1 236 against 3 651), which is OpenAI's variance and
 not this change.
 
+## 2026-09-02 — Phase 2's N=5 gate: one clean run on the final tree, the second owed to a flapping TTS
+
+Run on the **final** tree — `resume` live, `WORKER_STT_FILLER_WORDS=true`, `minDuration` 500 — with
+`stack:quiet` green, Langfuse down, judge off, decider `openai`:
+
+| run | equivalent | silent playouts | WER p50/p95 | TTS ws timeouts |
+|---|---:|---:|---:|---:|
+| `phase2-gate-a` | **5/5** | **0/15** | 0 / 0.1111 | 2 |
+| `phase2-gate-b` | 2/5 | 2/10 | 0 / **1.000** | — |
+| `phase2-gate-b2` (retry, fresh worker) | 3/5 | 4/12 | 0 / **1.000** | 9 |
+
+**`phase2-gate-a` is a clean pass**: five of five equivalent, zero silent playouts, WER inside the
+0.2 gate, and the two TTS timeouts it did see were retried successfully. It is the first N=5 on a
+tree carrying `resume` and filler words, and nothing regressed.
+
+The two attempts at a second run are **not** counted, and the reason is the provider rather than the
+diff. `tts_silent` is the harness's own detector for a TTS stream that produced no audio (ADR 0008),
+and 2/10 then 4/12 of them, alongside 9 `Deepgram TTS WebSocket connect timeout` errors, is the same
+failure that has come and gone all day — 20 in one earlier run, 5 in another, 0 in several. WER p95
+of exactly **1.000** is its signature: a line with no audio transcribes to nothing.
+
+So Phase 2's "N=5 equivalence twice" stands at **one of two on the final tree**, with two more clean
+5/5 runs earlier in the day on the pre-`resume` tree (`phase-f-owed`, `phase2-d1`). The second run is
+owed and needs a window where Deepgram's TTS websocket is stable. **Check
+`docker logs feather-lite-worker | grep "TTS WebSocket connect timeout"` before trusting any voice
+number** — that check is what separated these runs from a false regression report.
+
 ## 2026-09-02 — filler words cost nothing on the WER gate, so they are on by default now
 
 `WORKER_STT_FILLER_WORDS` shipped off while its cost was unknown, and with it off D1's `resume` can
