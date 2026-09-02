@@ -18,6 +18,13 @@ export interface StartCallInput {
   readonly borrowerId: string;
   readonly contactPointId: string;
   readonly channel: Channel;
+  /**
+   * How the voice leg is established (C4). `browser` is a WebRTC session in a tab — which is what
+   * the load harness places — and it has no phone leg, so it is never re-dialled. `sip` is an
+   * outbound PSTN dial. Defaults to `browser` for a voice call, because the callers that do not say
+   * are the browser-facing ones; a `simulated` call has no leg at all.
+   */
+  readonly origin?: "browser" | "sip" | undefined;
   /** Reuse an existing workflow (scheduled callback / retry). */
   readonly workflowExecutionId?: string | undefined;
   readonly workflowType?: WorkflowType | undefined;
@@ -116,6 +123,7 @@ export class WorkflowService extends Effect.Service<WorkflowService>()("@feather
             agentVersionId: agentVersion.id,
             startedAt: nowDate,
             channel: input.channel,
+            origin: input.channel === "voice" ? (input.origin ?? "browser") : "simulated",
             // Recorded now, from the config that will actually serve it, rather than inferred later:
             // the SLO window has to be able to exclude scripted turns, and by the time the report is
             // built nothing on the row says which decider ran (O2).

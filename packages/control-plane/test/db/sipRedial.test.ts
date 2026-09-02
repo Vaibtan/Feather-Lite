@@ -22,6 +22,7 @@ import {
   CrmRepo,
   IdGen,
   NO_SIP_TRUNK,
+  Orchestrator,
   Queries,
   SchedulingRepo,
   SchedulingService,
@@ -37,6 +38,7 @@ const NOW = DateTime.unsafeMake("2026-08-16T14:00:00Z");
 const LIVEKIT = { url: "ws://localhost:7880", apiKey: "devkey", apiSecret: Redacted.make("secret"), agentName: "feather-lite-agent" };
 
 const services = Layer.mergeAll(
+  Orchestrator.Default,
   SchedulingService.Default,
   WorkflowService.Default,
   Queries.Default,
@@ -73,6 +75,21 @@ const seedRetry = (name: string, channel: "voice" | "simulated") =>
       payload: { borrower_id: borrowerId, contact_point_id: cpId, channel, reason: "no_answer" },
     });
     return { actionId, borrowerId };
+  });
+
+/** A voice call in progress, opened with a given origin. */
+const seedCall = (name: string, phoneValue: string, origin: "browser" | "sip") =>
+  Effect.gen(function* () {
+    const sql = yield* PgClient.PgClient;
+    const ids = yield* IdGen;
+    const borrowerId = yield* ids.next();
+    const cpId = yield* ids.next();
+    yield* sql`INSERT INTO borrowers ${sql.insert({ id: borrowerId, name, timezone: "America/New_York", status: "ACTIVE" })}`;
+    yield* sql`INSERT INTO contact_points ${sql.insert({ id: cpId, value: phoneValue, isValid: true, consentStatus: "ALLOWED", timezoneOverride: null })}`;
+    yield* sql`INSERT INTO borrower_contact_points ${sql.insert({ borrowerId, contactPointId: cpId, priority: 1, relationship: "PRIMARY" })}`;
+    yield* sql`INSERT INTO loans ${sql.insert({ id: yield* ids.next(), borrowerId, principal: "1000.00", balanceDue: "550.00", dueDate: "2026-08-01", status: "DELINQUENT", delinquencyDays: 10 })}`;
+    const started = yield* (yield* WorkflowService).startCall({ borrowerId, contactPointId: cpId, channel: "voice", origin, now: NOW });
+    return { borrowerId, conversationId: started.conversationId };
   });
 
 /** Conversations opened for this borrower — the row a failed re-dial must not leave behind. */
@@ -132,6 +149,34 @@ describe("a scheduled voice re-dial with no SIP trunk", () => {
     );
     // One row, terminal. Not a PENDING one waiting to do it all again.
     expect(out.map((r) => r.status)).toEqual(["FAILED"]);
+  });
+
+  it("schedules no re-dial at all for a call that only ever existed in a browser", async () => {
+    // Every call the load harness places is one of these: a WebRTC session in a tab, with no phone
+    // leg. A `RETRY_CALL` is dispatched `sip`, outbound, so there is no number that would reach this
+    // borrower again — and scheduling one anyway is how the loop this commit's sibling closed began.
+    const out = await noTrunk.runPromise(
+      withFrozenClock(NOW)(
+        Effect.gen(function* () {
+          const sql = yield* PgClient.PgClient;
+          const browser = yield* seedCall("Browser Caller", "+15550009101", "browser");
+          const sip = yield* seedCall("Dialled Caller", "+15550009102", "sip");
+          const orch = yield* Orchestrator;
+          // A call nobody answered, on both origins.
+          yield* orch.processSignal(browser.conversationId, { kind: "no_answer" });
+          yield* orch.processSignal(sip.conversationId, { kind: "no_answer" });
+          const retries = (borrowerId: string) =>
+            sql<{ readonly action_type: string }>`
+              SELECT a.action_type FROM scheduled_actions a
+              JOIN workflow_executions w ON w.id = a.workflow_execution_id
+              WHERE w.borrower_id = ${borrowerId} AND a.action_type = 'RETRY_CALL'`;
+          return { browserRetries: yield* retries(browser.borrowerId), sipRetries: yield* retries(sip.borrowerId) };
+        }),
+      ),
+    );
+    expect(out.browserRetries).toHaveLength(0);
+    // The outbound call still retries, because that one has somewhere to go.
+    expect(out.sipRetries).toHaveLength(1);
   });
 
   it("still runs a simulated re-dial, which needs no trunk at all", async () => {

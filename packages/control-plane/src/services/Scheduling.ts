@@ -181,6 +181,8 @@ export class SchedulingService extends Effect.Service<SchedulingService>()("@fea
               borrowerId,
               contactPointId,
               channel,
+              // A scheduled re-dial is outbound; there is no browser tab waiting on it.
+              origin: "sip",
               workflowExecutionId: action.workflowExecutionId,
               workflowType: action.actionType === "CALLBACK" ? "CALLBACK_FOLLOWUP" : "PAYMENT_REMINDER",
               now,

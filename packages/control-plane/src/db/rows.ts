@@ -146,6 +146,8 @@ export const ConversationRow = Schema.Struct({
   finalOutcome: Schema.NullOr(Outcome),
   finalOutcomeMetadata: JsonRecord,
   channel: Schema.String,
+  /** How the voice leg was established: "browser", "sip", or "simulated". Null before 0008. */
+  origin: Schema.NullOr(Schema.String),
   transferTarget: Schema.NullOr(Schema.String),
   protectedContextUnlocked: Schema.Boolean,
   currentState: ConversationState,

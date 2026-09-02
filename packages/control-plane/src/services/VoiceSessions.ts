@@ -63,6 +63,9 @@ export class VoiceSessions extends Effect.Service<VoiceSessions>()("@feather-lit
           borrowerId: input.borrowerId,
           contactPointId: input.contactPointId,
           channel: "voice",
+          // The session's own mode, so a call that only ever existed in a browser tab is never
+          // re-dialled over a trunk it has no leg on (C4).
+          origin: input.mode,
           now: input.now,
           ...(input.workflowExecutionId === undefined ? {} : { workflowExecutionId: input.workflowExecutionId }),
           ...(input.workflowType === undefined ? {} : { workflowType: input.workflowType }),

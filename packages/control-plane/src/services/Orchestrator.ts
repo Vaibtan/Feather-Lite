@@ -247,8 +247,28 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
         yield* conv.setAttemptStatus(row.callAttemptId, attemptStatusFor(outcome), at);
         yield* conv.setWorkflowStatus(ctx.workflowExecutionId, workflowStatusFor(outcome));
 
-        // Outcome-driven next actions (SPEC §14.2).
-        if (outcome === "NO_ANSWER" || outcome === "THIRD_PARTY_CONTACT" || outcome === "FAILED") {
+        /**
+         * Outcome-driven next actions (SPEC §14.2), except for a call that has no leg to re-dial
+         * (C4).
+         *
+         * A scheduled `RETRY_CALL` is dispatched in `sip` mode — outbound, by definition, since
+         * there is no browser tab waiting on the other end of it. So a call that only ever existed
+         * *as* a browser tab cannot be its own retry: there is no number that would reach that
+         * borrower again, and every attempt would end the way the ones this fix was written for
+         * did, with the worker hanging up and the failure scheduling another attempt. Every call
+         * the load harness places is one of these.
+         *
+         * `origin` is null on rows written before migration 0008, and null is treated as "not known
+         * to be browser-originated" — today's behaviour, preserved, rather than an origin invented
+         * for calls this database cannot speak for.
+         */
+        const noLegToRedial = row.channel === "voice" && row.origin === "browser";
+        if (noLegToRedial && (outcome === "NO_ANSWER" || outcome === "THIRD_PARTY_CONTACT" || outcome === "FAILED")) {
+          yield* Effect.logDebug("no re-dial scheduled: the call was browser-originated and has no outbound leg").pipe(
+            Effect.annotateLogs({ conversation_id: row.id, outcome }),
+          );
+        }
+        if (!noLegToRedial && (outcome === "NO_ANSWER" || outcome === "THIRD_PARTY_CONTACT" || outcome === "FAILED")) {
           yield* scheduling.createRetry({
             workflowExecutionId: ctx.workflowExecutionId,
             borrowerId: row.borrowerId,
