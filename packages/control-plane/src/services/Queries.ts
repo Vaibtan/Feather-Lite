@@ -196,7 +196,23 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
      * meant ~1.4 s of round trips — on an endpoint the console polls every 5 seconds. A console tab
      * left open during a load run was itself a meaningful share of the load.
      */
-    const turnRowsForMany = (conversationIds: ReadonlyArray<string>): Effect.Effect<{ rows: TurnLatencyRow[]; dropped: number }, never, PgClient.PgClient> =>
+    /**
+     * The turn-level half of the segment (F4).
+     *
+     * `latencyAggregateForSegment` selects *conversations* — channel, decider, harness. That cannot
+     * separate two turns of the same call, and D2's fast path makes them genuinely different
+     * populations: a regex answering in a microsecond and a model turn taking two seconds are both
+     * `voice`/`openai`, so mixing them moves the p95 the product's latency claim is made from
+     * without anything getting faster. It is O2's defect one level down.
+     *
+     * `null` (or an absent predicate) means "do not filter", so every existing window is unchanged.
+     * Reads `result->>'decider'`, which `TurnResult` already carries into `conversation_turns.result`
+     * — no migration.
+     */
+    const turnRowsForMany = (
+      conversationIds: ReadonlyArray<string>,
+      turns?: { readonly decider?: string | null | undefined } | undefined,
+    ): Effect.Effect<{ rows: TurnLatencyRow[]; dropped: number }, never, PgClient.PgClient> =>
       Effect.gen(function* () {
         // `sql.in` of an empty set is not valid SQL, and an empty window is a normal thing to ask
         // about — a fresh database, or a range with no calls in it.
@@ -248,6 +264,7 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
                  )                                                 AS tts_silent
           FROM conversation_turns t
           WHERE t.conversation_id IN ${sql.in(conversationIds)}
+            AND (${turns?.decider ?? null}::text IS NULL OR t.result->>'decider' = ${turns?.decider ?? null}::text)
           ORDER BY t.conversation_id, t.started_at ASC`.pipe(Effect.orDie);
         // `::float8` can still surface as a string depending on the driver's type parsing, so each
         // component is coerced once here rather than trusted.
@@ -315,8 +332,11 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
      */
     const turnRowsFor = turnRowsForMany;
 
-    const latencyAggregateFor = (conversationIds: ReadonlyArray<string>): Effect.Effect<LatencyAggregate, never, PgClient.PgClient> =>
-      turnRowsFor(conversationIds).pipe(Effect.map(({ rows, dropped }) => aggregateTurnRows(conversationIds.length, rows, dropped)));
+    const latencyAggregateFor = (
+      conversationIds: ReadonlyArray<string>,
+      turns?: { readonly decider?: string | null | undefined } | undefined,
+    ): Effect.Effect<LatencyAggregate, never, PgClient.PgClient> =>
+      turnRowsFor(conversationIds, turns).pipe(Effect.map(({ rows, dropped }) => aggregateTurnRows(conversationIds.length, rows, dropped)));
 
     /** The same components across the most recent N conversations, as p50/p95. */
     const latencyAggregate = (calls: number): Effect.Effect<LatencyAggregate, never, PgClient.PgClient> =>
@@ -338,7 +358,16 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
      * makes a green verdict readable.
      */
     const latencyAggregateForSegment = (
-      segment: { readonly channel: string | null; readonly decider: string | null; readonly harness?: string | null | undefined },
+      segment: {
+        readonly channel: string | null;
+        readonly decider: string | null;
+        readonly harness?: string | null | undefined;
+        /**
+         * Which arm decided the turns to count (F4). Conversation-level facets cannot express this:
+         * a fast-path turn and a model turn of one call share every one of them.
+         */
+        readonly turnDecider?: string | null | undefined;
+      },
       calls: number,
     ): Effect.Effect<{ aggregate: LatencyAggregate; found: number }, never, PgClient.PgClient> =>
       Effect.gen(function* () {
@@ -364,7 +393,10 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
             AND (${segment.decider}::text IS NULL OR decider = ${segment.decider}::text)
             AND harness IS NOT DISTINCT FROM ${wanted}::text
           ORDER BY started_at DESC, id DESC LIMIT ${calls}`.pipe(Effect.orDie);
-        const aggregate = yield* latencyAggregateFor(ids.map((r) => r.id));
+        const aggregate = yield* latencyAggregateFor(
+          ids.map((r) => r.id),
+          { decider: segment.turnDecider ?? null },
+        );
         return { aggregate, found: ids.length };
       });
 
