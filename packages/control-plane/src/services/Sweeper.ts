@@ -127,9 +127,18 @@ export class Sweeper extends Effect.Service<Sweeper>()("@feather-lite/Sweeper", 
 
     return { runOnce, stalenessMs } as const;
   }),
-  // Orchestrator is constructed here rather than taken from context, matching how VoiceSessions
-  // does it: these services are stateless over their repos, and the alternative is threading one
-  // instance through `Layer.mergeAll`, which does not satisfy siblings. MediaPlane and Tracing
-  // stay in context, because those two genuinely must be the same instance everywhere.
+  // Listing `Orchestrator.Default` here does **not** construct a second one (F1, measured).
+  //
+  // The comment this replaces said it did, and that a single instance could not be threaded through
+  // `Layer.mergeAll` because it does not satisfy siblings. The first half is wrong: Effect memoizes
+  // layers **by reference** within one build, and `Orchestrator.Default` is one layer value, so the
+  // three services that list it and `ServicesLive`'s own `mergeAll` share the instance. Counted on
+  // 2026-09-02 by instrumenting the constructor and building `ServicesLive` once: **1**. The server
+  // builds `ServicesLive` exactly once (`main.ts`, `Layer.provide(ServicesLive)`), so the process
+  // has one orchestrator, which is what D1's `held` waiter needs.
+  //
+  // What the second half describes is a typing inconvenience, not a duplication: a sibling that
+  // omits the dependency exports `Orchestrator` in its `RIn` and the merge no longer typechecks.
+  // Leaving the dependency listed is how each service states what it needs without that cost.
   dependencies: [SchedulingRepo.Default, Scores.Default, Orchestrator.Default],
 }) {}
