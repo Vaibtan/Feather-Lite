@@ -153,17 +153,23 @@ export const TIER3_SCENARIOS: ReadonlyArray<Tier3Scenario> = [
     needs: [],
     expected: {
       /**
-       * **Two read-backs is the *current* behaviour, and this scenario asserting it is the point.**
+       * **One read-back. Phase 2 flipped this, and the flip is the verification.**
        *
-       * A "yes" spoken during the read-back is transcribed, commits a turn, is refused by the
-       * fully-heard guard, and the read-back plays again — eight seconds of the most irritating
-       * thing a borrower can hear, on the turn they were most ready to agree on. Issue #1's D1
-       * (`held`) is what makes it one read-back; until then this scenario documents the defect
-       * rather than hiding it, and Phase 2 flips `atMost` to 1 as its own verification.
+       * It used to be `atLeast: 2`, asserting the defect: a "yes" spoken during the read-back was
+       * transcribed, committed a turn, was refused by the fully-heard guard, and the read-back
+       * played again — eight seconds of it, on the turn the borrower was most ready to agree on.
+       * D1 marks the read-back non-interruptible, so `held` (F2) can park a turn that arrives during
+       * it, and the same seed now produces one read-back where it produced two.
+       *
+       * The scenario says yes *after* the read-back finishes, because that is what a borrower whose
+       * agent does not talk over them does. Saying it during the read-back is still measured — by
+       * `turn.agent_interrupt_rate` and by the open worker-side item in
+       * `docs/loadtest/README.md`, which is that words spoken into a non-interruptible segment are
+       * dropped at the worker rather than deferred to the control plane as Q4 intends.
        */
       finalOutcome: "PROMISE_TO_PAY",
       tools: ["confirm_right_party", "propose_promise_to_pay", "record_promise_to_pay"],
-      readBacks: { atLeast: 2 },
+      readBacks: { atMost: 1 },
     },
     script: (rng) => ({
       name: "yes-during-read-back",
@@ -192,12 +198,21 @@ export const TIER3_SCENARIOS: ReadonlyArray<Tier3Scenario> = [
         ctx.log(`agent line started; saying yes ${String(offset)}ms into it, while it is still playing`);
         await ctx.sleep(offset);
         await ctx.speak("yes (during the read-back)", ctx.lines.yesEarly);
-        // It will be refused and the read-back repeated; answer the repeat properly.
-        const second = await waitReadBack(ctx, ctx.agentSaid.length, 60_000);
-        if (second >= 0) {
-          await ctx.sleep(2500);
-          await ctx.speak("yes, that's correct", ctx.lines.confirm);
-        }
+        /**
+         * Then confirm properly once the read-back has finished.
+         *
+         * Before D1 this waited for a **second** read-back, because there always was one. Now there
+         * is not, and a scenario that waits for it hangs until its timeout and never confirms —
+         * which is how the first run after the fix reported one read-back and no recorded promise.
+         */
+        /**
+         * Wait for the read-back to actually finish. A fixed sleep is not enough: the read-back runs
+         * about eight seconds and the early "yes" lands a second into it, so the first attempt at
+         * this confirmed four seconds later — still inside the segment, still dropped, and the run
+         * reported one read-back with no promise recorded.
+         */
+        if (!(await ctx.waitAgentQuiet(700, 30_000))) ctx.log("agent never went quiet; confirming anyway");
+        await ctx.speak("yes, that's correct", ctx.lines.confirm);
         ctx.log((await ctx.waitForHangup(40_000)) ? "agent hung up" : "agent did not hang up within 40s");
       },
     }),

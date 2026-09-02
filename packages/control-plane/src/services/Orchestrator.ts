@@ -407,7 +407,22 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
             yield* conv.updateConversation(row.id, { currentState: nextState, pendingProposal: proposal });
             // Read-back is interruptible on purpose (Phase 1.5 finding #6); the fully-heard guard is
             // enforced at record time via AGENT_TURN_PLAYOUT.
-            says.push({ text: promiseReadback({ amount: proposal.amount, date: proposal.date }), allowInterruptions: true });
+            /**
+             * **The one line the borrower may not talk over** (issue #1, D1 — Phase 2).
+             *
+             * The fully-heard guard refuses to record a promise whose read-back nothing says was
+             * heard in full (C1), so a "yes" spoken over it commits a turn that is then refused and
+             * the read-back plays again — eight seconds of it, on the turn the borrower was most
+             * ready to agree on. Tier 3's `yes-during-read-back` counted exactly two read-backs on
+             * every green run.
+             *
+             * Marking it non-interruptible is what lets `held` (F2) park that turn until the segment
+             * finishes, so the "yes" is answered once. The worker keeps
+             * `discardAudioIfUninterruptible: false` (Q4), so the borrower's words still reach the
+             * ledger — `held` is a control-plane decision about *when* to process them, never an
+             * audio discard.
+             */
+            says.push({ text: promiseReadback({ amount: proposal.amount, date: proposal.date }), allowInterruptions: false });
             result = { amount: proposal.amount, date: proposal.date };
             break;
           }
@@ -421,7 +436,8 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
                 // Repeat the read-back and re-arm the guard for this turn.
                 pendingProposal = { ...proposal, read_back_turn_id: params.turnId };
                 yield* conv.updateConversation(row.id, { pendingProposal });
-                says.push({ text: `Let me repeat that. ${promiseReadback({ amount: proposal.amount, date: proposal.date })}`, allowInterruptions: true });
+                // The repeat is the same line and carries the same rule.
+                says.push({ text: `Let me repeat that. ${promiseReadback({ amount: proposal.amount, date: proposal.date })}`, allowInterruptions: false });
               } else {
                 says.push({ text: "I don't have a payment amount and date to record yet. What amount and date work for you?", allowInterruptions: true });
                 if (state === "CONFIRMING_OUTCOME") {

@@ -27,12 +27,15 @@ describe("the tier-3 scenario table", () => {
     for (const id of blocked) expect(scenarioById(id)?.needs.join(" ")).toMatch(/Phase 4/);
   });
 
-  it("expects two read-backs on yes-during-read-back, which is the defect it reproduces", () => {
-    // Not a typo. A "yes" during the read-back is transcribed, commits a turn, is refused by the
-    // fully-heard guard, and the read-back plays again. D1's `held` is what makes it one; until then
-    // the scenario documents the defect rather than hiding it.
-    expect(scenarioById("yes-during-read-back")?.expected.readBacks).toEqual({ atLeast: 2 });
-    expect(scenarioById("clean-happy-path")?.expected.readBacks).toEqual({ atLeast: 1, atMost: 1 });
+  it("expects one read-back on yes-during-read-back, which is what D1 fixed", () => {
+    /**
+     * This assertion used to read `atLeast: 2`, and asserting the defect was the point: the "yes"
+     * committed a turn, the fully-heard guard refused it, and the read-back played again. D1 marks
+     * the read-back non-interruptible so `held` can park that turn, and the same seed now produces
+     * one. Flipping this expectation *is* Phase 2's verification, which is why it was written as a
+     * bound rather than as a relaxed "one or two".
+     */
+    expect(scenarioById("yes-during-read-back")?.expected.readBacks).toEqual({ atMost: 1 });
   });
 
   it("expects the third-party call to disclose nothing", () => {

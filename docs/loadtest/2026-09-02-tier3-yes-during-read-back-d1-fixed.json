@@ -1,0 +1,99 @@
+{
+  "tier": "3-sim",
+  "scenario": "yes-during-read-back",
+  "seed": {
+    "given": "7",
+    "resolved": 7
+  },
+  "persona": null,
+  "interruption_mode": "vad",
+  "label": "d1-fixed",
+  "conversation_id": "446c9333-829b-4f6e-a363-857b87d7026c",
+  "harness": "sim",
+  "expected": {
+    "failures": [
+      "outcome null != expected PROMISE_TO_PAY",
+      "tool record_promise_to_pay missing (saw [\"confirm_right_party\",\"propose_promise_to_pay\"])"
+    ],
+    "verdict": "2 FAILURE(S)",
+    "exit_code": 1,
+    "expected_to_fail": null,
+    "outcome": null,
+    "tools": [
+      "confirm_right_party",
+      "propose_promise_to_pay"
+    ],
+    "not_yet_asserted": []
+  },
+  "turn_taking": {
+    "response_rate": 0.5,
+    "yield_rate": 0.3333,
+    "yield_latency_ms": 965,
+    "false_interrupt_rate": null,
+    "agent_interrupt_rate": 0,
+    "selectivity": null,
+    "counts": {
+      "lines": 4,
+      "interruptions": 3,
+      "non_directed": 0,
+      "non_directed_during_agent_speech": 0,
+      "unknown_truncation": 3
+    }
+  },
+  "dispositions": [
+    "respond",
+    "respond"
+  ],
+  "slo": {
+    "verdict": "breach",
+    "segment": {
+      "channel": null,
+      "decider": null,
+      "calls_requested": 50,
+      "calls_found": 50
+    },
+    "breaches": [
+      "total_ms",
+      "eou_delay_ms",
+      "transcription_delay_ms",
+      "ttft_ms",
+      "tts_ttfb_ms"
+    ],
+    "insufficient": [],
+    "window_conversations": 50,
+    "excluded_by_rule": "harness IS NOT DISTINCT FROM null (Queries.latencyAggregateForSegment)"
+  },
+  "compliance": {
+    "checks": {},
+    "failed": [],
+    "count": 0
+  },
+  "entities": {
+    "measured": false,
+    "entity_er": null,
+    "note": "stt.entity_er is D3 (Phase 3); not measured"
+  },
+  "agent_stretches": {
+    "live": 4,
+    "post_hoc": 4
+  },
+  "stt_wer": [
+    {
+      "turn": "yes this is the borrower",
+      "wer": 0
+    },
+    {
+      "turn": "BARGE-IN: I can pay 550 on Friday",
+      "wer": 0.1111
+    },
+    {
+      "turn": "yes (during the read-back)",
+      "wer": 0
+    },
+    {
+      "turn": "yes, that's correct",
+      "wer": 0
+    }
+  ],
+  "duration_ms": 109061
+}

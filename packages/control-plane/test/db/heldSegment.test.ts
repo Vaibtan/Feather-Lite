@@ -113,6 +113,26 @@ describe("unreportedNonInterruptible", () => {
     expect(out?.ttsAudioMs).toBe(8100);
   });
 
+  it("finds the promise read-back, which is the segment this whole mechanism exists for", async () => {
+    /**
+     * The point of D1. The read-back is the one line a borrower must hear in full — the fully-heard
+     * guard refuses to record a promise whose read-back nothing says was heard — so it is the one
+     * line they may not talk over. Until Phase 2 it was written `allowInterruptible: true` and
+     * `held` could never fire on it, which made the mechanism correct and useless.
+     */
+    const out = await rt.runPromise(
+      Effect.gen(function* () {
+        const started = yield* startVoiceCall;
+        yield* append(started.conversationId, {
+          type: "AGENT_TURN",
+          payload: { text: "To confirm: you will pay 550 dollars by Friday. Say yes to confirm.", state: "CONFIRMING_OUTCOME", turn_id: "rb", speak_mode: "non_interruptible" },
+        });
+        return yield* (yield* ConversationRepo).unreportedNonInterruptible(started.conversationId);
+      }),
+    );
+    expect(out?.turnId).toBe("rb");
+  });
+
   it("never holds on the opening, which is reported by a different signal and so never looks finished", async () => {
     /**
      * The defect this test exists for, found by running it (2026-09-02). The opening is written with

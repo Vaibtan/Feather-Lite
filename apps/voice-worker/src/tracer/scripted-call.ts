@@ -311,6 +311,13 @@ export interface CallContext {
    * arrives when it closes.
    */
   readonly waitNextStretchStart: (timeoutMs: number) => Promise<number | null>;
+  /**
+   * Wait until the agent has been silent for `quietMs`. Returns whether it went quiet in time.
+   *
+   * The seam for D1's non-interruptible lines: words spoken into one are dropped, so a scenario that
+   * means to be heard must wait for the line to finish, and only the audio can say when.
+   */
+  readonly waitAgentQuiet: (quietMs: number, timeoutMs: number) => Promise<boolean>;
   /** Wait for the agent to hang up, or give up. Returns whether it did. */
   readonly waitForHangup: (timeoutMs: number) => Promise<boolean>;
 }
@@ -502,6 +509,10 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
    * talking *now*".
    */
   const stretchStarts: number[] = [];
+  /** Wall-clock instant the agent last stopped speaking; the other half of the onset seam (H1). */
+  let lastStretchEndMs = 0;
+  /** True while a stretch is open, so "quiet" is never claimed mid-sentence. */
+  let agentSpeakingNow = false;
   const unmatchedTranscripts: string[] = [];
   /**
    * The line currently being spoken (or most recently spoken), collecting every borrower-final
@@ -623,11 +634,14 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
               inStretch = true;
               liveStretches += 1;
               stretchStarts.push(atMs);
+              agentSpeakingNow = true;
               opts.onStretchStart?.(liveStretches, atMs);
             }
             lastLoudMs = atMs;
           } else if (inStretch && atMs - lastLoudMs > SILENCE_HANGOVER_MS) {
             inStretch = false;
+            lastStretchEndMs = Date.now();
+            agentSpeakingNow = false;
             opts.onStretchEnd?.(liveStretches, lastLoudMs);
           }
 
@@ -804,6 +818,24 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
           await sleep(50);
         }
         return null;
+      },
+      /**
+       * Wait until the agent has been quiet for `quietMs`, or give up (H1's other half).
+       *
+       * D1 gives the agent lines the borrower may not talk over — the promise read-back — and words
+       * spoken into one are dropped at the worker rather than deferred. A scenario that means to be
+       * heard therefore has to wait for silence, and the transcript cannot tell it when: a segment
+       * arrives when it closes, which is the same lagging indicator that made the first
+       * `yes-during-read-back` scenario measure the wrong act.
+       */
+      waitAgentQuiet: async (quietMs: number, timeoutMs: number) => {
+        const started = Date.now();
+        while (Date.now() - started < timeoutMs) {
+          if (agentGone) return false;
+          if (!agentSpeakingNow && lastStretchEndMs > 0 && Date.now() - lastStretchEndMs >= quietMs) return true;
+          await sleep(50);
+        }
+        return false;
       },
       waitForHangup: async (timeoutMs: number) => {
         const waitStart = Date.now();
