@@ -142,7 +142,7 @@ importers:
         specifier: ^0.97.1
         version: 0.97.1(effect@3.22.1)
       '@livekit/agents':
-        specifier: ^1.6.4
+        specifier: 1.6.4
         version: 1.6.4(patch_hash=e990fc292154aa9eccfd424e0a8f6ce8d8a6dccb044b60827180b669bd1b754f)(@livekit/rtc-node@0.13.33)(@types/node@22.20.1)(typescript@5.9.3)(zod@3.25.76)
       '@livekit/agents-plugin-deepgram':
         specifier: 1.6.4
