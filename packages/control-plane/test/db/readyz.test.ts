@@ -79,6 +79,18 @@ describe("/readyz", () => {
       expect(((await res.json()) as { loops: string[] }).loops).toContain("outbox");
     }));
 
+  it("fails for a loop the process said it would run and never registered (C11)", async () =>
+    withReadyz(async ({ metrics, call }) => {
+      // Boot threw between declaring the schedulers and starting them. The registry is *empty*,
+      // which `staleLoops()` cannot say anything about: "no loops are late" and "there are no
+      // loops" are opposite facts, and this endpoint used to report the second as ready.
+      await Effect.runPromise(metrics.expectLoops(["outbox", "sweeper"]));
+      await Effect.runPromise(metrics.tick("outbox", 5_000));
+      const res = await call();
+      expect(res.status).toBe(503);
+      expect(JSON.stringify(await res.json())).toContain("never started: sweeper");
+    }));
+
   it("fails for a loop that was registered and never ticked", async () =>
     withReadyz(async ({ metrics, call }) => {
       // The fiber died on its first iteration. It has an interval and no tick, and one interval is

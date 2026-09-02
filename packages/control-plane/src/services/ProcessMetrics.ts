@@ -90,6 +90,20 @@ export class ProcessMetrics extends Effect.Tag("@feather-lite/ProcessMetrics")<
      * stopped, and a process whose outbox has stopped is not ready however well it answers HTTP.
      */
     readonly staleLoops: () => Effect.Effect<ReadonlyArray<LoopLiveness>>;
+    /**
+     * The loops this process is *supposed* to be running, declared once at boot (C11).
+     *
+     * `staleLoops()` can only speak about loops it has heard of, so an empty registry read as
+     * healthy — and an empty registry is exactly what a process that fell over before starting its
+     * schedulers has. "No loops are late" and "there are no loops" are opposite facts and looked
+     * identical.
+     *
+     * Declared rather than inferred because only the composition root knows: the same handlers
+     * serve a test that runs no loops at all, and that is not an outage.
+     */
+    readonly expectLoops: (names: ReadonlyArray<string>) => Effect.Effect<void>;
+    /** Expected loop names that have never been registered. Empty when nothing was declared. */
+    readonly missingLoops: () => Effect.Effect<ReadonlyArray<string>>;
   }
 >() {}
 
@@ -133,6 +147,8 @@ export const makeProcessMetrics = (sources: ProcessMetricsSources) =>
       failures: number;
     }
     const ticks = new Map<string, Tick>();
+    /** Names declared by the composition root; empty in any process that runs no loops (C11). */
+    const expected = new Set<string>();
     /** The loop's row, created on first sight so a `tick` from an unregistered loop is not lost. */
     const rowFor = (loop: string, intervalMs: number): Tick => {
       const existing = ticks.get(loop);
@@ -174,6 +190,11 @@ export const makeProcessMetrics = (sources: ProcessMetricsSources) =>
           rowFor(loop, intervalMs).failures += 1;
         }),
       staleLoops: () => Effect.sync(() => loops().filter((l) => l.stale)),
+      expectLoops: (names: ReadonlyArray<string>) =>
+        Effect.sync(() => {
+          for (const n of names) expected.add(n);
+        }),
+      missingLoops: () => Effect.sync(() => [...expected].filter((n) => !ticks.has(n))),
       snapshot: () =>
         Effect.sync(() => {
           const mem = memoryUsage();

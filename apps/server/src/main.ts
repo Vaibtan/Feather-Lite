@@ -113,6 +113,13 @@ const SchedulersLive = Layer.scopedDiscard(
           Effect.forkScoped,
         );
       });
+    /**
+     * Declared before any of them is registered, so `/readyz` can tell "no loops are late" from
+     * "the schedulers never started" (C11). This list and the three `tick` calls below are the same
+     * three names; a boot that throws between here and them is now an unready process rather than a
+     * cheerfully ready one with an empty loop list.
+     */
+    yield* process.expectLoops(["scheduled-actions", "outbox", "sweeper"]);
     yield* tick("scheduled-actions", () => scheduling.runOnce(20), "15 seconds");
     // `drain`, not `runOnce`: a full batch means there is more waiting, and a backlog should clear
     // at the rate the work can be done rather than at the rate this loop polls (C2). The stamp is

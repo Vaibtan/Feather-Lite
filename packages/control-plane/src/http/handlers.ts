@@ -98,7 +98,29 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
       .handle("healthz", () => Effect.succeed({ status: "ok" as const, version: SERVICE_VERSION }))
       .handle("readyz", () =>
         Effect.gen(function* () {
-          yield* sql`SELECT 1`.pipe(Effect.mapError(() => new ApiUnavailable({ message: "database not reachable" })));
+          /**
+           * Bounded, because the failure this probe exists to catch does not answer (C11).
+           *
+           * An unreachable Postgres fails the query and was always reported. A **pool** with no free
+           * connection does not fail: `SELECT 1` waits for one, so a process wedged by the exact
+           * problem readiness is for answered nothing at all and the probe hung with it — which a
+           * load balancer reads as a slow instance rather than an unready one. Two seconds is far
+           * longer than this query has ever taken and far shorter than any sensible probe timeout.
+           */
+          yield* sql`SELECT 1`.pipe(
+            Effect.timeoutFail({ duration: "2 seconds", onTimeout: () => new ApiUnavailable({ message: "database probe timed out after 2s (pool exhausted?)" }) }),
+            Effect.mapError(() => new ApiUnavailable({ message: "database not reachable" })),
+          );
+          /**
+           * A loop that was never registered at all (C11). `staleLoops()` can only speak about loops
+           * it has heard of, so a process that fell over before starting its schedulers had an empty
+           * registry and read as ready: "no loops are late" and "there are no loops" are opposite
+           * facts that looked identical.
+           */
+          const missing = yield* processMetrics.missingLoops();
+          if (missing.length > 0) {
+            return yield* Effect.fail(new ApiUnavailable({ message: `background loop(s) never started: ${missing.join(", ")}` }));
+          }
           /**
            * Every background loop must have ticked recently (D3). A process that cannot reach
            * Postgres is obviously not ready; a process whose outbox fiber died is *also* not ready,
