@@ -47,6 +47,42 @@ afterAll(async () => {
   await Effect.runPromise(Scope.close(scope, Exit.void));
 });
 
+/**
+ * `API_BEARER_TOKEN=` — written to turn authentication *off* — must not turn it on (issue #4).
+ *
+ * Found by running the stack rather than by reading it: compose started passing the variable so the
+ * server and worker could agree about it (C2), the empty default reached the server, `Some("")` is
+ * not `None`, and authentication switched on with an empty secret. Every worker heartbeat 401'd —
+ * silently, because `client.heartbeat` is fire-and-forget — and a fleet run refused to start because
+ * no worker was reporting its mode, three layers from the cause.
+ */
+const blankScope = Effect.runSync(Scope.make());
+const blankTokenConfig = { apiBearerToken: Redacted.make("") };
+const blankMiddlewareContext = Effect.runSync(Scope.extend(Layer.build(Layer.mergeAll(AppConfigTest(blankTokenConfig), Metrics.Default)), blankScope));
+const blankWeb = HttpApiBuilder.toWebHandler(
+  Layer.mergeAll(ApiLive, HttpServer.layerContext).pipe(
+    Layer.provide(ProcessMetricsLive({ pgPool: () => null, sseStreams: () => 0, liveTurns: () => 0, rateLimitBuckets: () => 0 })),
+    Layer.provideMerge(ServicesLive.pipe(Layer.provide(ScriptedTurnDeciderLive), Layer.provideMerge(LiveKitMediaPlaneLive))),
+    Layer.provideMerge(makeInfraLayer(blankTokenConfig)),
+  ),
+  { middleware: (app) => securityMiddleware(app).pipe(Effect.provide(blankMiddlewareContext)) },
+);
+
+describe("a blank API_BEARER_TOKEN", () => {
+  it("means no authentication, not authentication with an empty secret", async () => {
+    const res = await blankWeb.handler(
+      new Request("http://localhost/api/agents/heartbeat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agent_name: "feather-lite-agent", conversations: [] }),
+      }),
+    );
+    expect(res.status).not.toBe(401);
+    await blankWeb.dispose();
+    await Effect.runPromise(Scope.close(blankScope, Exit.void));
+  });
+});
+
 describe("the agent heartbeat's bearer", () => {
   it("refuses an unauthenticated heartbeat when a token is configured", async () => {
     expect((await heartbeat()).status).toBe(401);

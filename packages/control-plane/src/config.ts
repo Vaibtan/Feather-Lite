@@ -217,7 +217,22 @@ export const appConfig: Config.Config<AppConfigShape> = Config.all({
             }
           : null,
       demoMode: c.demoMode,
-      apiBearerToken: c.apiBearerToken._tag === "Some" ? c.apiBearerToken.value : null,
+      /**
+       * Blank is absent, the same rule the bypass token below documents — and for a sharper reason.
+       *
+       * `API_BEARER_TOKEN=` in an environment reads as `Some("")`, which switched authentication
+       * **on** with an empty secret: every mutating request then had to present the literal header
+       * `Bearer `, and every real client — the worker above all — got a 401. An operator who writes
+       * the variable with no value to turn auth off would have turned it on and locked out the
+       * fleet.
+       *
+       * Found by running it (issue #4): compose began passing `API_BEARER_TOKEN: ${API_BEARER_TOKEN:-}`
+       * so the server and worker could agree about it (C2), the empty default reached the server,
+       * and every worker heartbeat 401'd silently — `client.heartbeat` is fire-and-forget. The
+       * symptom was a fleet run refusing to start because no worker was reporting its mode, three
+       * layers from the cause.
+       */
+      apiBearerToken: c.apiBearerToken._tag === "Some" && Redacted.value(c.apiBearerToken.value).length > 0 ? c.apiBearerToken.value : null,
       /**
        * A blank value is treated as absent, and it has to be: `RATE_LIMIT_BYPASS_TOKEN=` in a
        * `.env` reads as `Some("")` rather than `None`, and an empty secret would have matched the

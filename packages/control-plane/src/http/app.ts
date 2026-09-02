@@ -92,9 +92,20 @@ export const securityMiddleware = HttpMiddleware.make((app) =>
      * is what this endpoint needed; a per-IP budget on it would turn load into orphaned calls.
      */
     const open = method === "GET" || method === "OPTIONS" || url.startsWith("/healthz") || url.startsWith("/readyz") || url.startsWith("/docs");
-    if (!open && cfg.apiBearerToken !== null) {
+    /**
+     * A blank token is not a token, checked here as well as in `config.ts` because this is where the
+     * decision is made and the guarantee should not depend on how the config was built.
+     *
+     * `API_BEARER_TOKEN=` reads as `Some("")`, which switched authentication **on** with an empty
+     * secret: every mutating request then had to present the literal header `Bearer `, and the
+     * worker — which sends no header when it has no token — got a 401 on every heartbeat, silently,
+     * because that call is fire-and-forget. An operator who writes the variable with no value to
+     * turn auth off would have turned it on and locked out their own fleet.
+     */
+    const bearer = cfg.apiBearerToken === null ? "" : Redacted.value(cfg.apiBearerToken);
+    if (!open && bearer.length > 0) {
       const auth = req.headers["authorization"] ?? "";
-      if (!secretEquals(auth, `Bearer ${Redacted.value(cfg.apiBearerToken)}`)) {
+      if (!secretEquals(auth, `Bearer ${bearer}`)) {
         return HttpServerResponse.unsafeJson({ _tag: "ApiUnauthorized", message: "missing or invalid bearer token" }, { status: 401 });
       }
     }
