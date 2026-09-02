@@ -180,6 +180,62 @@ Turn latency p50/p95 3 009 / 3 313 ms and `total_ms` 2 405 / 2 746 ms on this ru
 calmer than the previous hour's (`ttft_ms` p95 1 236 against 3 651), which is OpenAI's variance and
 not this change.
 
+## 2026-09-02 — Phase F, and what wiring `held` in taught immediately
+
+Phase F is six refactors D1/D2 need. Two of its six premises did not describe the tree, and both were
+checked in source before acting rather than after:
+
+- **F1 asked for one `Orchestrator` per process. There already is one.** Effect memoizes layers **by
+  reference** within a build, and `Orchestrator.Default` is one layer value, so the three services
+  listing it in `dependencies` and `ServicesLive`'s own `mergeAll` share the instance. Measured by
+  instrumenting the constructor and building `ServicesLive` once: **1**. A comment in `Sweeper.ts`
+  asserted the opposite; the comment was wrong, and no code needed changing.
+- **F5 named four module-level mutable gauges. Two of them are not that.** The limiter is a
+  module-level `const` singleton with a documented import-cycle reason, and the daily cap is a
+  `Metrics` counter, not a gauge. Only `liveTurnCount` and `subscriberCount` were `export let`s, and
+  only those moved to the `Gauges` service.
+
+### `held` fired on the opening, and running it was the only way to find out
+
+F2 puts a `held` phase before T1: wait for a non-interruptible agent segment to finish before
+claiming a turn, so the borrower's "yes" during the read-back does not commit a turn the fully-heard
+guard will refuse. The first live call after wiring it in:
+
+```
+  outcome NO_ANSWER, propose_promise_to_pay missing, 0 read-backs
+  conversation_turns: heldMs 4257 on turn one; the payment offer SUPERSEDED
+```
+
+The opening is written `speak_mode: "non_interruptible"` with `turn_id: "opening"`, and the worker
+reports it with the **`opening_played` signal — never an `AGENT_TURN_PLAYOUT`**. So it is permanently
+unreported, and the first real turn of every voice call was held waiting for evidence that would
+never arrive. The ledger query excludes it now, with a test that says why.
+
+### `held` is dormant on today's tree, and that is the correct Phase F outcome
+
+Every non-interruptible line today is a call-*closing* one — the confirmations, the closes, the
+transfer hold. **The promise read-back is `allowInterruptions: true`**, so nothing mid-call triggers
+the hold: three live tier-3 calls after the fix recorded no `heldMs` at all. Marking the read-back
+non-interruptible is a behaviour change and belongs to D1 in Phase 2, which is what the mechanism was
+built for.
+
+### Phase F verification
+
+`pnpm check` **280 domain / 101 control-plane / 94 voice-worker / 48 load-test**; `pnpm test:db`
+**110 passed, 0 skipped** (100 before F); **20/20 scenarios** on real Postgres. The `Gauges` move was
+checked on the running server rather than in types: after one streamed turn,
+`feather_lite_live_turns` reads **1** where it read 0, so `TurnRunner` and `main.ts` share one
+registry, and `/status` reports `"basis": "per process, since boot"`.
+
+### Open: the box stopped being quiet, and tier-3 runs stopped being usable
+
+Three tier-3 calls late in the Phase F session failed with `no_input` hangups — `NO_ANSWER`, and in
+one case no tools at all. **Not F2**: no turn recorded a `heldMs` in any of them. The worker was
+starved — `tts_metrics ttfbMs 1997` against a ~375 ms baseline, host free memory down to **2 067 MB**
+with Firefox reopened and holding ~1.5 GB. `stack:quiet` passed throughout, because it reads the
+**container VM** (8 040 MB free), not the Windows host. That threshold is the third open item below,
+and this is the second time it has mattered.
+
 ## How to start a stack you may quote numbers from (P4)
 
 The load-run configuration is a **file** now, not something to remember:
