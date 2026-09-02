@@ -10,7 +10,7 @@
  * The table is the point. Every row is a value an operator can actually type.
  */
 import { describe, expect, it } from "vitest";
-import { MAX_JOBS, IDLE_PROCESSES, parseCount, parseWorkerLimits, interruptionMode } from "../src/env.js";
+import { MAX_JOBS, IDLE_PROCESSES, parseCount, parseWorkerLimits, interruptionMode, parseRatio, LOAD_THRESHOLD, VAD_ACTIVATION, VAD_MIN_SILENCE_MS, JOB_MEMORY_WARN_MB, JOB_MEMORY_LIMIT_MB, INTERRUPTION_MIN_DURATION_MS } from "../src/env.js";
 
 describe("parseCount", () => {
   it("takes a whole number at or above the minimum", () => {
@@ -119,5 +119,47 @@ describe("interruptionMode (W1)", () => {
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.message).toContain("WORKER_INTERRUPTION_MODE");
     }
+  });
+});
+
+describe("parseRatio (W5)", () => {
+  it("takes the fallback when unset, and the value when set", () => {
+    expect(parseRatio(undefined, LOAD_THRESHOLD)).toEqual({ ok: true, value: 0.75 });
+    expect(parseRatio("", LOAD_THRESHOLD)).toEqual({ ok: true, value: 0.75 });
+    expect(parseRatio("0.9", LOAD_THRESHOLD)).toEqual({ ok: true, value: 0.9 });
+    expect(parseRatio(".5", LOAD_THRESHOLD)).toEqual({ ok: true, value: 0.5 });
+    expect(parseRatio("0", LOAD_THRESHOLD)).toEqual({ ok: true, value: 0 });
+    expect(parseRatio("1", LOAD_THRESHOLD)).toEqual({ ok: true, value: 1 });
+  });
+
+  it("refuses what Number would have accepted and turned into no threshold at all", () => {
+    // `Number("75%")` is NaN, and `load >= NaN` is always false — so this typo did not raise the
+    // shedding threshold, it deleted shedding. That is the failure the parser exists for.
+    for (const bad of ["75%", "eighty", "1e-1", "0x1", "Infinity", "-0.1", "1.5", "0.5.1"]) {
+      const r = parseRatio(bad, LOAD_THRESHOLD);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.message).toContain("WORKER_LOAD_THRESHOLD");
+    }
+  });
+});
+
+describe("the knobs that used to bypass the parser (W5)", () => {
+  it("gives each one its documented default when unset", () => {
+    expect(parseRatio(undefined, VAD_ACTIVATION)).toEqual({ ok: true, value: 0.5 });
+    expect(parseCount(undefined, VAD_MIN_SILENCE_MS)).toEqual({ ok: true, value: 550 });
+    expect(parseCount(undefined, JOB_MEMORY_WARN_MB)).toEqual({ ok: true, value: 400 });
+    expect(parseCount(undefined, JOB_MEMORY_LIMIT_MB)).toEqual({ ok: true, value: 800 });
+    // The framework's own default, not one this repo invented: D5.2 A/Bs against it.
+    expect(parseCount(undefined, INTERRUPTION_MIN_DURATION_MS)).toEqual({ ok: true, value: 500 });
+  });
+
+  it("refuses a mistyped memory limit rather than removing the limit", () => {
+    // `Number("800mb")` is NaN, and the framework then logs the limit as advisory only — a job with
+    // no ceiling, from a line written to set one.
+    const r = parseCount("800mb", JOB_MEMORY_LIMIT_MB);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.message).toContain("WORKER_JOB_MEMORY_LIMIT_MB");
+    // And a zero limit is refused too: it reads as "no limit" and means "kill everything".
+    expect(parseCount("0", JOB_MEMORY_LIMIT_MB).ok).toBe(false);
   });
 });

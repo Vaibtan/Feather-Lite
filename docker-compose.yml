@@ -183,6 +183,11 @@ services:
       # is LiveKit's hosted detector and self-hosted has no credentials for it (W1). Set `adaptive`
       # on a Cloud deployment.
       WORKER_INTERRUPTION_MODE: ${WORKER_INTERRUPTION_MODE:-vad}
+      # The point at which this worker asks the SFU to prefer another one. Listed because the
+      # admitted concurrency is `floor(WORKER_MAX_JOBS x this)`, not `WORKER_MAX_JOBS` — the
+      # arithmetic the N=10 acceptance run walked into — and `composeLimits.test.ts` reads it from
+      # here so the test and the deployment cannot drift apart (W5).
+      WORKER_LOAD_THRESHOLD: ${WORKER_LOAD_THRESHOLD:-0.75}
     # The arithmetic, from `docker stats` on this container rather than from host processes — which
     # is the only honest source now that the worker only ever runs here (2026-09-01, W11):
     #

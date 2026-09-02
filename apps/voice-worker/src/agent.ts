@@ -17,7 +17,18 @@ import { config as loadEnv } from "dotenv";
 import { type AgentServer, inference, type JobContext, type JobProcess, ServerOptions, cli, defineAgent, voice } from "@livekit/agents";
 import { RoomServiceClient, SipClient } from "livekit-server-sdk";
 import { createAdmissionController } from "./admission.js";
-import { interruptionMode, parseWorkerLimits } from "./env.js";
+import {
+  INTERRUPTION_MIN_DURATION_MS,
+  JOB_MEMORY_LIMIT_MB,
+  JOB_MEMORY_WARN_MB,
+  LOAD_THRESHOLD,
+  VAD_ACTIVATION,
+  VAD_MIN_SILENCE_MS,
+  interruptionMode,
+  parseCount,
+  parseRatio,
+  parseWorkerLimits,
+} from "./env.js";
 import { ControlPlaneClient } from "./control-plane-client.js";
 import { FeatherAgent } from "./feather-agent.js";
 import { buildSpeechStack } from "./speech.js";
@@ -62,6 +73,32 @@ if (!INTERRUPTION.ok) {
   process.exit(1);
 }
 const INTERRUPTION_MODE = INTERRUPTION.ok ? INTERRUPTION.value : "vad";
+
+/**
+ * The five knobs that used to be raw `Number(process.env[...])`, and the one D5.2 needs (W5).
+ *
+ * Every one of them fails the same way `WORKER_MAX_JOBS` did before review #18: `Number("75%")` is
+ * `NaN`, and `NaN` in a comparison is always false — so a mistyped load threshold did not raise
+ * shedding, it removed it, and a mistyped memory limit did not raise the ceiling, it made the
+ * framework log the limit as advisory only. The parser these bypassed exists for exactly that, and
+ * they are behind it now. Every refusal is collected, so an operator fixing a compose file is told
+ * about all of them in one boot.
+ */
+const KNOBS = {
+  loadThreshold: parseRatio(process.env[LOAD_THRESHOLD.name], LOAD_THRESHOLD),
+  vadActivation: parseRatio(process.env[VAD_ACTIVATION.name], VAD_ACTIVATION),
+  vadMinSilenceMs: parseCount(process.env[VAD_MIN_SILENCE_MS.name], VAD_MIN_SILENCE_MS),
+  jobMemoryWarnMb: parseCount(process.env[JOB_MEMORY_WARN_MB.name], JOB_MEMORY_WARN_MB),
+  jobMemoryLimitMb: parseCount(process.env[JOB_MEMORY_LIMIT_MB.name], JOB_MEMORY_LIMIT_MB),
+  interruptionMinDurationMs: parseCount(process.env[INTERRUPTION_MIN_DURATION_MS.name], INTERRUPTION_MIN_DURATION_MS),
+} as const;
+const KNOB_REFUSALS = Object.values(KNOBS).flatMap((r) => (r.ok ? [] : [r.message]));
+if (KNOB_REFUSALS.length > 0) {
+  for (const m of KNOB_REFUSALS) process.stderr.write(`${m}
+`);
+  process.exit(1);
+}
+const knob = (r: { readonly ok: true; readonly value: number } | { readonly ok: false; readonly message: string }, fallback: number): number => (r.ok ? r.value : fallback);
 if (!LIMITS.ok) {
   /**
    * Fail closed, at boot, on stderr (review #18).
@@ -77,7 +114,7 @@ if (!LIMITS.ok) {
 }
 
 const WORKER_MAX_JOBS = LIMITS.maxJobs;
-const WORKER_LOAD_THRESHOLD = Number(process.env["WORKER_LOAD_THRESHOLD"] ?? 0.75);
+const WORKER_LOAD_THRESHOLD = knob(KNOBS.loadThreshold, LOAD_THRESHOLD.fallback);
 /**
  * How many job processes are kept warm (W3).
  *
@@ -128,8 +165,8 @@ process.env["UV_THREADPOOL_SIZE"] ??= String(Math.min(12, availableParallelism()
  * is a hysteresis the plugin did not have and cannot be matched to it.
  */
 const VAD_OPTIONS = {
-  activationThreshold: Number(process.env["WORKER_VAD_ACTIVATION_THRESHOLD"] ?? 0.5),
-  minSilenceDuration: Number(process.env["WORKER_VAD_MIN_SILENCE_MS"] ?? 550),
+  activationThreshold: knob(KNOBS.vadActivation, VAD_ACTIVATION.fallback),
+  minSilenceDuration: knob(KNOBS.vadMinSilenceMs, VAD_MIN_SILENCE_MS.fallback),
 } as const;
 
 /**
@@ -143,8 +180,8 @@ const VAD_OPTIONS = {
  * operator should be told about. Measured job processes sit at 185-290 MB idle and peak near
  * 340 MB during a call, so 400 MB is "look at this" and 800 MB is "this is not a call any more".
  */
-const WORKER_JOB_MEMORY_WARN_MB = Number(process.env["WORKER_JOB_MEMORY_WARN_MB"] ?? 400);
-const WORKER_JOB_MEMORY_LIMIT_MB = Number(process.env["WORKER_JOB_MEMORY_LIMIT_MB"] ?? 800);
+const WORKER_JOB_MEMORY_WARN_MB = knob(KNOBS.jobMemoryWarnMb, JOB_MEMORY_WARN_MB.fallback);
+const WORKER_JOB_MEMORY_LIMIT_MB = knob(KNOBS.jobMemoryLimitMb, JOB_MEMORY_LIMIT_MB.fallback);
 
 const client = new ControlPlaneClient({ baseUrl: CONTROL_PLANE_URL, bearerToken: API_BEARER_TOKEN });
 
@@ -276,7 +313,7 @@ export default defineAgent({
          * `WORKER_INTERRUPTION_MODE=adaptive` selects it back for a Cloud deployment, where it does
          * run and where D5's A/B will want it.
          */
-        interruption: { enabled: true, mode: INTERRUPTION_MODE, falseInterruptionTimeout: 2000, resumeFalseInterruption: true, discardAudioIfUninterruptible: false },
+        interruption: { enabled: true, mode: INTERRUPTION_MODE, minDuration: knob(KNOBS.interruptionMinDurationMs, INTERRUPTION_MIN_DURATION_MS.fallback), falseInterruptionTimeout: 2000, resumeFalseInterruption: true, discardAudioIfUninterruptible: false },
         preemptiveGeneration: { enabled: false }, // one control-plane turn per confirmed user turn
       },
       userAwayTimeout: 12,

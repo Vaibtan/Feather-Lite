@@ -134,3 +134,89 @@ export const interruptionMode = (raw: string | undefined): { readonly ok: true; 
     message: `WORKER_INTERRUPTION_MODE=${JSON.stringify(raw)} is not a mode. It selects how the session decides a barge-in; give "vad" (the only one a self-hosted profile can run) or "adaptive" (LiveKit Cloud), or leave it unset for "vad".`,
   };
 };
+
+/**
+ * A ratio in [0, 1] — a threshold, not a count (issue #4, W5).
+ *
+ * Same rule and same reason as `parseCount`, applied to the settings that had escaped it.
+ * `Number("0.75 ")` is fine, `Number("75%")` is `NaN`, and `NaN` in a comparison is always false —
+ * so `WORKER_LOAD_THRESHOLD=75%` did not raise the shedding threshold, it removed shedding
+ * altogether, and the worker went on telling the SFU it was never busy. That is the same lie the
+ * fail-closed parser was written to stop; it was simply not applied here.
+ */
+export interface RatioSpec {
+  readonly name: string;
+  readonly fallback: number;
+  readonly means: string;
+}
+
+export const parseRatio = (raw: string | undefined, spec: RatioSpec): ParsedCount => {
+  const text = (raw ?? "").trim();
+  if (text === "") return { ok: true, value: spec.fallback };
+  const refuse = (why: string): ParsedCount => ({
+    ok: false,
+    message: `${spec.name}=${JSON.stringify(raw)} ${why}. It is ${spec.means}; give a number between 0 and 1, or leave it unset for ${String(spec.fallback)}.`,
+  });
+  // A decimal fraction and nothing else: `Number` would take "1e-1", "0x1" and " Infinity", and an
+  // operator who typed any of those did not mean the number they would get.
+  if (!/^(?:0|1|0?\.\d+|1\.0+)$/.test(text)) return refuse("is not a number between 0 and 1");
+  const value = Number(text);
+  if (!Number.isFinite(value) || value < 0 || value > 1) return refuse("is not a number between 0 and 1");
+  return { ok: true, value };
+};
+
+/** The shedding threshold the SFU is told about: above it, this worker asks for somebody else. */
+export const LOAD_THRESHOLD: RatioSpec = {
+  name: "WORKER_LOAD_THRESHOLD",
+  fallback: 0.75,
+  means: "the load above which this worker asks the SFU to prefer another one",
+};
+
+/** VAD activation. A threshold, so the ratio parser; 0.5 is both the plugin's and the native default. */
+export const VAD_ACTIVATION: RatioSpec = {
+  name: "WORKER_VAD_ACTIVATION_THRESHOLD",
+  fallback: 0.5,
+  means: "how loud a frame must be before the VAD calls it speech",
+};
+
+/**
+ * How long silence must last before the VAD calls the speech over. 550 ms is the plugin's default
+ * and the value every interruption number here was measured at; the native VAD's own default is
+ * 250 ms, which is a timing change and belongs to an A/B rather than to a swap of engine.
+ */
+export const VAD_MIN_SILENCE_MS: CountSpec = {
+  name: "WORKER_VAD_MIN_SILENCE_MS",
+  min: 0,
+  fallback: 550,
+  means: "how long silence must last before the VAD calls the speech over, in milliseconds",
+};
+
+/** Warn here, kill at the limit. Both were 0, which paid for the monitor and enforced nothing. */
+export const JOB_MEMORY_WARN_MB: CountSpec = {
+  name: "WORKER_JOB_MEMORY_WARN_MB",
+  min: 1,
+  fallback: 400,
+  means: "the per-job memory a warning is logged at, in megabytes",
+};
+
+export const JOB_MEMORY_LIMIT_MB: CountSpec = {
+  name: "WORKER_JOB_MEMORY_LIMIT_MB",
+  min: 1,
+  fallback: 800,
+  means: "the per-job memory a job is killed at, in megabytes",
+};
+
+/**
+ * How long a barge-in must last before it counts (D5.2's knob).
+ *
+ * The framework's default is 500 ms (`voice/turn_config/interruption.js` in the installed 1.6.4).
+ * It had no knob at all here, and D5.2 is an A/B on exactly this value against the backchannel
+ * scenario — so the knob exists now, parsed like the rest, and unset means the framework's default
+ * rather than a number this repo invented.
+ */
+export const INTERRUPTION_MIN_DURATION_MS: CountSpec = {
+  name: "WORKER_INTERRUPTION_MIN_DURATION_MS",
+  min: 0,
+  fallback: 500,
+  means: "how long a barge-in must last before the agent yields, in milliseconds",
+};

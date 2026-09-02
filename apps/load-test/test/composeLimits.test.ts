@@ -38,6 +38,13 @@ const envDefault = (block: string, key: string): number => {
   return Number(m?.[1] ?? m?.[2]);
 };
 
+/** The same read, for a value that is a fraction rather than a count (W5). */
+const envDefaultFloat = (block: string, key: string): number => {
+  const m = new RegExp(`${key}:\\s*(?:\\$\\{${key}:-([\\d.]+)\\}|([\\d.]+))`).exec(block);
+  expect(m, `${key} not found in the worker service`).not.toBeNull();
+  return Number(m?.[1] ?? m?.[2]);
+};
+
 const memLimitMb = (block: string): number => {
   const m = /mem_limit:\s*(\d+)([gm])/i.exec(block);
   expect(m, "mem_limit not found in the worker service").not.toBeNull();
@@ -66,7 +73,16 @@ const PER_CALL_MB = 240; // ~200 MB measured, +20 %; confirmed exactly at N=9: (
  * run's tenth call finalized `NEVER_SERVED` without the worker ever seeing it.
  */
 const ACCEPTANCE_CALLS = 10;
-const LOAD_THRESHOLD = 0.75; // `WORKER_LOAD_THRESHOLD`'s default, in `agent.ts`
+/**
+ * Read from the compose file rather than repeated here (W5).
+ *
+ * It was a literal `0.75` with a comment pointing at `agent.ts`, which is the arrangement this file
+ * exists to prevent everywhere else: the whole point of `composeLimits.test.ts` is that the sizing
+ * arithmetic and the deployment cannot drift apart silently, and a constant copied out of another
+ * file drifts exactly that way. `WORKER_LOAD_THRESHOLD` is now on the worker service, so it can be
+ * read from the same place the container reads it.
+ */
+const LOAD_THRESHOLD = envDefaultFloat(workerBlock(), "WORKER_LOAD_THRESHOLD");
 const ACCEPTANCE_CEILING = 14; // 14 x 0.75 = 10.5, so ten are assigned and the eleventh is shed
 
 describe("docker-compose worker sizing", () => {
