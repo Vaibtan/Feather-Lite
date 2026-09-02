@@ -180,6 +180,125 @@ Turn latency p50/p95 3 009 / 3 313 ms and `total_ms` 2 405 / 2 746 ms on this ru
 calmer than the previous hour's (`ttft_ms` p95 1 236 against 3 651), which is OpenAI's variance and
 not this change.
 
+## 2026-09-02 — tier 3, and the read-back defect reproduced on demand (issue #1 Phase 1)
+
+Tier 3 is one seeded scenario, one call, and the ledger shape that call must leave. It is a
+**composition, not a second harness** (issue #1, user story 29): `bootstrapRoom` and
+`runScriptedCall` join the room and run a `BorrowerScript` (H9), the line cache synthesises the
+persona (H9), the RMS detector keeps every sample (H1), `withPlayoutTruth` attaches the ledger's
+playout truth (H11), `turnTakingMetrics` produces D4's six numbers, `makeRng` makes the stochastic
+parts reproducible (H7). `sim-borrower.ts` wires those to a scenario table.
+
+```
+pnpm --filter @feather-lite/voice-worker sim-borrower -- --scenario yes-during-read-back --seed 7 --label onset
+```
+
+The report is `${date}-tier3-${scenario}-${label}.json` and it carries the **seed, the scenario, the
+persona and the interruption mode**, because a tier-3 number without those four is not reproducible
+and should not be quoted.
+
+### Three scenarios run; two are declared and refused
+
+`clean-happy-path`, `yes-during-read-back`, `backchannel-mid-line` and `hold-request` run today.
+`third-party-pickup` and `accent-noise-ablation` need Phase 4's machinery (a second participant in
+the room, the degradation chain), so they declare it in `needs` and the runner **exits 2 rather than
+running one it cannot exercise** — a scenario that ran without its machinery would report a green it
+did not earn. Declaring them now is the point of a table: the shapes are reviewable before the
+machinery exists.
+
+Each scenario also declares what it **runs but does not yet check**. D4 asks the backchannel scenario
+for a recorded `resume` and the hold scenario for a `wait`; both are decisions issue #1's D1/D2
+introduce and neither exists to assert against. That half is named in `notYetAsserted`, printed on
+every run and carried in the report — a gate you think you passed is worse than one you know you
+skipped.
+
+### Every run on the final tree
+
+| scenario | seed | outcome | read-backs | response | yield | yield_ms | excluded (H11) | exit |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| `clean-happy-path` | 1 | PROMISE_TO_PAY | 1 | 1 | 1 | 950 | 1 | **0** |
+| `yes-during-read-back` | 7 | PROMISE_TO_PAY | **2** | 0.75 | 0.5 | 761 | 2 | **0** |
+| `backchannel-mid-line` | 3 | PROMISE_TO_PAY | 1 | 0.75 | 1 | 739 | 1 | 0 (known-red) |
+| `backchannel-mid-line` | 11 | PROMISE_TO_PAY | 1 | 0.75 | 1 | 682 | 1 | 0 (known-red) |
+| `hold-request` | 3 | NO_ANSWER | 1 | 0.5 | n/a | n/a | 2 | 1 |
+
+**These are VAD-interruption numbers** (amendment 8), and they are single calls — the N=5 medians
+above remain the baseline.
+
+### A known-red scenario is a tripwire, not a permanent failure
+
+`backchannel-mid-line` asserts D4's clause verbatim — "expects no truncated agent line" — and the
+current system truncates: VAD stops the agent for "mm-hm". Neither available option was acceptable.
+Relaxing the expectation asserts the defect and has to be rewritten the day it is fixed; leaving the
+run permanently red teaches a reader that red means nothing.
+
+So a scenario may carry `expectedToFail: { reason, until }`. The expectation stays as D4 wrote it,
+the run **passes while it fails for the stated reason**, and it **fails the moment it starts
+passing** — which is the signal that the phase named in `until` landed. Truncation is read from
+`AGENT_TURN_PLAYOUT.interrupted`, and **no playout rows fails** rather than passing for want of
+evidence: that is the defect C1 fixed in the read-back guard, and a harness must not reintroduce it
+one directory over.
+
+**The tripwire earned its keep within the hour.** `hold-request` was marked known-red on a single
+observation — one run ended `NO_ANSWER` at 161 s with the promise never recorded. The very next run
+of the same seed passed cleanly and the runner refused it: *"passes now, and the scenario still says
+it should not."* The mark came off. A scenario is known-red only when it is reliably red;
+`backchannel-mid-line` was red on three runs across two seeds before it kept its mark.
+
+### The defect reproduces, and the first attempt to reproduce it did not
+
+### The defect reproduces, and the first attempt to reproduce it did not
+
+`yes-during-read-back` asserts `readBacks: { atLeast: 2 }`, and it now gets two:
+
+```
++63882ms agent said: "To confirm: you will pay 550 dollars"
++76319ms agent said: "Let me repeat that. To confirm: you will pay 550 dollars by Friday, ..."
+```
+
+The borrower's "yes" lands mid-read-back, is transcribed, commits a turn, is refused by the
+fully-heard guard, and eight seconds of read-back play again — on the turn the borrower was most
+ready to agree on. This is the shape of conversation `da3dcff9-…`, and it is what issue #1's D1
+(`held`) exists to fix; Phase 2 flips `atMost` to 1 as its own verification.
+
+**The first version of this scenario reported one read-back, and the fault was the scenario's.** It
+waited for the read-back's *transcript* and then spoke. A transcript segment arrives when it
+**closes** — i.e. once the agent has finished saying the line — so the "yes" was landing *after* the
+read-back, which is an ordinary confirmation and reproduces nothing. Nothing was wrong with the
+system; the harness was measuring a different act.
+
+The fix is the seam H1 built for exactly this: `CallContext.waitNextStretchStart` returns the
+**onset** of the agent's next stretch of speech. Onsets are the only thing that can say "the agent is
+talking *now*". Same seed, same scenario, same tree, one changed line of timing — 1 read-back became
+2. **Worth keeping: in a voice harness, the transcript is a lagging indicator and cannot be used to
+time an interruption.**
+
+### Three defects the tier-3 work exposed in code already committed
+
+1. **`harness` was on the column and never on the wire.** Migration 0009 added
+   `conversations.harness`, `Workflow.StartCallInput` accepted it and `latencyAggregateForSegment`
+   filtered on it — but `POST /api/voice/sessions` had no such field, `VoiceSessions.create` had no
+   such input, and `ConversationDetail` did not return it. Every simulator call was landing with
+   `harness = null`, i.e. **inside** the window the product's latency claim is made from, which is
+   the one thing the column exists to prevent. Wired end to end; the report now reads `"sim"` back,
+   which is what proves the column was written.
+2. **Tier 3 re-invented the command line H6 had already fixed.** Its first cut carried an ad hoc
+   `flag()` helper with an optional `--label` defaulting to the scenario id — the exact collision
+   that cost a tracked report earlier the same day — and silently ignored unknown flags. The scanner
+   moved to `harness-args.ts`; `fleet-args.ts` and `sim-borrower.ts` now share it, each declaring
+   only its own flags. (`shed-probe.ts` still has its own; it is next.)
+3. **Tier 3 dialled the seeded demo borrower every run** and the sixth call of the day was refused
+   with `FREQUENCY_CAP` — a real pre-call rule doing its job, and a harness that cannot be run twice
+   is not a harness. It mints a throwaway fixture per run now, the way the fleet does;
+   `TRACER_BORROWER` still overrides.
+
+### Open: what a hold does to a call
+
+`hold-request` ended `NO_ANSWER` on two of three runs (seed 3), at **156 s and 161 s** against a
+clean path's ~99 s, with `confirm_right_party` and `propose_promise_to_pay` recorded but never
+`record_promise_to_pay` — the promise the borrower offered is lost. The third run passed cleanly.
+Not diagnosed, and deliberately **not** marked known-red on a 2-of-3 signal.
+
 ## 2026-09-02 — the first turn-taking numbers (issue #1 Phase 1)
 
 D4's six metrics, computed from a real call for the first time. Every piece existed and none of them

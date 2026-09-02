@@ -1,0 +1,92 @@
+{
+  "tier": "3-sim",
+  "scenario": "clean-happy-path",
+  "seed": {
+    "given": "1",
+    "resolved": 1
+  },
+  "persona": null,
+  "interruption_mode": "vad",
+  "label": "final",
+  "conversation_id": "ade42b13-3a59-4d98-98f0-d59cb88f2826",
+  "harness": "sim",
+  "expected": {
+    "failures": [],
+    "verdict": "as expected",
+    "exit_code": 0,
+    "expected_to_fail": null,
+    "outcome": "PROMISE_TO_PAY",
+    "tools": [
+      "confirm_right_party",
+      "propose_promise_to_pay",
+      "record_promise_to_pay"
+    ],
+    "not_yet_asserted": []
+  },
+  "turn_taking": {
+    "response_rate": 1,
+    "yield_rate": 1,
+    "yield_latency_ms": 950,
+    "false_interrupt_rate": null,
+    "agent_interrupt_rate": 0,
+    "selectivity": null,
+    "counts": {
+      "lines": 3,
+      "interruptions": 1,
+      "non_directed": 0,
+      "non_directed_during_agent_speech": 0,
+      "unknown_truncation": 1
+    }
+  },
+  "slo": {
+    "verdict": "breach",
+    "segment": {
+      "channel": null,
+      "decider": null,
+      "calls_requested": 50,
+      "calls_found": 50
+    },
+    "breaches": [
+      "total_ms",
+      "eou_delay_ms",
+      "transcription_delay_ms",
+      "ttft_ms"
+    ],
+    "insufficient": [],
+    "window_conversations": 50,
+    "excluded_by_rule": "harness IS NOT DISTINCT FROM null (Queries.latencyAggregateForSegment)"
+  },
+  "compliance": {
+    "checks": {
+      "compliance.mini_miranda_first": true,
+      "compliance.no_promise_without_readback": true,
+      "compliance.no_protected_before_rpc": true
+    },
+    "failed": [],
+    "count": 3
+  },
+  "entities": {
+    "measured": false,
+    "entity_er": null,
+    "note": "stt.entity_er is D3 (Phase 3); not measured"
+  },
+  "agent_stretches": {
+    "live": 4,
+    "post_hoc": 4
+  },
+  "stt_wer": [
+    {
+      "turn": "yes this is the borrower",
+      "wer": 0
+    },
+    {
+      "turn": "BARGE-IN: I can pay 550 on Friday",
+      "wer": 0
+    },
+    {
+      "turn": "yes, that's correct",
+      "wer": 0
+    }
+  ],
+  "duration_ms": 88163
+}
