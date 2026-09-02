@@ -97,8 +97,18 @@ export class FeatherAgent extends voice.Agent {
    * and produce ZERO frames (seen: Deepgram websocket connect hang); the framework's 10s watchdog
    * then force-closes the speech and the chat item arrives looking fully played. Reporting that as
    * heard would poison the fully-heard guard — the ledger would believe the borrower heard a
-   * read-back that was never spoken. `tts_metrics` fires on first synthesis byte, well before the
-   * item-added event that triggers `reportPlayout`, so its absence at report time means silence.
+   * read-back that was never spoken.
+   *
+   * **What `tts_metrics` actually fires on** (W8), read from the installed 1.6.4 rather than
+   * assumed: `tts/tts.js` calls its `emit()` when a synthesised chunk arrives with `audio.final`,
+   * i.e. at the **end of a segment's synthesis** — not on the first byte, as this comment used to
+   * say. `ttfbMs` *inside* the event is measured to the first byte; the event itself is late.
+   *
+   * The guard still holds, and for a reason worth writing down rather than inheriting: a segment is
+   * synthesised before it has finished *playing*, and `reportPlayout` runs on the item-added event
+   * that follows playback. So the metrics still precede the report, and their absence at report time
+   * still means nothing was synthesised at all. The conclusion was right; the stated mechanism was
+   * not, and a guard defended by a wrong reason is one nobody can safely change.
    */
   private ttsProducedAudio = new Set<string>();
 
