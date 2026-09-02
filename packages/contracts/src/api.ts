@@ -117,6 +117,14 @@ export const ConversationDetail = Schema.Struct({
     final_outcome: Schema.NullOr(Schema.String),
     final_outcome_metadata: JsonRecord,
     channel: Schema.String,
+    /**
+     * Which harness placed this call, or null for a real one (issue #1, D4). `"sim"` is tier 3.
+     *
+     * Exposed because the harness that set it is the reader that has to check it landed: the column
+     * is what keeps a simulator call out of the window the product's latency claim is made from, and
+     * a column nothing can read back is a column nothing can verify.
+     */
+    harness: Schema.NullOr(Schema.String),
     current_state: Schema.String,
     protected_context_unlocked: Schema.Boolean,
     transfer_target: Schema.NullOr(Schema.String),
@@ -524,6 +532,14 @@ export const VoiceSessionRequest = Schema.Struct({
   participant_name: Schema.optional(Schema.String),
   /** "browser" joins via WebRTC token; "sip" dials the contact point through the configured trunk. */
   mode: Schema.optional(Schema.Literal("browser", "sip")),
+  /**
+   * Which harness placed this call (issue #1, D4). `"sim"` is the tier-3 simulator.
+   *
+   * On the wire because the column cannot be inferred: a tier-3 call is `channel: "voice"` served by
+   * the real decider, which is exactly what the default SLO segment selects, so only the caller
+   * knows. Absent for a real call, and absent is what keeps it in the window.
+   */
+  harness: Schema.optional(Schema.String),
 });
 export const VoiceSessionResponse = Schema.Struct({
   conversation_id: Schema.String,

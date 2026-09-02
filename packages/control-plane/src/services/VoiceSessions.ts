@@ -29,6 +29,14 @@ export interface VoiceSessionInput {
    */
   readonly workflowExecutionId?: string | undefined;
   readonly workflowType?: WorkflowType | undefined;
+  /**
+   * Which harness placed this call (issue #1, D4). `"sim"` is the tier-3 simulator.
+   *
+   * Passed through untouched rather than inferred: a tier-3 call is `channel: "voice"` served by the
+   * real decider, so nothing on this side of the wire can tell it from the calls the product's
+   * latency claim is made from.
+   */
+  readonly harness?: string | undefined;
 }
 
 export interface VoiceSession extends StartCallResult {
@@ -69,6 +77,7 @@ export class VoiceSessions extends Effect.Service<VoiceSessions>()("@feather-lit
           now: input.now,
           ...(input.workflowExecutionId === undefined ? {} : { workflowExecutionId: input.workflowExecutionId }),
           ...(input.workflowType === undefined ? {} : { workflowType: input.workflowType }),
+          ...(input.harness === undefined ? {} : { harness: input.harness }),
         });
         const contactPoint = yield* crm.findContactPoint(input.contactPointId);
         const roomName = roomNameFor(call.conversationId);

@@ -35,6 +35,7 @@ export interface ConversationDetail {
     readonly final_outcome: string | null;
     readonly final_outcome_metadata: Record<string, unknown>;
     readonly channel: string;
+    readonly harness: string | null;
     readonly current_state: string;
     readonly protected_context_unlocked: boolean;
     readonly transfer_target: string | null;
@@ -95,6 +96,7 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
             final_outcome: row.finalOutcome,
             final_outcome_metadata: row.finalOutcomeMetadata,
             channel: row.channel,
+            harness: row.harness,
             current_state: row.currentState,
             protected_context_unlocked: row.protectedContextUnlocked,
             transfer_target: row.transferTarget,

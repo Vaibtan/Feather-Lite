@@ -459,7 +459,14 @@ export const VoiceLive = HttpApiBuilder.group(FeatherApi, "voice", (handlers) =>
     const sessions = yield* VoiceSessions;
     return handlers.handle("createSession", ({ payload }) =>
       sessions
-        .create({ borrowerId: payload.borrower_id, contactPointId: payload.contact_point_id, participantIdentity: payload.participant_identity, participantName: payload.participant_name, mode: payload.mode ?? "browser" })
+        .create({
+          borrowerId: payload.borrower_id,
+          contactPointId: payload.contact_point_id,
+          participantIdentity: payload.participant_identity,
+          participantName: payload.participant_name,
+          mode: payload.mode ?? "browser",
+          harness: payload.harness,
+        })
         .pipe(
           Effect.map((s) => ({
             conversation_id: s.conversationId,
