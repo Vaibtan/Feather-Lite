@@ -70,6 +70,18 @@ export interface ScriptedLines {
   /** Answer to an amount-clarifying question, if the agent asks one instead of proposing. */
   readonly amount: ScriptedLine;
   readonly confirm: ScriptedLine;
+  /**
+   * The tier-3 lines (issue #1, D4). Synthesised with the rest so a scenario pays no cost the first
+   * time it runs, and cached by the same key.
+   *
+   * `backchannel` is the "mm-hm" D1's `resume` is about: short, no content, and the thing that
+   * should *not* stop the agent. `hold` is the "hold on" that should stop it and buy silence.
+   * `yesEarly` is the same word as `confirm` and a different act — said *during* the read-back
+   * rather than after it, which is the one D4 scenario that reproduces a known live defect.
+   */
+  readonly backchannel: ScriptedLine;
+  readonly hold: ScriptedLine;
+  readonly yesEarly: ScriptedLine;
   readonly sampleRate: number;
   readonly channels: number;
   readonly cached: boolean;
@@ -103,15 +115,24 @@ export const loadScriptedLines = async (persona?: BorrowerPersona): Promise<Scri
     const PAY = "Actually, wait. I can pay 550 dollars on Friday.";
     const AMOUNT = "The full balance. 550 dollars.";
     const CONFIRM = "Yes, that's correct.";
+    const BACKCHANNEL = "Mm-hm.";
+    const HOLD = "Hold on, let me get my card.";
+    const YES_EARLY = "Yes.";
     const yes = await synthesizeCached(speech.tts, YES, key);
     const pay = await synthesizeCached(speech.tts, PAY, key);
     const amount = await synthesizeCached(speech.tts, AMOUNT, key);
     const confirm = await synthesizeCached(speech.tts, CONFIRM, key);
+    const backchannel = await synthesizeCached(speech.tts, BACKCHANNEL, key);
+    const hold = await synthesizeCached(speech.tts, HOLD, key);
+    const yesEarly = await synthesizeCached(speech.tts, YES_EARLY, key);
     return {
       yes: { frames: yes.frames, text: YES },
       pay: { frames: pay.frames, text: PAY },
       amount: { frames: amount.frames, text: AMOUNT },
       confirm: { frames: confirm.frames, text: CONFIRM },
+      backchannel: { frames: backchannel.frames, text: BACKCHANNEL },
+      hold: { frames: hold.frames, text: HOLD },
+      yesEarly: { frames: yesEarly.frames, text: YES_EARLY },
       sampleRate: yes.sampleRate,
       channels: yes.channels,
       cached: yes.cached && pay.cached && amount.cached && confirm.cached,
@@ -143,6 +164,14 @@ export interface ScriptedCallOptions {
   readonly onStretchEnd?: ((index: number, atMs: number) => void) | undefined;
   /** Short tag used in log lines so concurrent calls are readable. */
   readonly label: string;
+  /**
+   * Which harness this is, stamped on the conversation row (issue #1, D4). `"sim"` is tier 3.
+   *
+   * The one thing that keeps a simulator call out of the window the product's latency claim is made
+   * from: a tier-3 call is `channel: "voice"` served by the real decider, so neither of the other
+   * two segment columns can tell it apart. Left unset by tier 2, whose calls belong in the window.
+   */
+  readonly harness?: string | undefined;
   readonly log?: (message: string) => void;
   /**
    * Chaos hook: once the agent has actually replied — so there is a live call to break — this is
@@ -274,6 +303,14 @@ export interface CallContext {
   readonly agentSaid: ReadonlyArray<{ readonly at: number; readonly text: string }>;
   /** Whether the agent has left the room. */
   readonly agentGone: boolean;
+  /**
+   * Wait for the agent's next stretch of speech to **begin**, returning its onset or null (H1).
+   *
+   * The seam that makes "interrupt 400 ms into the agent's next line" expressible. A script that
+   * waits for the line's *transcript* and then speaks is speaking after it, because a segment
+   * arrives when it closes.
+   */
+  readonly waitNextStretchStart: (timeoutMs: number) => Promise<number | null>;
   /** Wait for the agent to hang up, or give up. Returns whether it did. */
   readonly waitForHangup: (timeoutMs: number) => Promise<boolean>;
 }
@@ -419,6 +456,7 @@ export const bootstrapRoom = async (opts: ScriptedCallOptions): Promise<{ roomNa
       participant_identity: opts.participantIdentity,
       participant_name: `${opts.borrowerName} (headless)`,
       mode: "browser",
+      ...(opts.harness === undefined ? {} : { harness: opts.harness }),
     }),
   });
   if (!res.ok) throw new Error(`voice session ${res.status}: ${await res.text()}`);
@@ -454,6 +492,16 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
   const SAMPLE_STRIDE = 4;
   /** The live onset index, reconciled against the post-hoc one when the call ends (H1). */
   let liveStretches = 0;
+  /**
+   * When each agent stretch began, on the audio clock (H1).
+   *
+   * The seam a scenario needs to interrupt *into* a line rather than after it. The transcript is a
+   * lagging indicator — a segment arrives when it closes, i.e. once the agent has finished saying
+   * it — so a scenario that waits for the read-back's text and then speaks is speaking **after** the
+   * read-back, which is a different act entirely. Onsets are the only thing that says "the agent is
+   * talking *now*".
+   */
+  const stretchStarts: number[] = [];
   const unmatchedTranscripts: string[] = [];
   /**
    * The line currently being spoken (or most recently spoken), collecting every borrower-final
@@ -574,6 +622,7 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
             if (!inStretch) {
               inStretch = true;
               liveStretches += 1;
+              stretchStarts.push(atMs);
               opts.onStretchStart?.(liveStretches, atMs);
             }
             lastLoudMs = atMs;
@@ -737,6 +786,24 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       agentSaid,
       get agentGone() {
         return agentGone;
+      },
+      /**
+       * Wait for the agent's next stretch of speech to **begin** (H1).
+       *
+       * Returns the onset instant, or null on timeout. This is what lets a scenario say "400 ms into
+       * the agent's next line" — the thing the transcript cannot answer, because by the time a
+       * segment arrives the line is over.
+       */
+      waitNextStretchStart: async (timeoutMs: number) => {
+        const from = stretchStarts.length;
+        const started = Date.now();
+        while (Date.now() - started < timeoutMs) {
+          const at = stretchStarts[from];
+          if (at !== undefined) return at;
+          if (agentGone) return null;
+          await sleep(50);
+        }
+        return null;
       },
       waitForHangup: async (timeoutMs: number) => {
         const waitStart = Date.now();
