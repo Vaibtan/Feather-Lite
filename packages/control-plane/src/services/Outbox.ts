@@ -350,6 +350,22 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
               : processJob(job, now).pipe(
                   Effect.catchAll((err) =>
                     Effect.gen(function* () {
+                      /**
+                       * The clock is read **here**, not reused from the claim (C12).
+                       *
+                       * `now` above is stamped when the batch is claimed, and a job can fail a long
+                       * way after that — a JUDGE job waits on a reasoning model, and the batch runs
+                       * four at a time. Backing off "five minutes from when the batch started" is
+                       * five minutes minus however long the job took, and on a slow enough job the
+                       * next attempt is available before this one finished failing.
+                       *
+                       * Deliberately the *same* clock the claim reads, not `Date.now()`. That is
+                       * issue #3's lesson one layer down: `available_at` is compared against
+                       * whatever clock `claimDueJobs` is given, so a wall-clock stamp under a frozen
+                       * test clock would put the retry permanently out of reach — which is exactly
+                       * the bug that skipped `workers.test.ts` for two weeks.
+                       */
+                      const failedAt = DateTime.toDateUtc(yield* DateTime.now);
                       const retry = Number(job.payload["retry_count"] ?? 0) + 1;
                       if (retry < retriesFor(job.jobType)) {
                         yield* sched.finishJob({
@@ -358,12 +374,12 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
                           result: {},
                           error: String(err),
                           processedAt: null,
-                          availableAt: new Date(now.getTime() + Math.min(60, retry * 5) * 60_000),
+                          availableAt: new Date(failedAt.getTime() + Math.min(60, retry * 5) * 60_000),
                           payloadPatch: { retry_count: retry },
                         });
                         return { jobId: job.id, jobType: job.jobType, status: "PENDING" as const };
                       }
-                      yield* sched.finishJob({ id: job.id, status: "FAILED", result: {}, error: String(err), processedAt: now, payloadPatch: { retry_count: retry } });
+                      yield* sched.finishJob({ id: job.id, status: "FAILED", result: {}, error: String(err), processedAt: failedAt, payloadPatch: { retry_count: retry } });
                       return { jobId: job.id, jobType: job.jobType, status: "FAILED" as const };
                     }),
                   ),
