@@ -16,6 +16,7 @@
  * Everything else in the session (silero VAD, the multilingual EOT model, RemoteOrchestratorLLM) is
  * provider-independent.
  */
+import { STT_FILLER_WORDS, parseFlag } from "./env.js";
 import { type stt as sttBase, type tts as ttsBase, inference } from "@livekit/agents";
 import * as deepgram from "@livekit/agents-plugin-deepgram";
 
@@ -73,11 +74,27 @@ export const buildSpeechStack = (voice?: string): SpeechStack => {
   }
 
   const deepgramSttModel = stripProvider(sttModel);
+  /** Parsed, never coerced, so a typo is a refusal rather than a silently-off gate (amendment 10). */
+  const fillerFlag = parseFlag(process.env[STT_FILLER_WORDS.name], STT_FILLER_WORDS);
+  if (!fillerFlag.ok) throw new Error(fillerFlag.message);
+  const sttFillerWords = fillerFlag.value;
   const auraModel = voice ?? process.env["DEEPGRAM_TTS_MODEL"] ?? DEFAULT_PLUGINS_TTS_VOICE;
   const apiKey = requireKey("DEEPGRAM_API_KEY", "Deepgram STT + Aura TTS");
   return {
     provider,
-    stt: new deepgram.STT({ apiKey, model: deepgramSttModel, language: "en" }),
+    /**
+     * `fillerWords` is what makes D1's `resume` possible (issue #1, Phase 2).
+     *
+     * The plugin defaults it to `false`, which maps to Deepgram's `filler_words=false`, and the
+     * effect is that a backchannel is not transcribed at all: across three tier-3 backchannel runs
+     * the "Mm-hm." line scored **WER 1.000** while every other line in the same calls scored 0. D1's
+     * classifier runs on the interim transcript of exactly that utterance, so with fillers filtered
+     * it has no input and can never fire.
+     *
+     * Off by default here too, because it changes what every transcript contains and therefore what
+     * the word-error gate measures. `WORKER_STT_FILLER_WORDS=true` turns it on for the A/B.
+     */
+    stt: new deepgram.STT({ apiKey, model: deepgramSttModel, language: "en", fillerWords: sttFillerWords }),
     tts: new deepgram.TTS({ apiKey, model: auraModel }),
     describe: `plugins stt=deepgram/${deepgramSttModel} tts=deepgram/${auraModel}`,
   };

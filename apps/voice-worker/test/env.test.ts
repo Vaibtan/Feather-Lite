@@ -10,7 +10,7 @@
  * The table is the point. Every row is a value an operator can actually type.
  */
 import { describe, expect, it } from "vitest";
-import { MAX_JOBS, IDLE_PROCESSES, parseCount, parseWorkerLimits, interruptionMode, parseRatio, LOAD_THRESHOLD, VAD_ACTIVATION, VAD_MIN_SILENCE_MS, JOB_MEMORY_WARN_MB, JOB_MEMORY_LIMIT_MB, INTERRUPTION_MIN_DURATION_MS } from "../src/env.js";
+import { MAX_JOBS, IDLE_PROCESSES, parseCount, parseWorkerLimits, interruptionMode, parseRatio, LOAD_THRESHOLD, VAD_ACTIVATION, VAD_MIN_SILENCE_MS, JOB_MEMORY_WARN_MB, JOB_MEMORY_LIMIT_MB, INTERRUPTION_MIN_DURATION_MS, parseFlag } from "../src/env.js";
 
 describe("parseCount", () => {
   it("takes a whole number at or above the minimum", () => {
@@ -161,5 +161,29 @@ describe("the knobs that used to bypass the parser (W5)", () => {
     if (!r.ok) expect(r.message).toContain("WORKER_JOB_MEMORY_LIMIT_MB");
     // And a zero limit is refused too: it reads as "no limit" and means "kill everything".
     expect(parseCount("0", JOB_MEMORY_LIMIT_MB).ok).toBe(false);
+  });
+});
+
+describe("parseFlag", () => {
+  const spec = { name: "WORKER_THING", fallback: false, means: "a thing" };
+
+  it("takes the fallback when unset or blank, because a default is a decision", () => {
+    expect(parseFlag(undefined, spec)).toEqual({ ok: true, value: false });
+    expect(parseFlag("   ", spec)).toEqual({ ok: true, value: false });
+    expect(parseFlag(undefined, { ...spec, fallback: true })).toEqual({ ok: true, value: true });
+  });
+
+  it("accepts the spellings an operator actually types", () => {
+    for (const on of ["true", "TRUE", "1", "yes", "on"]) expect(parseFlag(on, spec)).toEqual({ ok: true, value: true });
+    for (const off of ["false", "False", "0", "no", "off"]) expect(parseFlag(off, spec)).toEqual({ ok: true, value: false });
+  });
+
+  it("refuses a typo rather than reading it as false", () => {
+    // The whole reason these are parsed rather than coerced: `WORKER_THING=ture` silently off is a
+    // gate you think you passed, which is worse than one you know you skipped.
+    const r = parseFlag("ture", spec);
+    expect(r.ok).toBe(false);
+    expect(!r.ok && r.message).toContain("WORKER_THING");
+    expect(!r.ok && r.message).toContain("a thing");
   });
 });

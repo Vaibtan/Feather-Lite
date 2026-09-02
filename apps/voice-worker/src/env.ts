@@ -70,6 +70,35 @@ export const IDLE_PROCESSES: CountSpec = {
  * reads as "no ceiling", which is the exact failure being fixed. A count of things is a run of
  * digits with an optional sign, and nothing else.
  */
+/** A knob that is on or off. Same shape as `CountSpec`, so a refusal reads the same way. */
+export interface FlagSpec {
+  readonly name: string;
+  readonly fallback: boolean;
+  readonly means: string;
+}
+
+export type ParsedFlag = { readonly ok: true; readonly value: boolean } | { readonly ok: false; readonly message: string };
+
+const TRUE = new Set(["true", "1", "yes", "on"]);
+const FALSE = new Set(["false", "0", "no", "off"]);
+
+/**
+ * Parsed, never coerced (amendment 10).
+ *
+ * `Boolean(process.env.X)` reads `"false"` as true and `WORKER_X=ture` as false, and both are the
+ * same failure: a gate you think you set. A typo is a refusal that names the variable.
+ */
+export const parseFlag = (raw: string | undefined, spec: FlagSpec): ParsedFlag => {
+  const text = (raw ?? "").trim().toLowerCase();
+  if (text === "") return { ok: true, value: spec.fallback };
+  if (TRUE.has(text)) return { ok: true, value: true };
+  if (FALSE.has(text)) return { ok: true, value: false };
+  return {
+    ok: false,
+    message: `${spec.name}=${JSON.stringify(raw)} is not a yes or a no. It is ${spec.means}; give one of true/false, 1/0, yes/no, on/off, or leave it unset for ${String(spec.fallback)}.`,
+  };
+};
+
 export const parseCount = (raw: string | undefined, spec: CountSpec): ParsedCount => {
   const text = (raw ?? "").trim();
   if (text === "") return { ok: true, value: spec.fallback };
@@ -214,6 +243,23 @@ export const JOB_MEMORY_LIMIT_MB: CountSpec = {
  * scenario — so the knob exists now, parsed like the rest, and unset means the framework's default
  * rather than a number this repo invented.
  */
+/**
+ * Ask Deepgram to transcribe filler words — "mm-hm", "uh-huh", "um" (issue #1, D1's `resume`).
+ *
+ * Off by default in the plugin, and that is what breaks D1's `resume`: the classifier runs on the
+ * **interim transcript** of a backchannel, and with fillers filtered there is no interim to classify.
+ * Measured across three tier-3 backchannel runs, the "Mm-hm." line scored **WER 1.000** — nothing
+ * transcribed — while every other line in the same calls scored 0.
+ *
+ * A knob rather than a constant because it changes what every transcript contains, so its effect on
+ * the word-error gate has to be measurable in both positions.
+ */
+export const STT_FILLER_WORDS: FlagSpec = {
+  name: "WORKER_STT_FILLER_WORDS",
+  fallback: false,
+  means: "transcribe filler words and backchannels, which D1's `resume` classifier needs as input",
+};
+
 export const INTERRUPTION_MIN_DURATION_MS: CountSpec = {
   name: "WORKER_INTERRUPTION_MIN_DURATION_MS",
   min: 0,

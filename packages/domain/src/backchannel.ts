@@ -35,6 +35,13 @@ const TOKENS = new Set([
   "right",
   "mmhm",
   "mhm",
+  // The transcriber's spellings, not the author's. Deepgram nova-3 returned "Mhmm." for the
+  // harness's "Mm-hm.", and the first version of this list rejected it — so the one utterance the
+  // mechanism exists for was classified as speech.
+  "mhmm",
+  "mmhmm",
+  "mhmmm",
+  "uhhmm",
   "mm",
   "mmm",
   "hm",

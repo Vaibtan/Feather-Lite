@@ -180,7 +180,59 @@ Turn latency p50/p95 3 009 / 3 313 ms and `total_ms` 2 405 / 2 746 ms on this ru
 calmer than the previous hour's (`ttft_ms` p95 1 236 against 3 651), which is OpenAI's variance and
 not this change.
 
-## 2026-09-02 — D1 `resume` is built, and it cannot fire: the SDK never pauses on this configuration
+## 2026-09-02 — D1 `resume`: the chain, link by link, and which links are fixed
+
+**This supersedes the section below it, which was written on an inference that later evidence
+refined.** That section concluded "the SDK never pauses on this configuration". The stronger reading
+of the same data is narrower and is in the table here: `pausedSpeech` was observed false on eight
+interims, but **all eight were the borrower's own turns**, when the agent was not speaking and there
+was correctly nothing to pause. The one case that matters — an interim *during* an agent line — never
+occurred, for a reason two links upstream.
+
+`resume` needs five things in a row. Running it found the first two broken:
+
+| # | link | status |
+|---|---|---|
+| 1 | the harness speaks a backchannel | ✅ |
+| 2 | the transcriber emits a **final/interim** for it | ✅ **fixed** — see below |
+| 3 | the lexicon recognises what the transcriber actually wrote | ✅ **fixed** — see below |
+| 4 | a speech is paused when that interim arrives | ❓ **unverified** |
+| 5 | the resume fires | ❌ 0 in every run |
+
+### Link 2 — Deepgram filters backchannels by default
+
+The plugin defaults `fillerWords: false`, which is Deepgram's `filler_words=false`. The effect,
+measured across three tier-3 backchannel runs: the `"Mm-hm."` line scores **WER 1.000 with 0
+finals**, while every other line in the same calls scores **0**. D1's classifier runs on the interim
+transcript of exactly that utterance, so with fillers filtered it has no input and can never fire.
+
+With `WORKER_STT_FILLER_WORDS=true` the same line produces **1 final**. Off by default, because it
+changes what every transcript contains and therefore what the word-error gate measures.
+
+### Link 3 — the transcriber's spelling was not in the lexicon
+
+With fillers on, Deepgram returned **`"Mhmm."`**. The lexicon had `mhm`, `mmhm` and `mm`, but not
+`mhmm`, so it classified the one utterance the whole mechanism exists for as speech. The lexicon is
+data precisely so that a miss like this is a one-line fix with a test beside it; the transcriber's
+own spellings now have their own table.
+
+The same run also showed the endpointer merging the backchannel into the next line —
+`"Mhmm. Actually,"` as a single final, which carries content and is correctly not a backchannel. The
+scenario now leaves 3 500 ms after the backchannel instead of 1 500. This is the third time an STT
+merge has broken a tier-3 scenario, after the hold request and the read-back.
+
+### Link 4 — still unverified, and honestly so
+
+After both fixes, `resumed on backchannel` is still **0**, and truncation on seed 3 fell from 2 lines
+to 1 — suggestive, and **not** evidence of a resume. Whether a speech is actually paused at the
+moment the backchannel interim arrives has never been observed either way: the one instrumented run
+that could have answered it collapsed for unrelated reasons. That measurement is the next step, and
+it is a single log line on a healthy box.
+
+So the gate — "false-interrupt resume p50 < 300 ms" — remains **unmeasurable rather than unmet**,
+with two of its four blocking links now fixed and the third identified.
+
+## 2026-09-02 — (superseded) D1 `resume` is built, and it cannot fire
 
 D5.2 decided `resume` was needed, so it was built: `backchannel()` in `domain` (34 table tests),
 `resume-backchannel.ts` in the worker (7 tests), and the wiring on the interim transcript, reporting

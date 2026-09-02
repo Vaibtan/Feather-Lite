@@ -11,6 +11,17 @@ import { backchannel } from "../src/backchannel.js";
 
 describe("backchannel", () => {
   const yes = ["yeah", "Yeah.", "okay", "OK", "ok", "right", "mm-hm", "mmhm", "mhm", "uh-huh", "uhhuh", "sure", "got it", "gotcha", "yep", "yup", "I see", "right right", "okay okay", "mm"];
+
+  /**
+   * What Deepgram nova-3 actually returns, rather than what the lexicon's author imagined.
+   *
+   * Found by running it: with `filler_words` on, the harness's "Mm-hm." came back as **"Mhmm."** —
+   * a spelling the first version of this list did not have, so the classifier rejected the one
+   * utterance the whole mechanism exists for. The lexicon is data precisely so a miss like this is a
+   * one-line fix with a test beside it.
+   */
+  const asDeepgramSpellsThem = ["Mhmm.", "mhmm", "Mm-hmm.", "mmhmm", "Uh-huh.", "Mm.", "Hm."];
+  for (const t of asDeepgramSpellsThem) it(`treats the transcriber's own spelling ${JSON.stringify(t)} as a backchannel`, () => expect(backchannel(t)).toBe(true));
   for (const t of yes) it(`treats ${JSON.stringify(t)} as a backchannel`, () => expect(backchannel(t)).toBe(true));
 
   const no = [

@@ -265,7 +265,15 @@ export const TIER3_SCENARIOS: ReadonlyArray<Tier3Scenario> = [
           await ctx.sleep(rng.int(700, 1400));
           await ctx.speak("mm-hm (backchannel)", ctx.lines.backchannel);
         }
-        await ctx.sleep(1500);
+        /**
+         * Long enough that the backchannel closes as its own utterance.
+         *
+         * At 1 500 ms the endpointer merged it with the payment offer — a live run transcribed
+         * `"Mhmm. Actually,"` as one final, which carries content and is therefore correctly not a
+         * backchannel. The same merge broke the hold scenario; the borrower has to stop talking for
+         * the transcriber to decide she has.
+         */
+        await ctx.sleep(3500);
         await ctx.speak("I can pay 550 on Friday", ctx.lines.pay);
         const rb = await waitReadBack(ctx, ctx.agentSaid.length, 60_000);
         if (rb >= 0) await ctx.sleep(2500);
