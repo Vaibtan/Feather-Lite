@@ -180,6 +180,83 @@ Turn latency p50/p95 3 009 / 3 313 ms and `total_ms` 2 405 / 2 746 ms on this ru
 calmer than the previous hour's (`ttft_ms` p95 1 236 against 3 651), which is OpenAI's variance and
 not this change.
 
+## 2026-09-02 — Phase 2: two read-backs become one, and D5.2 decides `resume` is needed
+
+Deepgram came back (it had been unreachable — `curl` timing out at 15 s from the host, every TTS
+synthesis exhausting its retries), so Phase F's owed run and Phase 2's own gates could all be run.
+
+### Phase F's owed N=5 equivalence — passed
+
+`2026-09-02-tier2-n5-phase-f-owed.json`: **5/5 equivalent**, 5/5 hung up, 0 never served, **0/15
+silent playouts**, WER p50/p95 **0.000 / 0.1111** against the 0.2 gate, turn latency p50/p95
+2 943 / 3 825 ms, `agent_stretch_disagreements: []`.
+
+### D1 `wait` — the borrower asks for a moment and the agent says nothing
+
+Verified on a real voice call, from the ledger rather than from the silence:
+
+```
+Yes. This is Jordan.                 -> respond
+Hold on. Let me get my card.         -> wait,  extendAwayMs 15000
+Actually, wait. I can pay $550 ...   -> respond
+Yes. That's correct.                 -> respond          outcome PROMISE_TO_PAY
+```
+
+Two defects in getting there, both found by running it. The scenario's assertion **passed vacuously**
+on `["respond","respond","respond"]` — the edit adding the expectation had not landed — and there is
+now a unit test that the check fails on all-`respond`. And the scenario never produced a hold at all:
+spoken back-to-back, the STT merges the confirmation and the hold into `"Yes. This is Jordan. Hold
+on. Let me get my card."`, one final that carries content and is therefore correctly *not* a hold.
+
+### D1 `held` — the read-back stops repeating
+
+The read-back is now `allowInterruptions: false`, so F2's `held` can park a turn that arrives during
+it. Same seed, same scenario, the whole point of tier 3:
+
+| | read-backs | outcome |
+|---|---:|---|
+| before | **2** | PROMISE_TO_PAY |
+| after | **1** | PROMISE_TO_PAY |
+
+`yes-during-read-back` flipped from `readBacks: { atLeast: 2 }` to `{ atMost: 1 }`, which the scenario
+said from the day it was written would be Phase 2's verification.
+
+**Open, and the remaining half of D1:** words spoken *into* a non-interruptible segment are dropped at
+the worker rather than deferred to the control plane as Q4 intends — the early "yes" produced no
+`USER_TURN_FINAL` at all. `held` is protecting the read-back by suppression rather than deferral. A
+borrower who is talked over simply repeats themselves, and that now works first time
+(`clean-happy-path` green), but it is not what the design says.
+
+### D5.2 — and it decides `resume` **is** needed
+
+The spec makes this measurement the gate on building the interim backchannel classifier: *"if raising
+`interruption.minDuration` to ~700 ms removes most backchannel pauses on the simulator's backchannel
+scenario, the interim classifier is not built."*
+
+| `minDuration` | seed 3 | seed 11 | outcome |
+|---|---:|---:|---|
+| **500 ms** (SDK default) | 3 lines cut | 2 lines cut | null / NO_ANSWER |
+| **700 ms** | 4 lines cut | 2 lines cut | PROMISE_TO_PAY / PROMISE_TO_PAY |
+
+**It does not remove them.** So the knob is not the fix and `resume` is owed. N=2 per arm and the
+calls are real, so treat the counts as an order of magnitude, not a rate — but the direction is not
+ambiguous: 700 ms cut as many lines as 500 ms did. The knob stays at its default; the compose file
+carries it so the arms are reproducible.
+
+### The tripwire was lying, and running it is what showed that
+
+`expectedToFail` excused **every** failure rather than the one it names. A broken worker produced
+`NO_ANSWER` with no tools at all and the run reported *"failed as expected"* and exited 0. A
+known-red scenario that goes green on a broken box is worse than no scenario. The mark now carries a
+`matches` pattern and any other failure fails the run — which it immediately did, on the A arm above.
+
+### Environment: recreate the worker with **both** profiles
+
+`docker compose --profile app up -d worker` leaves a worker that transcribes nothing — `0 final(s)`
+on every line, WER 1.000 by deletion, no tools called, `NO_ANSWER`. Deepgram was reachable throughout
+and the STT socket simply idled out for want of audio. `--profile app --profile livekit` recreates it
+correctly. This cost two runs before the control (`clean-happy-path`) isolated it.
+
 ## 2026-09-02 — Phase F, and what wiring `held` in taught immediately
 
 Phase F is six refactors D1/D2 need. Two of its six premises did not describe the tree, and both were

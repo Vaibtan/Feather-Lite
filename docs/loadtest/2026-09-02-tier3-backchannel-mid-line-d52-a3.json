@@ -1,0 +1,107 @@
+{
+  "tier": "3-sim",
+  "scenario": "backchannel-mid-line",
+  "seed": {
+    "given": "3",
+    "resolved": 3
+  },
+  "persona": null,
+  "interruption_mode": "vad",
+  "label": "d52-a3",
+  "conversation_id": "fbd5908c-811e-406c-9adc-98569ce613ed",
+  "harness": "sim",
+  "expected": {
+    "failures": [
+      "outcome null != expected PROMISE_TO_PAY",
+      "3 agent line(s) were cut off, expected none"
+    ],
+    "verdict": "failed, and not only in the expected way — 1 other failure(s): outcome null != expected PROMISE_TO_PAY",
+    "exit_code": 1,
+    "expected_to_fail": {
+      "reason": "VAD stops the agent for a backchannel, which is the false interruption D4 named",
+      "until": "D5's `interruption.minDuration` sweep (issue #1, Phase 2)",
+      "matches": {}
+    },
+    "outcome": null,
+    "tools": [
+      "confirm_right_party",
+      "propose_promise_to_pay",
+      "record_promise_to_pay"
+    ],
+    "not_yet_asserted": [
+      "a recorded `resume` decision (D4) — `resume` is issue #1's D2 and does not exist yet"
+    ]
+  },
+  "turn_taking": {
+    "response_rate": 0.5,
+    "yield_rate": 1,
+    "yield_latency_ms": 722,
+    "false_interrupt_rate": null,
+    "agent_interrupt_rate": 0,
+    "selectivity": null,
+    "counts": {
+      "lines": 4,
+      "interruptions": 1,
+      "non_directed": 0,
+      "non_directed_during_agent_speech": 0,
+      "unknown_truncation": 2
+    }
+  },
+  "dispositions": [
+    "respond",
+    "respond",
+    "respond",
+    "respond"
+  ],
+  "slo": {
+    "verdict": "breach",
+    "segment": {
+      "channel": null,
+      "decider": null,
+      "calls_requested": 50,
+      "calls_found": 50
+    },
+    "breaches": [
+      "total_ms",
+      "eou_delay_ms",
+      "transcription_delay_ms",
+      "ttft_ms"
+    ],
+    "insufficient": [],
+    "window_conversations": 50,
+    "excluded_by_rule": "harness IS NOT DISTINCT FROM null (Queries.latencyAggregateForSegment)"
+  },
+  "compliance": {
+    "checks": {},
+    "failed": [],
+    "count": 0
+  },
+  "entities": {
+    "measured": false,
+    "entity_er": null,
+    "note": "stt.entity_er is D3 (Phase 3); not measured"
+  },
+  "agent_stretches": {
+    "live": 3,
+    "post_hoc": 3
+  },
+  "stt_wer": [
+    {
+      "turn": "yes this is the borrower",
+      "wer": 0
+    },
+    {
+      "turn": "mm-hm (backchannel)",
+      "wer": 1
+    },
+    {
+      "turn": "I can pay 550 on Friday",
+      "wer": 0
+    },
+    {
+      "turn": "yes, that's correct",
+      "wer": 0
+    }
+  ],
+  "duration_ms": 160337
+}

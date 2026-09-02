@@ -79,21 +79,33 @@ export interface Tier3Scenario {
    * passes while it fails **for the stated reason**, and it **fails the moment it starts passing** —
    * which is the signal that the phase named in `until` landed.
    */
-  readonly expectedToFail?: { readonly reason: string; readonly until: string } | undefined;
+  readonly expectedToFail?: { readonly reason: string; readonly until: string; readonly matches: RegExp } | undefined;
   readonly script: (rng: Rng) => BorrowerScript;
 }
 
 /** What a run's exit code should be, given its failures and whether the scenario expected them. */
 export const verdictFor = (
   failures: ReadonlyArray<string>,
-  expectedToFail: { readonly reason: string; readonly until: string } | undefined,
+  expectedToFail: { readonly reason: string; readonly until: string; readonly matches: RegExp } | undefined,
 ): { readonly exitCode: 0 | 1; readonly line: string } => {
   if (expectedToFail === undefined) {
     return failures.length === 0 ? { exitCode: 0, line: "as expected" } : { exitCode: 1, line: `${String(failures.length)} FAILURE(S)` };
   }
-  return failures.length > 0
-    ? { exitCode: 0, line: `failed as expected — ${expectedToFail.reason}; ${expectedToFail.until} is what changes it` }
-    : { exitCode: 1, line: `passes now, and the scenario still says it should not — ${expectedToFail.until} appears to have landed; drop expectedToFail` };
+  if (failures.length === 0) {
+    return { exitCode: 1, line: `passes now, and the scenario still says it should not — ${expectedToFail.until} appears to have landed; drop expectedToFail` };
+  }
+  /**
+   * The mark excuses **the failure it names, and only that one**.
+   *
+   * Found by running it: a broken worker produced `NO_ANSWER` with no tools at all, and the run
+   * reported "failed as expected" and exited 0, because the mark excused every failure. A known-red
+   * scenario that goes green on a broken box is worse than no scenario at all.
+   */
+  const unexpected = failures.filter((f) => !expectedToFail.matches.test(f));
+  if (unexpected.length > 0) {
+    return { exitCode: 1, line: `failed, and not only in the expected way — ${String(unexpected.length)} other failure(s): ${unexpected.join("; ")}` };
+  }
+  return { exitCode: 0, line: `failed as expected — ${expectedToFail.reason}; ${expectedToFail.until} is what changes it` };
 };
 
 const firstNameOf = (full: string) => full.trim().split(/\s+/)[0] ?? full;
@@ -237,6 +249,8 @@ export const TIER3_SCENARIOS: ReadonlyArray<Tier3Scenario> = [
     expectedToFail: {
       reason: "VAD stops the agent for a backchannel, which is the false interruption D4 named",
       until: "D5's `interruption.minDuration` sweep (issue #1, Phase 2)",
+      /** Only the truncation is excused; any other failure still fails the run. */
+      matches: /agent line\(s\) were cut off|no playout evidence/,
     },
     notYetAsserted: ["a recorded `resume` decision (D4) — `resume` is issue #1's D2 and does not exist yet"],
     script: (rng) => ({

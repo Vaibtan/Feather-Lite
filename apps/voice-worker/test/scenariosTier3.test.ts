@@ -138,7 +138,7 @@ describe("every scenario says what it is not yet checking", () => {
 });
 
 describe("verdictFor — a known-red scenario is a tripwire, not a permanent failure", () => {
-  const red = { reason: "VAD stops for a backchannel", until: "D5's minDuration sweep" };
+  const red = { reason: "VAD stops for a backchannel", until: "D5's minDuration sweep", matches: /agent line\(s\) were cut off/ };
 
   it("passes the run when the only failures are the ones the scenario says to expect", () => {
     const v = verdictFor(["1 agent line(s) were cut off, expected none"], red);
@@ -151,6 +151,23 @@ describe("verdictFor — a known-red scenario is a tripwire, not a permanent fai
     const v = verdictFor([], red);
     expect(v.exitCode).toBe(1);
     expect(v.line).toContain("passes now");
+  });
+
+  it("FAILS when the scenario failed for some other reason as well", () => {
+    /**
+     * The flaw this closes, found by running it. A broken worker produced `NO_ANSWER` with no tools
+     * at all, and the run reported **"failed as expected"** and exited 0 — because the mark excused
+     * every failure rather than the one it names. A known-red scenario that goes green on a broken
+     * box is worse than no scenario.
+     */
+    const v = verdictFor(["1 agent line(s) were cut off, expected none", "outcome NO_ANSWER != expected PROMISE_TO_PAY"], red);
+    expect(v.exitCode).toBe(1);
+    expect(v.line).toContain("not only in the expected way");
+  });
+
+  it("fails when the only failure is a different one", () => {
+    const v = verdictFor(["outcome NO_ANSWER != expected PROMISE_TO_PAY"], red);
+    expect(v.exitCode).toBe(1);
   });
 
   it("fails normally when the scenario is not known-red", () => {

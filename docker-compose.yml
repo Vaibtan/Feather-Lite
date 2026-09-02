@@ -187,6 +187,9 @@ services:
       # is LiveKit's hosted detector and self-hosted has no credentials for it (W1). Set `adaptive`
       # on a Cloud deployment.
       WORKER_INTERRUPTION_MODE: ${WORKER_INTERRUPTION_MODE:-vad}
+      # D5.2's knob: how long a barge-in must last before the agent yields. The default is the SDK's
+      # 500 ms; the A/B raises it to see whether a backchannel ("mm-hm") stops stopping the agent.
+      WORKER_INTERRUPTION_MIN_DURATION_MS: ${WORKER_INTERRUPTION_MIN_DURATION_MS:-500}
       # The point at which this worker asks the SFU to prefer another one. Listed because the
       # admitted concurrency is `floor(WORKER_MAX_JOBS x this)`, not `WORKER_MAX_JOBS` — the
       # arithmetic the N=10 acceptance run walked into — and `composeLimits.test.ts` reads it from
