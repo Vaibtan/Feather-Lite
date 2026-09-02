@@ -107,6 +107,23 @@ export const createAdmissionController = (options: AdmissionOptions): AdmissionC
   };
 
   const requestFunc = async (req: AdmissionRequest): Promise<void> => {
+    /**
+     * A worker that is shutting down does not take new calls (issue #4, W9).
+     *
+     * `abandonWaits` used to stop only the *wait loop*, so a job offered during the drain still
+     * passed the capacity check and was accepted — into a pool being torn down. The call then dies
+     * with the process, having been promised a worker, and the borrower's conversation goes to the
+     * sweeper as an orphan.
+     *
+     * Refusing is the honest answer and a cheap one: a rejected job is not a lost call. The SFU
+     * offers it to another worker, or the conversation finalizes `NEVER_SERVED` with no turns —
+     * which is a worker saying no, and the ledger records which.
+     */
+    if (abandoned) {
+      log(`refusing job ${req.id}: the worker is shutting down`, { in_flight: inFlight(), max_jobs: maxJobs });
+      await req.reject();
+      return;
+    }
     if (inFlight() >= maxJobs) {
       // The one line that must exist: a refused job is otherwise indistinguishable, from outside,
       // from a call the SFU never offered.

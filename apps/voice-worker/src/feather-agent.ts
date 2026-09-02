@@ -69,8 +69,24 @@ export class FeatherAgent extends voice.Agent {
   private currentTurnId: string | null = null;
   private lastReportedTurnId: string | null = null;
   private endRequested = false;
+  /**
+   * Playout waits still outstanding (W9).
+   *
+   * It only ever grew: every `say` pushed a promise and nothing removed it, so a long call carried
+   * one settled promise per line it had ever spoken, for the life of the call. Each entry removes
+   * itself when it settles now, so what the array holds is what is actually still playing — which
+   * is what `endCall` waits on and all it ever needed.
+   */
   private pendingSays: Promise<void>[] = [];
-  private noInputStrikes = 0;
+
+  /** Track one playout wait, and forget it once it is over. */
+  private trackSay(wait: Promise<void>): void {
+    const tracked = wait.finally(() => {
+      const i = this.pendingSays.indexOf(tracked);
+      if (i >= 0) this.pendingSays.splice(i, 1);
+    });
+    this.pendingSays.push(tracked);
+  }
   /**
    * EOU metrics arrive before `llmNode` runs, so before the turn they belong to has an id. Held
    * here until the turn is created, then reported together with that turn's TTS time-to-first-byte.
@@ -100,7 +116,6 @@ export class FeatherAgent extends voice.Agent {
   /** Called by the runtime on `user_state_changed -> away` (silence). Two strikes close the call. */
   async onSilence(): Promise<void> {
     if (this.endRequested) return;
-    this.noInputStrikes += 1;
     try {
       const r = await this.deps.client.noInput(this.deps.conversationId);
       const handle = this.session.say(r.agent_text, { allowInterruptions: !r.end_call });
@@ -205,7 +220,6 @@ export class FeatherAgent extends voice.Agent {
     const turnId = randomUUID();
     const previousTurnId = this.currentTurnId;
     this.currentTurnId = turnId;
-    this.noInputStrikes = 0;
 
     const playout =
       previousTurnId && lastAssistant && lastAssistant.interrupted && previousTurnId !== this.lastReportedTurnId
@@ -228,7 +242,7 @@ export class FeatherAgent extends voice.Agent {
       frames,
       (text, allowInterruptions) => {
         const handle = this.session.say(text, { allowInterruptions });
-        this.pendingSays.push(handle.waitForPlayout());
+        this.trackSay(handle.waitForPlayout());
       },
       (end) => {
         this.deps.log("turn_end", { turnId, state: end.new_state, tool: end.tool_called?.name ?? null, outcome: end.outcome, endCall: end.end_call, ttftMs: end.ttft_ms });
@@ -238,7 +252,7 @@ export class FeatherAgent extends voice.Agent {
         this.deps.log("turn error", { turnId, code: err.code, message: err.message });
         if (err.code !== "SUPERSEDED") {
           const handle = this.session.say(safeFallback(), { allowInterruptions: true });
-          this.pendingSays.push(handle.waitForPlayout());
+          this.trackSay(handle.waitForPlayout());
         }
       },
     );

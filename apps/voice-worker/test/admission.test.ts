@@ -202,3 +202,23 @@ describe("admission control", () => {
     expect(logged[0]?.extra).toEqual({ in_flight: 1, running: 1, admitting: 0, max_jobs: 1 });
   });
 });
+
+describe("a worker that is shutting down (W9)", () => {
+  it("refuses a job offered during the drain instead of accepting it into a pool being torn down", async () => {
+    const controller = createAdmissionController({
+      maxJobs: 8,
+      activeJobIds: () => [],
+      log: () => undefined,
+      assignmentTimeoutMs: 1_000,
+      pollIntervalMs: 5,
+    });
+    // Plenty of capacity: the refusal is about the drain, not the ceiling.
+    controller.abandonWaits();
+    const late = fakeRequest("job-late");
+    await controller.requestFunc(late.req);
+    expect(late.calls.rejected).toBe(true);
+    // The distinction that matters: accepting it would promise a worker to a call that is about to
+    // die with the process, and the borrower's conversation would reach the sweeper as an orphan.
+    expect(late.calls.accepted).toBe(false);
+  });
+});
