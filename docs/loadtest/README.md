@@ -180,6 +180,29 @@ Turn latency p50/p95 3 009 / 3 313 ms and `total_ms` 2 405 / 2 746 ms on this ru
 calmer than the previous hour's (`ttft_ms` p95 1 236 against 3 651), which is OpenAI's variance and
 not this change.
 
+### Known open: `GET /api/borrowers` is unbounded, and the chaos probe cannot get past it
+
+The containerised chaos verdict (H12) is **still not recorded**, and now for a diagnosed reason
+rather than an unknown one.
+
+`chaos-orphan` starts by reading the borrower directory to find its fixture borrower. Measured on
+2026-09-02:
+
+```
+GET /api/borrowers -> HTTP 200 in 28.4 s, 11 892 459 bytes   (27 893 borrowers)
+```
+
+The probe reports `no conversation id; cannot assert. FAIL` at 27 889 ms — it is not failing on the
+chaos path at all; it never reaches it. The route has no limit and no pagination, and every fleet run
+and soak that has ever minted fixtures has added to it.
+
+That is worth fixing on its own account: a 12 MB response on the demo's own directory route is a
+denial of service the harness happens to be pointing at, and the console reads the same route.
+
+H12's two code defects are fixed and verified by other means (below); what remains is running the
+probe end to end, which needs either a bounded directory route or a probe that mints its own fixture
+the way the fleet does.
+
 ### Known open: the containerised sampler takes no container rows
 
 **A containerised fleet run currently reports `cores used n/a` and no container rows**, and says so

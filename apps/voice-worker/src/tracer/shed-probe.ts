@@ -109,13 +109,37 @@ const outcomes = await Promise.all(
   }),
 );
 
+/**
+ * Three outcomes, not two (issue #4, H13).
+ *
+ * `served` was "not NEVER_SERVED and not NOT_STARTED", which counted a conversation whose detail
+ * fetch came back `HTTP_500` as **served** — a call nobody can say anything about, added to the
+ * number the probe's verdict is computed from. And a session that never started at all was in
+ * neither count, so the three did not have to add up and a probe that half failed still printed a
+ * clean-looking pair.
+ *
+ * The distinction is the whole point of this probe: it exists because the previous one could not
+ * tell a refusal from a call the SFU simply never offered (ADR 0010 D2). A number that quietly
+ * absorbs "I could not tell" is the same defect one level up.
+ */
 const neverServed = outcomes.filter((o) => o.reason === "NEVER_SERVED").length;
-const served = outcomes.filter((o) => o.reason !== "NEVER_SERVED" && o.outcome !== "NOT_STARTED").length;
+const served = outcomes.filter((o) => o.reason !== "NEVER_SERVED" && o.outcome !== "NOT_STARTED" && !o.outcome.startsWith("HTTP_")).length;
+const indeterminate = outcomes.length - served - neverServed;
 for (const o of outcomes) log(`  ${o.conversationId ?? "-"}  ${o.outcome}${o.reason ? ` (${o.reason})` : ""}`);
-log(`served ${String(served)}, NEVER_SERVED ${String(neverServed)}, of ${String(CALLS)} started in one batch`);
+log(`served ${String(served)}, NEVER_SERVED ${String(neverServed)}, indeterminate ${String(indeterminate)}, of ${String(CALLS)} started in one batch`);
+if (indeterminate > 0) {
+  log(`  ${String(indeterminate)} session(s) neither started nor could be read back; the verdict below is over the ${String(served + neverServed)} this probe can speak for.`);
+}
 
 /**
  * The probe discriminates when the surplus is refused. It does not assert *which* number is right —
  * that is `WORKER_MAX_JOBS` and the operator's — only that a ceiling of one did not serve three.
  */
-process.exit(served <= Number(worker["max_jobs"] ?? 1) && neverServed === CALLS - served ? 0 : 1);
+/**
+ * The verdict is over the calls the probe can speak for, and an indeterminate one fails it (H13).
+ *
+ * `neverServed === CALLS - served` used to hold trivially whenever an indeterminate call made both
+ * sides wrong by the same amount. The probe now says how many it could not read and refuses to pass
+ * with any: a shedding measurement with a hole in it is not a measurement.
+ */
+process.exit(indeterminate === 0 && served <= Number(worker["max_jobs"] ?? 1) && neverServed === CALLS - served ? 0 : 1);

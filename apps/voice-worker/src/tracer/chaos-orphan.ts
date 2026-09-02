@@ -106,7 +106,22 @@ const killContainerJobs = (): number => {
   ].join("");
   try {
     const out = execFileSync("docker", ["exec", WORKER_CONTAINER, "node", "--input-type=commonjs", "-e", script], { encoding: "utf8" });
-    return Number(out.trim()) || 0;
+    /**
+     * The **last** line, not the whole of stdout (H12).
+     *
+     * `Number(out.trim())` is `NaN` — and therefore `0` — the moment anything else reaches stdout
+     * before the count: a Node warning, a dotenv banner, an experimental-feature notice. The probe
+     * would then report "killed 0 job processes" and go on to assert that the sweeper detected
+     * orphans it had never created, which fails for a reason that has nothing to do with the
+     * sweeper.
+     */
+    const lastLine = out.trim().split(/\r?\n/).at(-1) ?? "";
+    const killed = Number(lastLine.trim());
+    if (!Number.isInteger(killed)) {
+      log(`could not read the kill count from ${WORKER_CONTAINER}; stdout ended with ${JSON.stringify(lastLine.slice(0, 80))}`);
+      return 0;
+    }
+    return killed;
   } catch (e) {
     log(`could not kill job processes inside ${WORKER_CONTAINER}: ${String(e)}`);
     return 0;
@@ -129,7 +144,12 @@ const killWorkerJobs = (): number => {
         [
           "-NoProfile",
           "-Command",
-          "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object { $_.CommandLine -like '*voice-worker*src/agent.ts*' -or $_.CommandLine -like '*voice-worker*src\\agent.ts*' } | Select-Object -ExpandProperty ProcessId",
+          // `job_proc_lazy_main`, the same thing the container branch looks for (H12). It used to
+          // match `src/agent.ts`, which is the **dev-mode** entry point: under `start` — the mode
+          // every measured run uses, and the only one the fleet accepts — the worker runs
+          // `dist/agent.js` and its job children are re-executions of the framework's fork entry, so
+          // the host branch found nothing and the probe silently chaos-tested an empty set.
+          "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object { $_.CommandLine -like '*job_proc_lazy_main*' } | Select-Object -ExpandProperty ProcessId",
         ],
         { encoding: "utf8" },
       );
@@ -143,7 +163,8 @@ const killWorkerJobs = (): number => {
       }
       return pids.length;
     }
-    const out = execFileSync("bash", ["-lc", "pgrep -f 'voice-worker.*src/agent.ts' || true"], { encoding: "utf8" });
+    // Same rule as the Windows branch above and the container branch below (H12).
+    const out = execFileSync("bash", ["-lc", "pgrep -f 'job_proc_lazy_main' || true"], { encoding: "utf8" });
     const pids = out.split(/\n/).map((l) => Number(l.trim())).filter((n) => Number.isInteger(n) && n > 0);
     for (const pid of pids) {
       try {
