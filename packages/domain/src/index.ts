@@ -21,6 +21,7 @@ export * from "./wer.js";
 export * from "./percentile.js";
 export * from "./turnTaking.js";
 export * from "./backchannel.js";
+export * from "./biasTerms.js";
 export * from "./entityError.js";
 export * from "./holdPolicy.js";
 export * from "./holdRequest.js";

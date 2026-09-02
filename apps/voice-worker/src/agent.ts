@@ -276,6 +276,29 @@ export default defineAgent({
       onEndCall: async (reason) => {
         await hangup(reason);
       },
+      /**
+       * Applied when the borrower is not mid-utterance (issue #1, D3).
+       *
+       * `updateOptions` re-opens the Deepgram websocket (`stt.js:284`, `#resetWS.resolve()`). The
+       * plugin's own session-keyterm path defers to `#onEndOfSpeech` for exactly this reason, and a
+       * direct call does not — so this waits for the same condition rather than reconnecting the
+       * recogniser out from under a sentence. It arrives on the turn that verified the borrower,
+       * which is a moment the agent is about to speak and the borrower is not.
+       */
+      biasRecogniser: (terms) => {
+        const stt = speech.stt as unknown as { updateOptions?: (o: Record<string, unknown>) => void };
+        if (typeof stt.updateOptions !== "function") {
+          log("recogniser cannot be biased: no updateOptions on this STT", {});
+          return;
+        }
+        try {
+          stt.updateOptions({ keyterm: [...terms.keyterms], keywords: terms.keywords.map((k) => k.split(":")), numerals: terms.numerals });
+        } catch (e) {
+          // Never fails the call: a call that heard the borrower slightly worse is a better outcome
+          // than one that ended because the bias list could not be applied.
+          log("biasing the recogniser failed", { error: String(e) });
+        }
+      },
       log,
     });
 

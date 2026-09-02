@@ -61,6 +61,24 @@ export const TurnEndFrame = Schema.Struct({
    * exactly like a borrower who has walked away. Absent on every other turn.
    */
   extend_away_ms: Schema.optional(Schema.Number),
+  /**
+   * What to bias the recogniser toward, sent **once**, on the turn that verifies the borrower
+   * (issue #1, D3).
+   *
+   * Absent on every other turn, and that is not an optimisation: `updateOptions` re-opens the
+   * Deepgram websocket (`stt.js:284`, `#resetWS.resolve()`), so re-sending an unchanged list would
+   * reconnect the recogniser on every turn of the call.
+   *
+   * `keywords` arrive pre-joined as `word:boost`, which is the shape the plugin sends
+   * (`stt.js:89`), so the worker passes them through rather than re-deriving the format.
+   */
+  bias_terms: Schema.optional(
+    Schema.Struct({
+      keyterms: Schema.Array(Schema.String),
+      keywords: Schema.Array(Schema.String),
+      numerals: Schema.Boolean,
+    }),
+  ),
 });
 
 export const ErrorFrame = Schema.Struct({

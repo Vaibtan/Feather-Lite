@@ -17,6 +17,14 @@ export interface FeatherAgentDeps {
   /** Called when the control plane says the call is over (after final playout). */
   readonly onEndCall: (reason: string) => Promise<void>;
   readonly log: (msg: string, extra?: Record<string, unknown>) => void;
+  /**
+   * Bias the recogniser toward the account's own words (issue #1, D3).
+   *
+   * A callback rather than the STT itself, so this module stays testable without a plugin, and so
+   * the caller owns the one thing that matters about the timing: `updateOptions` re-opens the
+   * Deepgram websocket (`stt.js:284`).
+   */
+  readonly biasRecogniser?: ((terms: { keyterms: ReadonlyArray<string>; keywords: ReadonlyArray<string>; numerals: boolean }) => void) | undefined;
 }
 
 const streamFrames = (
@@ -421,6 +429,12 @@ export class FeatherAgent extends voice.Agent {
       },
       (end) => {
         this.deps.log("turn_end", { turnId, state: end.new_state, tool: end.tool_called?.name ?? null, outcome: end.outcome, endCall: end.end_call, ttftMs: end.ttft_ms });
+        if (end.bias_terms !== undefined) {
+          // Sent once, on the turn that verified the borrower — the control plane will not repeat
+          // it, because applying it re-opens the STT socket (issue #1, D3).
+          this.deps.log("biasing recogniser", { keyterms: end.bias_terms.keyterms.length, keywords: end.bias_terms.keywords.length });
+          this.deps.biasRecogniser?.(end.bias_terms);
+        }
         if (end.end_call) void this.endCall(end.outcome ?? "completed");
       },
       (err) => {

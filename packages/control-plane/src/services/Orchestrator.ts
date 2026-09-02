@@ -43,6 +43,7 @@ import {
   optOutConfirmation,
   NEVER_SERVED_REASON,
   ORPHANED_REASON,
+  biasTermsFor,
   holdRequest,
   overrideTransition,
   POLICY,
@@ -787,6 +788,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
             let metadata: Record<string, unknown> = {};
             let toolCalled: ToolCall | null = null;
             let toolRejected = false;
+            let unlockedThisTurn = false;
             let callControlAction: { action: CallControlAction; action_id: string } | null = null;
             let degraded = false;
             let agentText = decisionResult.streamedText;
@@ -864,6 +866,9 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
                 outcome = r.outcome;
                 metadata = r.metadata;
                 nextState = r.nextState;
+                // This turn unlocked protected context if the tool did, and the conversation was
+                // locked when the turn started (issue #1, D3).
+                if (r.unlocked && !locked.protectedContextUnlocked) unlockedThisTurn = true;
                 if (r.rejected) {
                   degraded = true;
                   // Kept apart from `degraded` for the disposition: a tool the state machine refused
@@ -939,6 +944,30 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
               endCall = true;
             }
 
+            /**
+             * The recogniser is told what to expect on the turn that unlocks protected context, and
+             * only that turn (issue #1, D3).
+             *
+             * Gated on the unlock itself rather than on the state, because that is the same gate the
+             * prompt uses: a keyterm list carrying the borrower's name and balance is account data
+             * leaving the system just as surely as a sentence is. `unlockedThisTurn` is set only
+             * when the tool unlocked it **and** the conversation was locked when the turn started,
+             * so the list goes out once — re-sending it would re-open the Deepgram websocket on
+             * every turn of the call (`stt.js:284`).
+             */
+            const bias =
+              unlockedThisTurn
+                ? biasTermsFor(
+                    {
+                      borrowerName: ctx.bundle.protectedContext?.borrower_full_name ?? "",
+                      creditorName: cfg.companyName,
+                      balanceDue: ctx.bundle.protectedContext?.balance_due ?? null,
+                      dueDate: ctx.bundle.protectedContext?.due_date ?? null,
+                    },
+                    { verified: true },
+                  )
+                : null;
+
             const result: TurnResult = {
               turnId: params.turnId,
               decider: decisionResult.decider,
@@ -961,7 +990,9 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
             };
             yield* conv.finishTurn({ conversationId: row.id, turnId: params.turnId, status: "DONE", result: result as unknown as Record<string, unknown>, finishedAt: at });
             yield* conv.releaseTurn(row.id, params.turnId);
-            return { result, says };
+            // `bias` rides out of the transaction rather than into `TurnResult`: it is a wire
+            // concern for the worker's recogniser, not state the ledger should keep.
+            return { result, says, bias };
           }),
         );
 
@@ -1032,6 +1063,17 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           end_call: r.endCall,
           degraded: r.degraded,
           ttft_ms: r.ttftMs,
+          ...(t2.bias === null
+            ? {}
+            : {
+                bias_terms: {
+                  keyterms: t2.bias.keyterms,
+                  // Pre-joined into the `word:boost` shape the plugin sends (`stt.js:89`), so the
+                  // worker passes them through instead of re-deriving the format.
+                  keywords: t2.bias.keywords.map(([w, b]) => `${w}:${String(b)}`),
+                  numerals: t2.bias.numerals,
+                },
+              }),
         });
         return r;
       }).pipe(

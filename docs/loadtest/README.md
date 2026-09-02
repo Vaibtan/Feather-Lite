@@ -180,6 +180,53 @@ Turn latency p50/p95 3 009 / 3 313 ms and `total_ms` 2 405 / 2 746 ms on this ru
 calmer than the previous hour's (`ttft_ms` p95 1 236 against 3 651), which is OpenAI's variance and
 not this change.
 
+## 2026-09-02 — D3 complete: the entity gate, and biasing the recogniser after verification
+
+### The entity gate caught a wrong promise on its first run
+
+Word error rate treats every word alike, and it should not: a transcript writing "Friday," for
+"Friday" costs what one writing "515" for "550" costs, and only the second is a wrong promise. D3
+gates amounts at zero and reports dates and names beside them.
+
+```
+entity errors: 1 amount, 1 date, 1 name over 15 entities (er 0.200)
+1 amount error(s) exceeds the 0 gate: FAIL
+```
+
+All three errors were on the one call whose transcript came back empty — a line that transcribes to
+nothing loses its amount, its date and its name. Two rules worth keeping: **a bare number is not an
+amount** (otherwise "September 4" is a false amount error, and a gate set at zero must never fail a
+correct transcript), and the rate is **null when a line carried no entities** rather than a
+flattering zero — the same rule `wordErrorRate` already uses.
+
+### Contextual biasing, and what amendment 9 asked us to check first
+
+Amendment 9 says to verify the parameter shapes in the installed `stt.js` before building, and to
+check whether either re-opens the socket mid-call. Both answered, in
+`@livekit/agents-plugin-deepgram` 1.6.4:
+
+- `keyterm` is `string[]`; `keywords` is `[word, boost][]` joined as `word:boost` (`stt.js:89`);
+  `numerals` is a boolean (`:91`). All three are forwarded.
+- **`updateOptions` re-opens the websocket** — `stt.js:284` calls `this.#resetWS.resolve()`. The
+  plugin's own session-keyterm path already defers to `#onEndOfSpeech` when `_speaking` (`:150`); a
+  direct call does not.
+
+That shaped the design rather than being a footnote. The terms are sent **once**, on the turn that
+verifies the borrower, and never repeated — re-sending an unchanged list would reconnect the
+recogniser on every turn of the call. The gate is the protected-context unlock, the same one the
+prompt uses: a keyterm list carrying the borrower's name and balance is account data leaving the
+system just as surely as a sentence is, so **nothing is sent before `confirm_right_party`**.
+
+Verified live on a clean call:
+
+```
+biasing recogniser {"keyterms":3,"keywords":2}
+ledger shape as expected   outcome PROMISE_TO_PAY   read-backs 1
+```
+
+Three keyterms (the borrower's two names and the creditor), two keywords (the balance and the due
+month), and the call completed normally through the socket reset.
+
 ## 2026-09-02 — Phase 2's N=5 gate: one clean run on the final tree, the second owed to a flapping TTS
 
 Run on the **final** tree — `resume` live, `WORKER_STT_FILLER_WORDS=true`, `minDuration` 500 — with
