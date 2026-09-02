@@ -208,14 +208,32 @@ The chain is emphatically not inert, and **the cliff sits between 25 dB and 15 d
 the codec and bursty loss the recogniser is perfect and the call completes; at 15 dB it collapses
 entirely.
 
-### The profiles are first-draft numbers and are NOT calibrated
+### Shaping the noise fixed it: `street` went from WER 1.000 to 0.000
 
-15 dB SNR does not destroy a real phone call, and a person outdoors is intelligible to Deepgram. The
-difference is that this generator produces **white noise across the whole band**, while traffic,
-rooms and wind are mostly low-frequency — so white noise at a stated SNR is much harsher than real
-background noise at the same stated SNR. `street`, `poor-signal` and `speakerphone` would fail every
-gate as written. **Only `mobile` is usable as a degraded profile today.** Shaping the noise, or
-calibrating the numbers against a real recording, is the next piece of Phase 4.
+The diagnosis below was right, and the fix is one filter. Real background noise — traffic, rooms,
+wind — is mostly low-frequency; white noise sits right on top of the consonants a recogniser needs.
+The generator now low-passes its noise before scaling it to the SNR target, so a stated SNR models
+the environment it claims to.
+
+| `street` @ 15 dB | WER, the three borrower lines |
+|---|---|
+| white noise | 0.750 / **1.000** / **1.000** |
+| **shaped noise** | **0.000 / 0.000 / 0.000** |
+
+Same persona, same profile, same seed. Transcription is perfect at a ratio that previously destroyed
+it, which is what a real 15 dB line should do.
+
+That run still ended `NO_ANSWER` with `propose_promise_to_pay` missing — but **all three lines
+transcribed cleanly**, so that is the box's own no-input flakiness and not the audio. The
+degradation profiles are now plausible; whether they are *calibrated* against a real recording is
+still open, and the paragraph below stands for the other three personas.
+
+### The profiles were first-draft numbers, and this is what that cost
+
+15 dB SNR does not destroy a real phone call, and a person outdoors is intelligible to Deepgram — so
+when `street` scored WER 1.000, the profile was not the thing that was wrong. Chasing that produced
+the shaping fix above. `poor-signal` and `speakerphone` have not been re-measured since, and their
+numbers remain first-draft.
 
 Note also that the *clean* run scored 0.250 on one line and ended `null` while `mobile` scored 0.000
 throughout — that is the box's own flakiness, not degradation improving anything. Do not read the

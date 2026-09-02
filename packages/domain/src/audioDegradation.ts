@@ -77,13 +77,38 @@ export const muLawRoundTrip = (samples: Int16Array): Int16Array => {
  * The noise is generated, measured, and scaled to hit the ratio asked for, because "add noise at
  * amplitude X" is not a number anyone can compare across personas or across runs.
  */
-export const addNoiseAtSnr = (samples: Int16Array, targetSnrDb: number, rng: Rng): Int16Array => {
+export interface NoiseOptions {
+  /**
+   * Weight the noise toward low frequencies, the way traffic, rooms and wind actually are.
+   *
+   * **On by default, and the default is the finding.** White noise at 15 dB SNR took the harness's
+   * word-error rate from 0.000 to 1.000 on the same line, which a real street does not do: white
+   * noise sits right on top of the consonants a recogniser needs, while real background noise mostly
+   * does not. Unshaped is kept for the tests that compare the two.
+   */
+  readonly shaped?: boolean | undefined;
+}
+
+/** One-pole low-pass. Crude, and enough: the point is where the energy sits, not a filter design. */
+const LOWPASS_ALPHA = 0.15;
+
+export const addNoiseAtSnr = (samples: Int16Array, targetSnrDb: number, rng: Rng, options: NoiseOptions = {}): Int16Array => {
   const signal = rmsOf(samples);
   if (signal === 0 || samples.length === 0) return Int16Array.from(samples);
 
   // White noise at unit-ish scale first, then scaled to the ratio the caller asked for.
   const noise = new Float64Array(samples.length);
-  for (let i = 0; i < samples.length; i++) noise[i] = rng.next() * 2 - 1;
+  const shaped = options.shaped ?? true;
+  let last = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const white = rng.next() * 2 - 1;
+    if (!shaped) {
+      noise[i] = white;
+      continue;
+    }
+    last += LOWPASS_ALPHA * (white - last);
+    noise[i] = last;
+  }
   let noiseSum = 0;
   for (const n of noise) noiseSum += n * n;
   const noiseRms = Math.sqrt(noiseSum / noise.length);

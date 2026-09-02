@@ -104,3 +104,47 @@ describe("dropFrames", () => {
     expect(a).toEqual(b);
   });
 });
+
+describe("noise shaping", () => {
+  /** Energy above ~2 kHz, as a share of the total. A crude but sufficient brightness measure. */
+  const highBandShare = (samples: Int16Array): number => {
+    // First difference is a high-pass: it keeps what changes fast between samples.
+    let high = 0;
+    let total = 0;
+    for (let i = 1; i < samples.length; i++) {
+      const d = (samples[i] ?? 0) - (samples[i - 1] ?? 0);
+      high += d * d;
+      total += (samples[i] ?? 0) * (samples[i] ?? 0);
+    }
+    return total === 0 ? 0 : high / total;
+  };
+
+  it("puts its energy low, the way traffic and rooms do", () => {
+    /**
+     * The calibration finding this closes. White noise at 15 dB SNR took the harness's WER from
+     * 0.000 to 1.000 on the same line, which a real street does not do — because real background
+     * noise is mostly low-frequency and white noise sits right on top of the consonants a recogniser
+     * needs. Shaped noise at the same *stated* SNR is a far better model of the same *described*
+     * environment.
+     */
+    // The noise is the difference between the degraded line and the clean one; a silent input gets
+    // no noise at all, because there is no signal to set a ratio against.
+    const src = tone();
+    const noiseOf = (out: Int16Array) => Int16Array.from(out, (v, i) => v - (src[i] ?? 0));
+    const white = noiseOf(addNoiseAtSnr(src, 10, makeRng(1), { shaped: false }));
+    const shaped = noiseOf(addNoiseAtSnr(src, 10, makeRng(1), { shaped: true }));
+    expect(highBandShare(shaped)).toBeLessThan(highBandShare(white) / 2);
+  });
+
+  it("still hits the SNR it was asked for after shaping", () => {
+    const src = tone();
+    const out = addNoiseAtSnr(src, 20, makeRng(1), { shaped: true });
+    expect(Math.abs(snrOf(src, out) - 20)).toBeLessThan(1);
+  });
+
+  it("is shaped by default, because that is the honest model", () => {
+    const src = tone();
+    expect(Array.from(addNoiseAtSnr(src, 10, makeRng(1)))).toEqual(Array.from(addNoiseAtSnr(src, 10, makeRng(1), { shaped: true })));
+  });
+});
+
