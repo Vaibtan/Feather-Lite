@@ -180,6 +180,36 @@ Turn latency p50/p95 3 009 / 3 313 ms and `total_ms` 2 405 / 2 746 ms on this ru
 calmer than the previous hour's (`ttft_ms` p95 1 236 against 3 651), which is OpenAI's variance and
 not this change.
 
+### W3 and W4 — the playout is the whole turn, attributed to the turn that spoke it
+
+Third N=5 of the day, same box, worker rebuilt, nothing else changed. This is the change that
+rewrites the path the fully-heard guard reads, so the gates are the verification.
+
+| | after W2 | **after W3 + W4** |
+|---|---:|---:|
+| calls served / equivalent | 5/5 | **5/5** |
+| STT WER p50 / p95 | 0.000 / 0.111 | **0.000 / 0.000** |
+| **silent playouts** | 0 of 15 | **0 of 15** |
+| turn latency p50 / p95 | 3 009 / 3 313 ms | 3 302 / 4 551 ms |
+| `tts_ttfb_ms` p50 / p95 (ledger) | 375 / 456 ms | 433 / 452 ms |
+| `total_ms` p50 / p95 | 2 405 / 2 746 ms | 2 506 / 3 654 ms |
+
+Zero silent playouts is the number that matters: the silent-playout detection moved from "the first
+item of the turn" to "the turn, once it is over", and a false positive there repeats a read-back the
+borrower already heard while a false negative records a promise nobody heard.
+
+### A correction to the W2 entry above
+
+The W2 section reports the chars-per-second outlier count moving **5 of 15 → 0 of 15** and treats it
+as the finding. Across three runs the same count reads **5, then 0, then 2** — so it is noisy, and
+one before/after pair overstates the effect.
+
+The mechanism is not in doubt and does not rest on that count: `tts/tts.js` emits once per segment
+and resets its accumulators, so the ledger was keeping the last sentence's characters against the
+last sentence's audio. What the three runs support is that the ratio is now taken over a turn's whole
+speech; what they do not support is a precise effect size on the outlier count, and the earlier
+wording should be read with that correction.
+
 ### And the reason this run took two attempts
 
 The first attempt refused to start: `no online worker is reporting its mode`, with

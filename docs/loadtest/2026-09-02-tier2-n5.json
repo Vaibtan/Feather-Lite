@@ -8,7 +8,7 @@
     "simulation": false,
     "sheddingDisabled": false,
     "maxJobs": 14,
-    "idleProcesses": 2,
+    "idleProcesses": 1,
     "idleConfigured": 4,
     "allow_dev": false,
     "allow_no_shedding": false
@@ -17,30 +17,30 @@
   "agent_hung_up": 5,
   "equivalence_green": 5,
   "duration_ms": {
-    "p50": 121799,
-    "p95": 127702,
-    "max": 127702
+    "p50": 135428,
+    "p95": 145797,
+    "max": 145797
   },
   "turn_latency_ms": {
     "n": 15,
     "unanswered": 0,
-    "p50": 3009,
-    "p95": 3313,
-    "max": 3313
+    "p50": 3302,
+    "p95": 4551,
+    "max": 4551
   },
   "stt_wer": {
     "n": 15,
     "unmatched_transcripts": 0,
     "p50": 0,
-    "p95": 0.1111,
-    "max": 0.1111,
+    "p95": 0,
+    "max": 0,
     "gate": 0.2,
     "breached": false,
     "worst_line": {
-      "turn": "BARGE-IN: I can pay 550 on Friday",
-      "wer": 0.1111,
-      "reference": "Actually, wait. I can pay 550 dollars on Friday.",
-      "hypothesis": "Actually, I can pay $550 on Friday."
+      "turn": "yes this is the borrower",
+      "wer": 0,
+      "reference": "Yes, this is Jordan.",
+      "hypothesis": "Yes. This is Jordan."
     }
   },
   "tts_heuristics": {
@@ -49,61 +49,77 @@
     "silent_playout_rate": 0,
     "chars_per_second": {
       "n": 15,
-      "median": 12.83,
-      "min": 11.07,
-      "max": 16.8
+      "median": 12.97,
+      "min": 11.32,
+      "max": 21.79
     },
     "ttfb_ms": {
       "n": 15,
-      "p50": 375,
-      "p95": 456
+      "p50": 433,
+      "p95": 452
     },
     "outlier_band": 0.4,
     "baseline_readings": 3,
-    "outliers": []
+    "outliers": [
+      {
+        "turnId": "6618442c-7e6e-4419-8049-eff74acce642",
+        "charsPerSecond": 21.79,
+        "deviation": 0.6800308404009251
+      },
+      {
+        "turnId": "9e6ba1be-5f28-4b41-81df-13e630c293ca",
+        "charsPerSecond": 21.56,
+        "deviation": 0.6622976098689282
+      },
+      {
+        "turnId": "836409bb-ae5b-43cd-b28e-d5984f588ad8",
+        "charsPerSecond": 21.56,
+        "deviation": 0.6622976098689282
+      }
+    ]
   },
   "borrowers": "forked-child",
   "resources": {
     "platform": "win32",
     "vcpus": 12,
     "interval_ms": 1000,
-    "samples": 131,
-    "wall_ms": 133623,
-    "load_wall_ms": 132636,
+    "samples": 151,
+    "wall_ms": 154649,
+    "load_wall_ms": 150775,
     "marked": true,
     "roles": [
       {
         "role": "harness",
         "pids": [
-          17424,
-          18540,
-          20152
+          13068,
+          14956,
+          21528
         ],
-        "samples": 131,
-        "peak_rss_bytes": 284827648,
-        "peak_private_bytes": 329527296,
-        "cpu_seconds": 0.891,
-        "idle_rss_bytes": 280035328,
-        "last_rss_bytes": 235327488
+        "samples": 151,
+        "peak_rss_bytes": 285466624,
+        "peak_private_bytes": 330137600,
+        "cpu_seconds": 1.719,
+        "idle_rss_bytes": 280657920,
+        "last_rss_bytes": 234688512
       },
       {
         "role": "harness-borrower",
         "pids": [
-          31480
+          23588
         ],
-        "samples": 130,
-        "peak_rss_bytes": 261853184,
-        "peak_private_bytes": 272572416,
-        "cpu_seconds": 33.219,
+        "samples": 148,
+        "peak_rss_bytes": 288542720,
+        "peak_private_bytes": 291889152,
+        "cpu_seconds": 39.734,
         "idle_rss_bytes": 0,
-        "last_rss_bytes": 244273152
+        "last_rss_bytes": 272486400
       }
     ],
     "totals": {
-      "peak_rss_bytes": 497176576,
-      "peak_private_bytes": 530968576,
-      "cpu_seconds": 34.11,
-      "idle_rss_bytes": 280035328
+      "peak_rss_bytes": 523120640,
+      "peak_private_bytes": 550727680,
+      "cpu_seconds": 41.453,
+      "idle_rss_bytes": 280657920
     },
     "subsets": {
       "worker": {
@@ -134,11 +150,11 @@
       "full_window": false,
       "worker": {
         "cpu_seconds": 0,
-        "wall_ms": 60638
+        "wall_ms": 60179
       },
       "server": {
         "cpu_seconds": 0,
-        "wall_ms": 60638
+        "wall_ms": 60179
       }
     },
     "rss_slope_mb_per_min": 0,
@@ -146,58 +162,58 @@
     "containers": [
       {
         "name": "feather-lite-livekit",
-        "samples": 27,
-        "peak_mem_bytes": 48150610,
-        "idle_mem_bytes": 24683479,
-        "peak_cpu_percent": 15,
+        "samples": 31,
+        "peak_mem_bytes": 48580526,
+        "idle_mem_bytes": 24882708,
+        "peak_cpu_percent": 25.8,
         "mean_cpu_percent": 5.3,
-        "cpu_seconds": 7.508
+        "cpu_seconds": 10.226
       },
       {
         "name": "feather-lite-postgres",
-        "samples": 27,
-        "peak_mem_bytes": 345191219,
-        "idle_mem_bytes": 329567437,
-        "peak_cpu_percent": 148.1,
-        "mean_cpu_percent": 72.9,
-        "cpu_seconds": 98.371
+        "samples": 31,
+        "peak_mem_bytes": 349490381,
+        "idle_mem_bytes": 334495744,
+        "peak_cpu_percent": 215.8,
+        "mean_cpu_percent": 81.1,
+        "cpu_seconds": 117.53
       },
       {
         "name": "feather-lite-server",
-        "samples": 27,
-        "peak_mem_bytes": 402128896,
-        "idle_mem_bytes": 163577856,
-        "peak_cpu_percent": 143.3,
-        "mean_cpu_percent": 63.1,
-        "cpu_seconds": 84.114
+        "samples": 31,
+        "peak_mem_bytes": 414082662,
+        "idle_mem_bytes": 116287078,
+        "peak_cpu_percent": 149.3,
+        "mean_cpu_percent": 64.4,
+        "cpu_seconds": 105.216
       },
       {
         "name": "feather-lite-worker",
-        "samples": 27,
-        "peak_mem_bytes": 2007897211,
-        "idle_mem_bytes": 943194112,
-        "peak_cpu_percent": 179.8,
-        "mean_cpu_percent": 44.2,
-        "cpu_seconds": 75.115
+        "samples": 31,
+        "peak_mem_bytes": 2100239008,
+        "idle_mem_bytes": 589928858,
+        "peak_cpu_percent": 262.1,
+        "mean_cpu_percent": 74,
+        "cpu_seconds": 109.34
       }
     ],
     "host": {
       "total_mem_bytes": 16477151232,
-      "free_mem_bytes_start": 947666944,
-      "free_mem_bytes_end": 1121624064
+      "free_mem_bytes_start": 881115136,
+      "free_mem_bytes_end": 972541952
     },
     "unclassified_pids": 1,
     "notes": []
   },
   "per_core": {
-    "cores_used": 0.566,
+    "cores_used": 0.725,
     "cores_over_full_window": true,
-    "calls_per_vcpu": 8.83,
-    "mb_per_call": 212.9,
+    "calls_per_vcpu": 6.9,
+    "mb_per_call": 302.1,
     "mb_per_call_private": null,
     "turns_per_s_per_core": null,
     "cpu_seconds_per_turn": null,
-    "cpu_seconds_per_call_minute": 7.34,
+    "cpu_seconds_per_call_minute": 9.52,
     "vcpus": 12,
     "basis": "containers: feather-lite-worker"
   },
@@ -221,22 +237,22 @@
   "results": [
     {
       "label": "call00",
-      "conversation_id": "c6b0474c-9936-46e8-961b-9fddc5c06c21",
+      "conversation_id": "61ea7878-73d7-4024-a5d7-deb60a58120a",
       "hung_up": true,
-      "agent_audio_frames": 5307,
-      "duration_ms": 121286,
+      "agent_audio_frames": 5368,
+      "duration_ms": 131066,
       "turn_latencies": [
         {
           "turn": "yes this is the borrower",
-          "ms": 3313
+          "ms": 3536
         },
         {
           "turn": "BARGE-IN: I can pay 550 on Friday",
-          "ms": 3111
+          "ms": 3098
         },
         {
           "turn": "yes, that's correct",
-          "ms": 2993
+          "ms": 3261
         }
       ],
       "wer_lines": [
@@ -283,22 +299,22 @@
     },
     {
       "label": "call01",
-      "conversation_id": "8b4719d9-97e1-4809-91ec-07777c69d008",
+      "conversation_id": "04c92b47-ca58-4686-b04c-ea9dd1cd35d0",
       "hung_up": true,
-      "agent_audio_frames": 5447,
-      "duration_ms": 121799,
+      "agent_audio_frames": 5458,
+      "duration_ms": 132627,
       "turn_latencies": [
         {
           "turn": "yes this is the borrower",
-          "ms": 3111
+          "ms": 3302
         },
         {
           "turn": "BARGE-IN: I can pay 550 on Friday",
-          "ms": 3145
+          "ms": 3101
         },
         {
           "turn": "yes, that's correct",
-          "ms": 3189
+          "ms": 3016
         }
       ],
       "wer_lines": [
@@ -345,22 +361,22 @@
     },
     {
       "label": "call02",
-      "conversation_id": "143ebe4f-0391-4c3d-ad7e-bd8d826ec1e0",
+      "conversation_id": "634e4d91-066e-4d72-aec3-7b438cfb4e32",
       "hung_up": true,
-      "agent_audio_frames": 5446,
-      "duration_ms": 117169,
+      "agent_audio_frames": 5424,
+      "duration_ms": 135428,
       "turn_latencies": [
         {
           "turn": "yes this is the borrower",
-          "ms": 2959
+          "ms": 3548
         },
         {
           "turn": "BARGE-IN: I can pay 550 on Friday",
-          "ms": 2976
+          "ms": 3225
         },
         {
           "turn": "yes, that's correct",
-          "ms": 2932
+          "ms": 3112
         }
       ],
       "wer_lines": [
@@ -373,10 +389,10 @@
         },
         {
           "turn": "BARGE-IN: I can pay 550 on Friday",
-          "wer": 0.1111,
+          "wer": 0,
           "substitutions": 0,
           "insertions": 0,
-          "deletions": 1
+          "deletions": 0
         },
         {
           "turn": "yes, that's correct",
@@ -407,22 +423,22 @@
     },
     {
       "label": "call03",
-      "conversation_id": "517915a5-6eb4-479b-bc6e-8e63f712537d",
+      "conversation_id": "43619b0c-6043-47ba-bd98-09e78a35a142",
       "hung_up": true,
-      "agent_audio_frames": 5338,
-      "duration_ms": 127702,
+      "agent_audio_frames": 5670,
+      "duration_ms": 145797,
       "turn_latencies": [
         {
           "turn": "yes this is the borrower",
-          "ms": 3195
+          "ms": 3672
         },
         {
           "turn": "BARGE-IN: I can pay 550 on Friday",
-          "ms": 2809
+          "ms": 3428
         },
         {
           "turn": "yes, that's correct",
-          "ms": 2982
+          "ms": 3315
         }
       ],
       "wer_lines": [
@@ -469,22 +485,22 @@
     },
     {
       "label": "call04",
-      "conversation_id": "5fe40d97-4012-406c-81df-20c91dfe62b3",
+      "conversation_id": "3380ea65-8e22-4d8c-b313-5c3ec8da84b1",
       "hung_up": true,
-      "agent_audio_frames": 5163,
-      "duration_ms": 125777,
+      "agent_audio_frames": 5521,
+      "duration_ms": 144034,
       "turn_latencies": [
         {
           "turn": "yes this is the borrower",
-          "ms": 3009
+          "ms": 4551
         },
         {
           "turn": "BARGE-IN: I can pay 550 on Friday",
-          "ms": 2853
+          "ms": 3790
         },
         {
           "turn": "yes, that's correct",
-          "ms": 3035
+          "ms": 3164
         }
       ],
       "wer_lines": [

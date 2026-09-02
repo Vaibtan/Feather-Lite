@@ -79,6 +79,22 @@ export class FeatherAgent extends voice.Agent {
    */
   private pendingSays: Promise<void>[] = [];
 
+  /**
+   * Bind every item a speech handle produces to the turn that asked for it (W3).
+   *
+   * `_addItemAddedCallback` is underscore-prefixed and therefore an internal of the pinned 1.6.4
+   * (`voice/speech_handle.d.ts`). It is used deliberately, like the two getters
+   * `patches/@livekit__agents@1.6.4.patch` adds, and for the same reason: the framework resolves
+   * something the worker needs and does not expose it. If a future version drops it the map simply
+   * stays empty and attribution falls back to `currentTurnId` — the behaviour this replaces, not a
+   * crash.
+   */
+  private stampItemsOf(handle: { _addItemAddedCallback?: (cb: (item: { id: string }) => void) => void }, turnId: string): void {
+    handle._addItemAddedCallback?.((item) => {
+      this.itemTurn.set(item.id, turnId);
+    });
+  }
+
   /** Track one playout wait, and forget it once it is over. */
   private trackSay(wait: Promise<void>): void {
     const tracked = wait.finally(() => {
@@ -207,19 +223,72 @@ export class FeatherAgent extends voice.Agent {
       .catch((e) => this.deps.log("turn_metrics signal failed", { error: String(e) }));
   }
 
-  /** Report what the borrower actually heard of the last generated reply (barge-in truth). */
-  async reportPlayout(item: llm.ChatMessage): Promise<void> {
-    const turnId = this.currentTurnId;
-    if (!turnId || turnId === this.lastReportedTurnId) return;
+  /**
+   * Record what the borrower heard of one agent item, against the turn that *started* it (W3, W4).
+   *
+   * Two things were wrong here and they compound.
+   *
+   * **W3 — attribution.** The turn was read from `currentTurnId` at the moment the item landed, and
+   * that field moves at the next `llmNode`. An item delivered after the next turn began was booked
+   * to the wrong turn. ADR 0008 recorded this as a residual on eight clean runs and named the fix:
+   * a per-item mapping. `say` handles carry one — `SpeechHandle._addItemAddedCallback` in the
+   * installed 1.6.4 — so every line this worker speaks is now stamped with the turn that asked for
+   * it, at the moment it asked, and `currentTurnId` is only the fallback for the framework's own
+   * generated reply.
+   *
+   * **W4 — completeness.** One turn can produce several assistant items: the reply the framework
+   * builds from `delta` frames, plus one per `say`. This reported the **first** and dropped the
+   * rest, because `lastReportedTurnId` suppressed them — so a turn that spoke a reply and then a
+   * tool line reported only the reply, and the fully-heard guard judged a promise read-back against
+   * a partial record of what was said.
+   *
+   * So items accumulate into the turn that owns them, and the turn reports **once**, when it is
+   * over. `interrupted` is true if any part of the turn was cut off, and the heard text is the
+   * whole of what was spoken.
+   */
+  private recordItem(item: llm.ChatMessage): void {
+    const turnId = this.itemTurn.get(item.id) ?? this.currentTurnId;
+    if (!turnId) return; // the opening and other say()s are not control-plane turns
+    this.itemTurn.delete(item.id);
+    const rec = this.spoken.get(turnId) ?? { parts: [], interrupted: false };
+    rec.parts.push(item.textContent ?? "");
+    rec.interrupted = rec.interrupted || item.interrupted;
+    this.spoken.set(turnId, rec);
+  }
+
+  /** What each turn has spoken so far, until it is reported. Keyed by turn, not by item. */
+  private spoken = new Map<string, { parts: string[]; interrupted: boolean }>();
+  /** Which turn asked for a given item, stamped when the speech was created rather than delivered. */
+  private itemTurn = new Map<string, string>();
+
+  /** The session's item-added hook. Accumulates; the report happens when the turn ends. */
+  reportPlayout(item: llm.ChatMessage): void {
+    this.recordItem(item);
+  }
+
+  /**
+   * Report one finished turn's playout: everything it spoke, and whether any of it was cut off.
+   *
+   * Called when the **next** turn begins and at `endCall`, which is what "the turn is over" means
+   * for a turn that can speak several times. Before the next turn's `/turn` request goes out, so the
+   * ledger holds this turn's playout before the guard that reads it runs — which is the ordering the
+   * fully-heard guard depends on and which used to be a race (issue #4, C1's residual).
+   */
+  private async reportTurnPlayout(turnId: string): Promise<void> {
+    if (turnId === this.lastReportedTurnId) return;
+    const rec = this.spoken.get(turnId);
+    this.spoken.delete(turnId);
+    if (!rec) return;
     this.lastReportedTurnId = turnId;
-    // TTS produced no audio at all: the borrower heard silence, whatever the chat item claims.
+
+    // TTS produced no audio at all: the borrower heard silence, whatever the chat items claim.
     // `interrupted: true` + empty heard_text makes the orchestrator's fully-heard guard treat the
     // segment as unheard, so a proposal read-back gets repeated instead of silently "confirmed".
-    // The check applies only to UN-interrupted items (a stall force-closes as played-in-full,
+    // The check applies only to UN-interrupted turns (a stall force-closes as played-in-full,
     // `interrupted: false`): for a barge-in the framework aborts the TTS stream, so `tts_metrics`
     // fires after the truncated item is reported — measured, not assumed — and the item's own
     // playback-truncated text is already the audio truth.
-    const silent = !item.interrupted && !this.ttsProducedAudio.has(turnId);
+    const silent = !rec.interrupted && !this.ttsProducedAudio.has(turnId);
     this.ttsProducedAudio.delete(turnId);
     if (silent) {
       this.deps.log("tts produced no audio for this turn; reporting empty playout", { turnId });
@@ -230,15 +299,14 @@ export class FeatherAgent extends voice.Agent {
         { provider: `tts:${process.env["STT_TTS_PROVIDER"] === "plugins" ? "deepgram" : "livekit-inference"}`, kind: "timeout", stage: "tts", message: `no audio produced for turn ${turnId}`, conversation_id: this.deps.conversationId },
       ]);
     }
-    // The turn has finished speaking, so its segments are all in: post the accumulated waterfall
-    // before the playout, so the ledger has the turn's numbers by the time the guard reads them.
+    // The turn is over, so its TTS segments are all in.
     await this.flushTurnMetrics(turnId);
     await this.deps.client
       .signal(this.deps.conversationId, {
         kind: "playout",
         turn_id: turnId,
-        heard_text: silent ? "" : (item.textContent ?? ""),
-        interrupted: silent ? true : item.interrupted,
+        heard_text: silent ? "" : rec.parts.filter((p) => p.length > 0).join(" "),
+        interrupted: silent ? true : rec.interrupted,
       })
       .catch((e) => this.deps.log("playout signal failed", { error: String(e) }));
   }
@@ -247,6 +315,8 @@ export class FeatherAgent extends voice.Agent {
     if (this.endRequested) return;
     this.endRequested = true;
     await Promise.allSettled(this.pendingSays);
+    // The last turn of the call has no next turn to report it, so it is reported here (W4).
+    if (this.currentTurnId) await this.reportTurnPlayout(this.currentTurnId);
     await this.deps.onEndCall(reason);
   }
 
@@ -272,6 +342,17 @@ export class FeatherAgent extends voice.Agent {
     const previousTurnId = this.currentTurnId;
     this.currentTurnId = turnId;
 
+    /**
+     * The previous turn is over, so report everything it spoke — before this turn's request goes
+     * out (W4).
+     *
+     * The ordering is the point rather than a convenience. The fully-heard guard reads the
+     * read-back's playout during *this* turn's T1/T2, so posting it here puts it in the ledger
+     * before the guard looks, where reporting on item-added raced it (C1's residual, the one that
+     * 122 of 122 recorded calls happened to win).
+     */
+    if (previousTurnId) await this.reportTurnPlayout(previousTurnId);
+
     const playout =
       previousTurnId && lastAssistant && lastAssistant.interrupted && previousTurnId !== this.lastReportedTurnId
         ? {
@@ -293,6 +374,9 @@ export class FeatherAgent extends voice.Agent {
       frames,
       (text, allowInterruptions) => {
         const handle = this.session.say(text, { allowInterruptions });
+        // Stamped when the speech is *created*, not when its item is delivered (W3): `currentTurnId`
+        // has moved on by then if the next turn has begun.
+        this.stampItemsOf(handle, turnId);
         this.trackSay(handle.waitForPlayout());
       },
       (end) => {
@@ -303,6 +387,7 @@ export class FeatherAgent extends voice.Agent {
         this.deps.log("turn error", { turnId, code: err.code, message: err.message });
         if (err.code !== "SUPERSEDED") {
           const handle = this.session.say(safeFallback(), { allowInterruptions: true });
+          this.stampItemsOf(handle, turnId);
           this.trackSay(handle.waitForPlayout());
         }
       },

@@ -323,7 +323,7 @@ export default defineAgent({
     // Runtime truth back to the ledger.
     session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (ev) => {
       const item = ev.item;
-      if (item.type === "message" && item.role === "assistant") void agent.reportPlayout(item);
+      if (item.type === "message" && item.role === "assistant") agent.reportPlayout(item);
     });
     session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev) => {
       if (ev.newState === "away") void agent.onSilence();

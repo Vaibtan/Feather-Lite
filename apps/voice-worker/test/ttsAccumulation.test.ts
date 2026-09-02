@@ -50,7 +50,10 @@ describe("turn_metrics across a multi-segment turn", () => {
     // Nothing is posted per segment any more.
     expect(signals.filter((s) => s["kind"] === "turn_metrics")).toHaveLength(0);
 
-    await agent.reportPlayout({ id: "item-1", interrupted: false, textContent: "the whole reply" } as never);
+    agent.reportPlayout({ id: "item-1", interrupted: false, textContent: "the whole reply" } as never);
+    // Still nothing: the turn reports when it is over, not when an item lands (W4).
+    expect(signals.filter((s) => s["kind"] === "turn_metrics")).toHaveLength(0);
+    await (agent as unknown as { reportTurnPlayout: (t: string) => Promise<void> }).reportTurnPlayout("t1");
     const metrics = signals.filter((s) => s["kind"] === "turn_metrics");
     expect(metrics).toHaveLength(1);
     // The first segment's TTFB: when the borrower first heard anything. Not 85, the last sentence's.
@@ -68,7 +71,8 @@ describe("turn_metrics across a multi-segment turn", () => {
     const { agent, signals } = makeAgent();
     (agent as unknown as { currentTurnId: string | null }).currentTurnId = "t2";
     agent.onEouMetrics({ eouDelayMs: 600 });
-    await agent.reportPlayout({ id: "item-2", interrupted: false, textContent: "" } as never);
+    agent.reportPlayout({ id: "item-2", interrupted: false, textContent: "" } as never);
+    await (agent as unknown as { reportTurnPlayout: (t: string) => Promise<void> }).reportTurnPlayout("t2");
     const metrics = signals.filter((s) => s["kind"] === "turn_metrics");
     expect(metrics).toHaveLength(1);
     expect(metrics[0]?.["eou_delay_ms"]).toBe(600);
