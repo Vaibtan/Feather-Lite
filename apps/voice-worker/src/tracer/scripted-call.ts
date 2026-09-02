@@ -301,8 +301,28 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
     conversationId = boot.conversationId;
     log(`room=${roomName} conversation=${conversationId ?? "(raw)"}`);
 
+    /**
+     * Whose audio is the agent's (issue #4, H2).
+     *
+     * The handler filtered on `kind` alone and called whatever it got "agent audio". With one agent
+     * and one borrower in the room that is true by accident; with the third-party-pickup scenario
+     * D4 adds, a second voice on the line would have its energy booked as agent speech — so the
+     * agent would appear to talk over the borrower, and `turn.agent_interrupt_rate` would be
+     * measuring a person the agent never spoke over.
+     *
+     * The same identity rule the transcript handler already uses, in one place now so the two
+     * cannot disagree about who is speaking.
+     */
+    const isAgent = (identity: string): boolean => identity.startsWith("agent");
+
     room.on(RoomEvent.TrackSubscribed, (track, _pub, participant) => {
       if (track.kind !== TrackKind.KIND_AUDIO) return;
+      if (!isAgent(participant.identity)) {
+        // Not a failure: a third party on the line is a scenario, not a fault. It is logged so a run
+        // that hears one is not silently reinterpreted afterwards.
+        log(`ignoring audio from non-agent participant ${participant.identity} (not the agent's speech)`);
+        return;
+      }
       log(`subscribed to agent audio (${participant.identity})`);
       const stream = new AudioStream(track);
       void (async () => {
@@ -340,7 +360,15 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       const openedAt = Date.now();
       void (async () => {
         const attrs = reader.info.attributes ?? {};
-        const fromAgent = participantInfo.identity.startsWith("agent");
+        const fromAgent = isAgent(participantInfo.identity);
+        // Only the borrower this harness is playing feeds the word-error gate (H2). A third party's
+        // words are not a transcription of the script, and scoring them against the borrower's
+        // reference line would report a WER failure for a scenario behaving exactly as designed.
+        const fromThisBorrower = participantInfo.identity === opts.participantIdentity;
+        if (!fromAgent && !fromThisBorrower) {
+          log(`ignoring transcript from ${participantInfo.identity}: neither the agent nor this borrower`);
+          return;
+        }
         let text = "";
         // Agent segments are delta streams: chunks arrive as the agent speaks; the stream closes at segment end.
         for await (const chunk of reader) {
