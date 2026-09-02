@@ -24,6 +24,24 @@ export const WINDOW_MS = 60_000;
 /** Entries older than two windows cannot affect any decision, so they are dropped. */
 export const STALE_AFTER_MS = WINDOW_MS * 2;
 
+/**
+ * The ceiling on how many per-IP buckets are held at once (C15).
+ *
+ * The sweep below is rate-limited to one pass per window, deliberately — but that means a burst of
+ * distinct addresses *inside* one window grows the map with nothing to stop it, which is the same
+ * shape as the leak the sweep exists for and reachable by anyone who can send requests.
+ *
+ * Ten thousand is far above any honest caller — a load run comes from one address, a demo from a
+ * handful — and small enough to be a memory bound worth the name: each entry is a short key and two
+ * numbers, so the map cannot exceed a megabyte or so.
+ *
+ * At the ceiling the **oldest** entries go, not the new caller. Refusing to admit a new bucket
+ * would let a flood of invented addresses shut out real ones, which is a better attack than the one
+ * being prevented; a `Map` iterates in insertion order, so dropping from the front drops the
+ * buckets whose windows are furthest from mattering.
+ */
+export const MAX_BUCKETS = 10_000;
+
 export const makeRateLimiter = (): RateLimiter => {
   const buckets = new Map<string, { count: number; windowStart: number }>();
 
@@ -44,11 +62,32 @@ export const makeRateLimiter = (): RateLimiter => {
     for (const [key, b] of buckets) if (now - b.windowStart > STALE_AFTER_MS) buckets.delete(key);
   };
 
+  /**
+   * Only at the ceiling, and only then. A forced sweep first, because the cheap answer is usually
+   * enough — a map at the cap after a real burst is mostly stale entries the once-a-window sweep
+   * has not reached yet. What is left is dropped from the front, oldest first, until there is room.
+   *
+   * This does not reintroduce the O(n²) the sweep's comment warns about: that was sweeping on every
+   * new key, whereas this runs only when the map is full, and each pass leaves a tenth of the
+   * ceiling free.
+   */
+  const evictOldest = (now: number): void => {
+    lastSweptAt = 0;
+    sweep(now);
+    if (buckets.size < MAX_BUCKETS) return;
+    const target = Math.floor(MAX_BUCKETS * 0.9);
+    for (const key of buckets.keys()) {
+      if (buckets.size <= target) break;
+      buckets.delete(key);
+    }
+  };
+
   return {
     check: (key, perMinute, now = Date.now()) => {
       const b = buckets.get(key);
       if (!b || now - b.windowStart > WINDOW_MS) {
         if (buckets.size > 1) sweep(now);
+        if (buckets.size >= MAX_BUCKETS) evictOldest(now);
         buckets.set(key, { count: 1, windowStart: now });
         return true;
       }

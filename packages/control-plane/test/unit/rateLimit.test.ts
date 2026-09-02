@@ -3,7 +3,7 @@
  * eviction can be tested without sleeping.
  */
 import { describe, expect, it } from "vitest";
-import { makeRateLimiter, STALE_AFTER_MS, WINDOW_MS } from "../../src/http/rateLimit.js";
+import { MAX_BUCKETS, makeRateLimiter, STALE_AFTER_MS, WINDOW_MS } from "../../src/http/rateLimit.js";
 
 describe("makeRateLimiter", () => {
   it("serves up to the budget and refuses past it, within one window", () => {
@@ -77,5 +77,26 @@ describe("makeRateLimiter", () => {
     rl.check("a", 10, 1);
     rl.check("a", 10, 2);
     expect(rl.size()).toBe(1);
+  });
+});
+
+describe("the bucket ceiling (C15)", () => {
+  it("bounds how many buckets are held, even inside one window", () => {
+    const rl = makeRateLimiter();
+    const t = 1_000_000;
+    // Every address distinct and every one inside the same window, so the once-a-window sweep never
+    // finds anything stale. This is the shape that grew without bound.
+    for (let i = 0; i < MAX_BUCKETS + 500; i++) rl.check(`ip-${i}`, 100, t + 1);
+    expect(rl.size()).toBeLessThanOrEqual(MAX_BUCKETS);
+  });
+
+  it("evicts the oldest rather than refusing the newest", () => {
+    const rl = makeRateLimiter();
+    const t = 1_000_000;
+    for (let i = 0; i < MAX_BUCKETS + 1; i++) rl.check(`ip-${i}`, 1, t + 1);
+    // The caller that arrived last is served, and has its own budget: a flood of invented addresses
+    // must not be able to shut a real one out.
+    expect(rl.check("a-real-caller", 1, t + 1)).toBe(true);
+    expect(rl.check("a-real-caller", 1, t + 1)).toBe(false);
   });
 });
