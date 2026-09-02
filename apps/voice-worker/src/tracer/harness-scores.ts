@@ -157,6 +157,49 @@ export const buildHarnessScores = (params: {
  * below the gap between two scripted lines.
  */
 const CLOCK_GRACE_MS = 250;
+/**
+ * D4's six turn-taking numbers, as scores (issue #1, D4; the names are H8's).
+ *
+ * Separate from `buildHarnessScores` because it is measured differently: those come from what the
+ * harness spoke and heard, these from the join of the borrower's own events with the agent's speech
+ * stretches and the ledger's playout truth. Only tier 3 has that join today.
+ *
+ * **A null is not posted.** `null` here means "no denominator" — no interruption happened, so there
+ * is no yield rate — and a score row of 0 would read as "it never yielded", which is a different and
+ * worse claim than silence. H11's `unknown_truncation` count travels with them as evidence so a
+ * reader can see how thin the denominator was.
+ */
+export const turnTakingScores = (
+  metrics: {
+    readonly response_rate: number | null;
+    readonly yield_rate: number | null;
+    readonly yield_latency_ms: number | null;
+    readonly false_interrupt_rate: number | null;
+    readonly agent_interrupt_rate: number | null;
+    readonly selectivity: number | null;
+    readonly counts: Record<string, number>;
+  },
+  evidence: Record<string, unknown>,
+): ReadonlyArray<HarnessScore> => {
+  const named = {
+    "turn.response_rate": metrics.response_rate,
+    "turn.yield_rate": metrics.yield_rate,
+    "turn.yield_latency_ms": metrics.yield_latency_ms,
+    "turn.false_interrupt_rate": metrics.false_interrupt_rate,
+    "turn.agent_interrupt_rate": metrics.agent_interrupt_rate,
+    "turn.selectivity": metrics.selectivity,
+  } as const;
+  return Object.entries(named)
+    .filter((e): e is [string, number] => e[1] !== null)
+    .map(([name, value]) => ({
+      name,
+      value,
+      source: "HARNESS" as const,
+      comment: `${String(metrics.counts["unknown_truncation"] ?? 0)} stretch(es) excluded for want of playout evidence (H11)`,
+      evidence: { ...evidence, counts: metrics.counts },
+    }));
+};
+
 export const matchLedgerTurns = (
   measurements: ReadonlyArray<{ readonly atMs: number }>,
   ledgerTurns: ReadonlyArray<LedgerTurn>,
