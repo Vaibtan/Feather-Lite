@@ -227,6 +227,36 @@ checked on the running server rather than in types: after one streamed turn,
 `feather_lite_live_turns` reads **1** where it read 0, so `TurnRunner` and `main.ts` share one
 registry, and `/status` reports `"basis": "per process, since boot"`.
 
+### Phase F's tier-2 N=5 equivalence run is OWED, not passed — Deepgram is unreachable
+
+Attempted twice and **not completed**, and it is recorded as owed rather than explained away.
+
+| run | equivalent | calls | silent playouts |
+|---|---|---|---|
+| `phase-f` | 3/5 | 127–177 s | — , WER p95 1.000 |
+| `phase-f2` (fresh worker) | **0/5** | 208–258 s, none hung up | **9/9 (100 %)** |
+
+The cause is external and it is unambiguous:
+
+```
+tts: deepgram.TTS  attempt 3  APITimeoutError: Deepgram TTS WebSocket connect timeout
+$ curl --max-time 15 https://api.deepgram.com/     -> timed out at 15.009 s (from the Windows host)
+```
+
+Every synthesis attempt exhausts its retries, so every playout is silent and no call can complete.
+`api.deepgram.com` does not answer from this machine at all.
+
+**It is not Phase F.** Checked rather than assumed: across the 13 turns of the first run,
+`count(*) FILTER (WHERE result ? 'heldMs')` is **0** — the `held` phase never fired, exactly as its
+dormancy predicts. The one thing F2 does add to every turn is the ledger read, and that is
+`Execution Time: 0.236 ms`, fully index-driven, against calls running four minutes.
+
+What the same runs *did* verify live, on real voice calls through the real decider: **F3 and F4**.
+`conversation_turns.result` reads `model|tool` × 11 and `model|spoke` × 2 — the arm that decided each
+turn and how it ended, which is what F4's turn-level SLO predicate selects on.
+
+This also blocks issue #1's Phase 2, whose D5.2 verification is an N=5 A/B on the same path.
+
 ### Open: the box stopped being quiet, and tier-3 runs stopped being usable
 
 Three tier-3 calls late in the Phase F session failed with `no_input` hangups — `NO_ANSWER`, and in
