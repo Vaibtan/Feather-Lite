@@ -30,6 +30,7 @@ import type { ScriptedCallResult } from "./scripted-call.js";
 import type { BorrowerProcMessage, BorrowerProcRequest } from "./borrower-proc.js";
 import { harnessJsonHeaders } from "@feather-lite/load-test/harness-http";
 import { parseFleetArgs, reportFileName } from "./fleet-args.js";
+import { speechWindows } from "@feather-lite/domain";
 
 loadEnv({ path: fileURLToPath(new URL("../../../../.env", import.meta.url)) });
 
@@ -306,6 +307,24 @@ const worstLine = servedResults.flatMap((r) => r.werLines).reduce<{ turn: string
   null,
 );
 const unmatched = results.reduce((n, r) => n + r.unmatchedTranscripts.length, 0);
+
+/**
+ * The live onset detector against the post-hoc one (issue #4, H1).
+ *
+ * The harness now counts agent speech stretches twice: live, inside the audio loop, because a
+ * scenario has to react to an onset; and afterwards by running `speechWindows()` over the samples it
+ * kept. They are the same rule at the same threshold and hangover, so they must agree — and if they
+ * ever do not, every turn-taking number computed from the second is describing audio the first did
+ * not see, which is the failure that would be least visible and most expensive.
+ *
+ * Reported, not fatal: a disagreement is a fact about the run worth reading, and failing a fleet run
+ * over a metric that gates nothing yet would be the wrong trade. Phase 1 makes it a gate when the
+ * numbers it feeds are the ones being reported.
+ */
+const stretchDisagreements = results.flatMap((r) => {
+  const postHoc = speechWindows(r.rmsSamples).length;
+  return postHoc === r.liveStretchCount ? [] : [{ call: r.label, live: r.liveStretchCount, postHoc }];
+});
 const werP95 = werPct(95);
 const werBreached = werP95 !== null && werP95 > MAX_WER;
 
@@ -347,6 +366,12 @@ console.log(`  turn latency  n       ${turnMs.length} (${unanswered} unanswered)
 console.log(`  turn latency p50/p95  ${turnPct(50)}ms / ${turnPct(95)}ms`);
 console.log(`  stt wer  n            ${werValues.length}${unmatched > 0 ? `  (${unmatched} unmatched transcript(s) — pairing may be off)` : ""}`);
 console.log(`  stt wer  p50/p95      ${werPct(50) === null ? "n/a" : werPct(50)!.toFixed(3)} / ${werP95 === null ? "n/a" : werP95.toFixed(3)}   (gate ${MAX_WER}${werBreached ? " — BREACHED" : ""})`);
+if (stretchDisagreements.length > 0) {
+  console.log(`  agent stretches       DISAGREE on ${String(stretchDisagreements.length)} call(s): ${stretchDisagreements.map((d) => `${d.call} live=${String(d.live)} post-hoc=${String(d.postHoc)}`).join(", ")}`);
+} else {
+  const stretches = results.reduce((n, r) => n + r.liveStretchCount, 0);
+  console.log(`  agent stretches       ${String(stretches)} over ${String(results.length)} call(s), live and post-hoc agree`);
+}
 if (neverServedCalls > 0) {
   console.log(`  stt wer  excluded     ${String(neverServedCalls)} call(s) no worker served — no transcript to score, so they are not a transcription result (H4)`);
 }
@@ -389,6 +414,8 @@ const report = {
   agent_hung_up: hungUp,
   /** Calls no worker served, excluded from the WER denominator because they have no transcript (H4). */
   never_served_calls: neverServedCalls,
+  /** Live vs post-hoc onset detection, per H1. Empty means the two agree on every call. */
+  agent_stretch_disagreements: stretchDisagreements,
   equivalence_green: green,
   duration_ms: { p50: pct(50), p95: pct(95), max: durations.at(-1) ?? 0 },
   turn_latency_ms: { n: turnMs.length, unanswered, p50: turnPct(50), p95: turnPct(95), max: turnMs.at(-1) ?? 0 },

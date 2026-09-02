@@ -38,6 +38,10 @@ import { wordErrorRate } from "@feather-lite/domain";
 import { buildSpeechStack, speechProvider } from "../speech.js";
 import { synthesizeCached } from "./line-cache.js";
 import { harnessHeaders, harnessJsonHeaders } from "@feather-lite/load-test/harness-http";
+// The threshold and the hangover come from `domain`, not a second copy here: the live detector and
+// the post-hoc `speechWindows()` have to agree, and a harness and a metric drifting apart on the
+// value is exactly the failure the domain module was written to prevent (H1).
+import { SILENCE_HANGOVER_MS, SPEECH_RMS, type RmsSample } from "@feather-lite/domain";
 
 /**
  * A different voice than the agent's, so a human listening can tell the two apart.
@@ -110,6 +114,15 @@ export interface ScriptedCallOptions {
   readonly controlPlaneUrl: string;
   readonly borrowerName: string;
   readonly participantIdentity: string;
+  /**
+   * Called when the agent starts and stops speaking, live (H1).
+   *
+   * The seam a tier-3 scenario needs — "interrupt 400 ms into the agent's second line" is a reaction
+   * to an onset, and a scripted borrower that waits for a transcript reacts a sentence too late.
+   * Optional: tier 2 does not use them and its behaviour is unchanged.
+   */
+  readonly onStretchStart?: ((index: number, atMs: number) => void) | undefined;
+  readonly onStretchEnd?: ((index: number, atMs: number) => void) | undefined;
   /** Short tag used in log lines so concurrent calls are readable. */
   readonly label: string;
   readonly log?: (message: string) => void;
@@ -194,6 +207,13 @@ export interface ScriptedCallResult {
   /** Per-line STT accuracy, in scripted order. See {@link WerLine}. */
   readonly werLines: ReadonlyArray<WerLine>;
   /**
+   * The call's agent-audio energy, frame by frame (H1). Returned so `speechWindows()` runs once,
+   * post hoc and pure, on exactly what the live detector saw.
+   */
+  readonly rmsSamples: ReadonlyArray<RmsSample>;
+  /** How many stretches the live detector counted, for reconciliation against the post-hoc index. */
+  readonly liveStretchCount: number;
+  /**
    * Borrower transcripts that arrived with no spoken line waiting for them. Non-empty means the
    * reference/hypothesis pairing above may be off by one, so the WER is not to be trusted for that
    * run — reported rather than hidden.
@@ -261,6 +281,20 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
   const room = new Room();
   const turnLatencies: Array<TurnLatency> = [];
   const werLines: Array<WerLine> = [];
+  /**
+   * Every frame's energy for the whole call (H1), so `speechWindows()` can run on it post hoc and
+   * the turn-taking metrics have something to be computed from.
+   */
+  const rmsSamples: Array<RmsSample> = [];
+  /**
+   * Every fourth sample, not every sample (W8). Frames are ~10 ms and the onset detector needs that
+   * 10 ms of resolution — it does not need the RMS of a 10 ms frame over all ~480 of its samples at
+   * 48 kHz. A quarter of them puts the same decision either side of a threshold that sits between 25
+   * and 250, and takes three quarters of this loop off the box the worker is being measured on.
+   */
+  const SAMPLE_STRIDE = 4;
+  /** The live onset index, reconciled against the post-hoc one when the call ends (H1). */
+  let liveStretches = 0;
   const unmatchedTranscripts: string[] = [];
   /**
    * The line currently being spoken (or most recently spoken), collecting every borrower-final
@@ -326,33 +360,73 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       log(`subscribed to agent audio (${participant.identity})`);
       const stream = new AudioStream(track);
       void (async () => {
-        // The track carries frames continuously, silence included, so frame ARRIVAL says nothing —
-        // but frame ENERGY does. RMS over int16 samples: measured here, agent TTS speech peaks
-        // around 250 and channel silence stays under ~25, so 80 splits them cleanly. First
-        // energetic frame after the borrower fell silent is when a human would hear the reply.
-        const SPEECH_RMS = 80;
         /**
-         * Every fourth sample, not every sample (W8). Frames are ~10 ms, and the onset detector
-         * needs that 10 ms of resolution — it does not need the RMS of a 10 ms frame computed over
-         * all ~480 of its samples at 48 kHz. A quarter of them puts the same speech/silence
-         * decision either side of a threshold that sits between 25 and 250, and takes three
-         * quarters of this loop off the box the worker is being measured on. Frames are still
-         * counted one by one, and no frame is skipped, so onset timing is unchanged.
+         * Every frame's energy is kept, and the onset is a consumer of that (issue #4, H1).
+         *
+         * The loop used to compute RMS **only while a reply was pending** and stop at the first loud
+         * frame: `if (pending && pending.audioAt === null)`. That is exactly enough for one number —
+         * response latency — and it throws away the sample tier 3 needs for six. D4's metrics are
+         * about *stretches* of agent audio with a beginning and an end, and `speechWindows()` in
+         * `domain` already turns samples into stretches; it had nothing to run on because the
+         * harness never kept any.
+         *
+         * So RMS is computed for every frame of agent audio, the samples are kept for the whole
+         * call and returned on the result, and `pending.audioAt` is now set by the same loop rather
+         * than being the reason it runs.
+         *
+         * **Timed from a sample counter, not `Date.now()` per chunk.** Frames arrive in bursts
+         * through an async iterator, so wall-clock at delivery is jittered by the event loop — and
+         * the stretch boundaries this feeds are compared against the ledger at 100 ms resolution.
+         * The audio's own clock does not jitter: every frame is `samplesPerChannel / sampleRate`
+         * seconds of speech, whenever it happens to arrive. `t0Audio` anchors that count to the wall
+         * clock once, so a stretch can still be joined to a playout report.
          */
-        const SAMPLE_STRIDE = 4;
+        let audioMs = 0;
+        let t0Audio: number | null = null;
+        let inStretch = false;
+        let lastLoudMs = 0;
+
         for await (const frame of stream) {
           audioFrames += 1;
-          const pending = awaiting.reply;
-          if (pending && pending.audioAt === null) {
-            const data = frame.data;
-            let sum = 0;
-            let n = 0;
-            for (let i = 0; i < data.length; i += SAMPLE_STRIDE) {
-              sum += data[i]! * data[i]!;
-              n += 1;
-            }
-            if (n > 0 && Math.sqrt(sum / n) > SPEECH_RMS) pending.audioAt = Date.now();
+          t0Audio ??= Date.now();
+          const data = frame.data;
+          let sum = 0;
+          let n = 0;
+          for (let i = 0; i < data.length; i += SAMPLE_STRIDE) {
+            sum += data[i]! * data[i]!;
+            n += 1;
           }
+          const rms = n > 0 ? Math.sqrt(sum / n) : 0;
+          const atMs = t0Audio + audioMs;
+          rmsSamples.push({ atMs, rms });
+          audioMs += (frame.samplesPerChannel / frame.sampleRate) * 1000;
+
+          /**
+           * The hangover state machine, inline and live (H1).
+           *
+           * The same rule `speechWindows()` applies post hoc, at the same threshold and the same
+           * 700 ms hangover — a pause inside a line is a few hundred milliseconds and the gap
+           * between two turns is the whole latency waterfall, so 700 separates them with an order of
+           * magnitude either side. Live because a scenario has to *react* to an onset (interrupt at
+           * offset t into the agent's k-th line), and post hoc because the run must be able to check
+           * that what it reacted to is what the samples say.
+           */
+          if (rms > SPEECH_RMS) {
+            if (!inStretch) {
+              inStretch = true;
+              liveStretches += 1;
+              opts.onStretchStart?.(liveStretches, atMs);
+            }
+            lastLoudMs = atMs;
+          } else if (inStretch && atMs - lastLoudMs > SILENCE_HANGOVER_MS) {
+            inStretch = false;
+            opts.onStretchEnd?.(liveStretches, lastLoudMs);
+          }
+
+          // The onset the response-latency number is anchored to: the first energetic frame after
+          // the borrower fell silent. A consumer of the loop now, not its purpose.
+          const pending = awaiting.reply;
+          if (pending && pending.audioAt === null && rms > SPEECH_RMS) pending.audioAt = Date.now();
         }
       })();
     });
@@ -500,6 +574,8 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
         endedAtMs: Date.now(),
         turnLatencies: [...turnLatencies],
         werLines: [...werLines],
+        rmsSamples: [...rmsSamples],
+        liveStretchCount: liveStretches,
         unmatchedTranscripts: [...unmatchedTranscripts],
         unansweredTurns: [...unansweredTurns],
         error: null,
@@ -568,6 +644,8 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       endedAtMs: Date.now(),
       turnLatencies: [...turnLatencies],
       werLines: [...werLines],
+      rmsSamples: [...rmsSamples],
+      liveStretchCount: liveStretches,
       unmatchedTranscripts: [...unmatchedTranscripts],
       unansweredTurns: [...unansweredTurns],
       error: null,
@@ -585,6 +663,8 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       endedAtMs: Date.now(),
       turnLatencies: [...turnLatencies],
       werLines: [...werLines],
+      rmsSamples: [...rmsSamples],
+      liveStretchCount: liveStretches,
       unmatchedTranscripts: [...unmatchedTranscripts],
       unansweredTurns: [...unansweredTurns],
       error: String(e),
