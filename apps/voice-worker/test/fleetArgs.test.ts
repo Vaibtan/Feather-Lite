@@ -16,7 +16,7 @@ const ok = (argv: string[]) => {
 describe("parseFleetArgs", () => {
   it("takes the documented flags, with the documented defaults", () => {
     const a = ok(["--label", "n5-baseline"]);
-    expect(a).toEqual({ calls: 5, maxWer: 0.2, label: "n5-baseline", inProc: false, allowDev: false, allowNoShedding: false, allowShed: false });
+    expect(a).toEqual({ calls: 5, maxWer: 0.2, maxAmountErrors: 0, label: "n5-baseline", inProc: false, allowDev: false, allowNoShedding: false, allowShed: false });
   });
 
   it("reads values and booleans together", () => {
@@ -91,5 +91,23 @@ describe("--allow-shed (H4)", () => {
     // read past: nine calls served, the tenth `NEVER_SERVED`, and the run reported a WER breach.
     expect(ok(["--label", "x"]).allowShed).toBe(false);
     expect(ok(["--label", "x", "--allow-shed"]).allowShed).toBe(true);
+  });
+});
+
+describe("--max-amount-errors (D3's entity gate)", () => {
+  it("defaults to zero, because a wrong amount is a wrong promise", () => {
+    const r = parseFleetArgs(["--label", "x"]);
+    expect(r.ok && r.args.maxAmountErrors).toBe(0);
+  });
+
+  it("can be raised deliberately", () => {
+    const r = parseFleetArgs(["--label", "x", "--max-amount-errors", "2"]);
+    expect(r.ok && r.args.maxAmountErrors).toBe(2);
+  });
+
+  it("refuses a fraction, since amounts are counted and not rated", () => {
+    const r = parseFleetArgs(["--label", "x", "--max-amount-errors", "0.5"]);
+    expect(r.ok).toBe(false);
+    expect(!r.ok && r.message).toContain("whole number of amounts");
   });
 });

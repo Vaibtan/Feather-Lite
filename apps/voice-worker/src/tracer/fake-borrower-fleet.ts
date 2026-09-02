@@ -25,7 +25,7 @@ import type { TurnLatencyRow } from "@feather-lite/contracts";
 import { percentile, ttsAggregate } from "@feather-lite/domain";
 import { formatResourceReport, perCoreBudget, startResourceSampler, validateReport, WORKER_CONTAINERS, WORKER_ROLES, type Role } from "@feather-lite/load-test/resources";
 import { checkEquivalence, loadScenarioReference, type EquivalenceResult } from "./equivalence.js";
-import { buildHarnessScores, postHarnessScores, summariseWer } from "./harness-scores.js";
+import { buildHarnessScores, postHarnessScores, summariseEntities, summariseWer } from "./harness-scores.js";
 import type { ScriptedCallResult } from "./scripted-call.js";
 import type { BorrowerProcMessage, BorrowerProcRequest } from "./borrower-proc.js";
 import { harnessJsonHeaders } from "@feather-lite/load-test/harness-http";
@@ -372,6 +372,23 @@ const werP95 = werPct(95);
 const werBreached = werP95 !== null && werP95 > MAX_WER;
 
 /**
+ * D3's entity gate, beside the word-error one.
+ *
+ * They answer different questions. WER asks how much of the transcript was wrong; this asks whether
+ * the parts that decide the call survived — and an amount error is a **wrong promise**, not a
+ * degraded transcript, which is why its budget is zero by default rather than a rate. Dates and
+ * names are counted and reported, not gated, until the accent personas say what their floor is.
+ *
+ * The fixtures are minted as "Jordan <prefix>", so the first name is the one name the scripted
+ * lines carry; the per-fixture surname never appears in them.
+ */
+const entities = summariseEntities(
+  servedResults.flatMap((r) => r.werLines.map((l) => ({ reference: l.reference, hypothesis: l.hypothesis }))),
+  ["Jordan"],
+);
+const amountsBreached = entities.amount_errors > ARGS.maxAmountErrors;
+
+/**
  * TTS heuristics over the fleet (D5). Read from the ledger's turn rows rather than measured here:
  * the worker is what knows how much audio it produced for how many characters, and it already
  * reports both on the `turn_metrics` signal. The harness only knows that *some* audio arrived.
@@ -483,6 +500,7 @@ const report = {
   equivalence_green: green,
   duration_ms: { p50: pct(50), p95: pct(95), max: durations.at(-1) ?? 0 },
   turn_latency_ms: { n: turnMs.length, unanswered, p50: turnPct(50), p95: turnPct(95), max: turnMs.at(-1) ?? 0 },
+  stt_entities: { ...entities, gate: ARGS.maxAmountErrors, breached: amountsBreached },
   stt_wer: { n: werValues.length, unmatched_transcripts: unmatched, p50: werPct(50), p95: werP95, max: werValues.at(-1) ?? null, gate: MAX_WER, breached: werBreached, worst_line: worstLine },
   /**
    * Heuristics, not a quality score, and not gated: a chars-per-second outlier is a turn worth
@@ -554,7 +572,15 @@ for (const { call, eq } of equivalences) {
   );
 }
 
-// The run fails on either gate. Equivalence is correctness and WER is transcription quality; a run
-// that stayed correct only because the words happened to survive is not a pass.
+log(
+  `entity errors: ${String(entities.amount_errors)} amount, ${String(entities.date_errors)} date, ` +
+    `${String(entities.name_errors)} name over ${String(entities.n)} entities` +
+    `${entities.entity_er === null ? "" : ` (er ${entities.entity_er.toFixed(3)})`}`,
+);
+
+// The run fails on any gate. Equivalence is correctness, WER is transcription quality, and the
+// entity gate is whether the numbers that decide the call survived; a run that stayed correct only
+// because the words happened to survive is not a pass.
 if (werBreached) log(`stt wer p95 ${werP95!.toFixed(3)} exceeds the ${MAX_WER} gate: FAIL`);
-process.exit(green === CALLS && !werBreached ? 0 : 1);
+if (amountsBreached) log(`${String(entities.amount_errors)} amount error(s) exceeds the ${String(ARGS.maxAmountErrors)} gate: FAIL`);
+process.exit(green === CALLS && !werBreached && !amountsBreached ? 0 : 1);

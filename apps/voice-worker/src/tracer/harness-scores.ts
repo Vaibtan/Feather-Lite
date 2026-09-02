@@ -7,6 +7,7 @@
  * `POST /api/conversations/:id/scores` a human label uses means the Quality page, Langfuse and the
  * fleet report all read one store rather than three.
  */
+import { entityErrors } from "@feather-lite/domain";
 import { harnessHeaders, harnessJsonHeaders } from "@feather-lite/load-test/harness-http";
 
 /** One turn as the ledger knows it: its id, and when the control plane claimed it. */
@@ -246,6 +247,48 @@ export const matchLedgerTurns = (
 };
 
 /** Call-level WER summary from the per-line measurements, ignoring lines with no reference. */
+/**
+ * The entity gate, summarised over a call (issue #1, D3).
+ *
+ * Reported beside `stt.wer` rather than folded into it, because the two answer different questions:
+ * WER asks how much of the transcript was wrong, this asks whether the parts that decide the call
+ * survived. An amount error is a wrong promise, not a degraded transcript, which is why D3 gates it
+ * at zero and only reports dates and names.
+ */
+export const summariseEntities = <L extends { readonly reference: string; readonly hypothesis: string }>(
+  lines: ReadonlyArray<L>,
+  names: ReadonlyArray<string>,
+): {
+  readonly n: number;
+  readonly amount_errors: number;
+  readonly date_errors: number;
+  readonly name_errors: number;
+  /** Null when no line carried an entity — nothing to be wrong about (same rule as WER). */
+  readonly entity_er: number | null;
+  readonly counts: Readonly<Record<string, number>>;
+} => {
+  let expected = 0;
+  let wrong = 0;
+  const errs = { amount: 0, date: 0, name: 0 };
+  const counts = { amount: 0, date: 0, name: 0 };
+  for (const l of lines) {
+    const r = entityErrors(l.reference, l.hypothesis, { names });
+    for (const k of ["amount", "date", "name"] as const) counts[k] += r.counts[k];
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- kinds are exhaustive
+    expected += r.counts.amount + r.counts.date + r.counts.name;
+    wrong += r.errors.length;
+    for (const e of r.errors) errs[e.kind] += 1;
+  }
+  return {
+    n: expected,
+    amount_errors: errs.amount,
+    date_errors: errs.date,
+    name_errors: errs.name,
+    entity_er: expected === 0 ? null : wrong / expected,
+    counts,
+  };
+};
+
 export const summariseWer = <L extends { readonly turn: string; readonly wer: number | null }>(lines: ReadonlyArray<L>) => {
   const measured = lines.filter((l): l is L & { wer: number } => l.wer !== null);
   if (measured.length === 0) return null;
