@@ -5,6 +5,7 @@ export * from "./db/rows.js";
 export * from "./repos/crm.js";
 export * from "./repos/conversation.js";
 export * from "./repos/scheduling.js";
+export * from "./services/voiceDispatch.js";
 export * from "./repos/scores.js";
 export * from "./services/Ids.js";
 export * from "./services/types.js";

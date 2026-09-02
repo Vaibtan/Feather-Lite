@@ -15,7 +15,7 @@ import { CrmRepo } from "../repos/crm.js";
 import { SchedulingRepo } from "../repos/scheduling.js";
 import { AppConfig } from "../config.js";
 import { IdGen } from "./Ids.js";
-import { NO_MEDIA_PLANE, dispatchAgent, hasMediaPlane, roomNameFor } from "./voiceDispatch.js";
+import { NO_MEDIA_PLANE, NO_SIP_TRUNK, canDialOut, dispatchAgent, hasMediaPlane, roomNameFor } from "./voiceDispatch.js";
 import { WorkflowService } from "./Workflow.js";
 
 export interface ProcessedAction {
@@ -156,6 +156,24 @@ export class SchedulingService extends Effect.Service<SchedulingService>()("@fea
             yield* Effect.logWarning(`scheduled ${action.actionType} for borrower ${borrowerId} cannot place a voice call: no media plane configured`);
             yield* sched.setActionStatus(action.id, "FAILED", { reason: NO_MEDIA_PLANE });
             return settled({ actionId: action.id, actionType: action.actionType, status: "FAILED", detail: { reason: NO_MEDIA_PLANE } });
+          }
+          /**
+           * And separately: is there anything to dial *through* (C4)?
+           *
+           * The dispatch below asks for `mode: "sip"`, and SIP needs an outbound trunk that only
+           * LiveKit Cloud provides here. The control plane could not see that — the trunk id was
+           * worker-side env — so it scheduled the call anyway, the worker hung up
+           * `sip_not_configured`, the call finalized `NO_ANSWER`, and `NO_ANSWER` scheduled another
+           * retry. Each lap cost a room, a dispatch and a worker job slot counted against
+           * `WORKER_MAX_JOBS`, which is capacity a fleet run on the same box is measuring.
+           *
+           * Failed here, before `startCall`, for the same reason as the check above: no conversation
+           * row means nothing for the sweeper to book as an orphan later.
+           */
+          if (channel === "voice" && !canDialOut(cfg)) {
+            yield* Effect.logWarning(`scheduled ${action.actionType} for borrower ${borrowerId} cannot place a voice call: no SIP outbound trunk configured`);
+            yield* sched.setActionStatus(action.id, "FAILED", { reason: NO_SIP_TRUNK });
+            return settled({ actionId: action.id, actionType: action.actionType, status: "FAILED", detail: { reason: NO_SIP_TRUNK } });
           }
 
           const started = yield* workflow

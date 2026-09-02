@@ -34,6 +34,24 @@ export const NO_MEDIA_PLANE = "NO_MEDIA_PLANE";
 export const hasMediaPlane = (cfg: AppConfigShape): boolean => cfg.livekit !== null;
 
 /**
+ * Why an outbound voice call could not be placed: there is a media plane, and nothing to dial out
+ * *through* (C4).
+ *
+ * A third distinct answer, and the distinction is the finding. `NO_MEDIA_PLANE` means no LiveKit;
+ * this means LiveKit is there but has no SIP trunk, which is the self-hosted profile — the one this
+ * repo runs. Booking that as `NO_ANSWER`, which is what happened while only the worker knew, made
+ * the scheduler re-dial a number it could never reach until the 7-in-7 cap, taking a room, a
+ * dispatch and a worker job slot on every lap.
+ */
+export const NO_SIP_TRUNK = "NO_SIP_TRUNK";
+
+/**
+ * Can this deployment place an outbound call? The SIP trunk is provisioned on LiveKit Cloud; the
+ * self-hosted profile has none, so this is `false` on the box this is developed on and in CI.
+ */
+export const canDialOut = (cfg: AppConfigShape): boolean => cfg.livekit !== null && cfg.livekit.sipOutboundTrunkId !== null;
+
+/**
  * Create the room and dispatch the agent to it. Returns the dispatch id.
  *
  * The 10-second timeout is not arbitrary: without it a LiveKit that accepts the connection and then

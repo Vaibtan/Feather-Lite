@@ -39,7 +39,16 @@ export interface AppConfigShape {
    * prompt, knowing what that writes.
    */
   readonly traceRedactAccountData: boolean;
-  readonly livekit: { readonly url: string; readonly apiKey: string; readonly apiSecret: Redacted.Redacted<string>; readonly agentName: string } | null;
+  /**
+   * The media plane, and — separately — whether it can place an *outbound* call.
+   *
+   * `sipOutboundTrunkId` is null on the self-hosted profile, which has no SIP at all. It is
+   * read here as well as in the worker because the control plane is what decides to re-dial, and
+   * scheduling a call that the worker can only hang up on is how C4's loop happened.
+   */
+  readonly livekit:
+    | { readonly url: string; readonly apiKey: string; readonly apiSecret: Redacted.Redacted<string>; readonly agentName: string; readonly sipOutboundTrunkId: string | null }
+    | null;
   /** Demo conveniences: clock override on /calls/start, "reset demo" endpoint. */
   readonly demoMode: boolean;
   readonly apiBearerToken: Redacted.Redacted<string> | null;
@@ -152,6 +161,7 @@ export const appConfig: Config.Config<AppConfigShape> = Config.all({
   livekitApiKey: optionalString("LIVEKIT_API_KEY"),
   livekitApiSecret: optionalRedacted("LIVEKIT_API_SECRET"),
   livekitAgentName: Config.string("LIVEKIT_AGENT_NAME").pipe(Config.withDefault("feather-lite-agent")),
+  livekitSipOutboundTrunkId: optionalString("LIVEKIT_SIP_OUTBOUND_TRUNK_ID"),
   demoMode: Config.boolean("DEMO_MODE").pipe(Config.withDefault(true)),
   apiBearerToken: optionalRedacted("API_BEARER_TOKEN"),
   rateLimitBypassToken: optionalRedacted("RATE_LIMIT_BYPASS_TOKEN"),
@@ -196,7 +206,15 @@ export const appConfig: Config.Config<AppConfigShape> = Config.all({
       traceRedactAccountData: c.traceRedactAccountData,
       livekit:
         c.livekitUrl._tag === "Some" && c.livekitApiKey._tag === "Some" && c.livekitApiSecret._tag === "Some"
-          ? { url: c.livekitUrl.value, apiKey: c.livekitApiKey.value, apiSecret: c.livekitApiSecret.value, agentName: c.livekitAgentName }
+          ? {
+              url: c.livekitUrl.value,
+              apiKey: c.livekitApiKey.value,
+              apiSecret: c.livekitApiSecret.value,
+              agentName: c.livekitAgentName,
+              // Blank reads as absent, for the same reason the bypass token does below: an operator
+              // who writes `LIVEKIT_SIP_OUTBOUND_TRUNK_ID=` to turn it off means off.
+              sipOutboundTrunkId: c.livekitSipOutboundTrunkId._tag === "Some" && c.livekitSipOutboundTrunkId.value.length > 0 ? c.livekitSipOutboundTrunkId.value : null,
+            }
           : null,
       demoMode: c.demoMode,
       apiBearerToken: c.apiBearerToken._tag === "Some" ? c.apiBearerToken.value : null,

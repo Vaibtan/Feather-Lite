@@ -127,6 +127,11 @@ services:
       # so a token reaching the server and not the worker would 401 the turn stream and - since
       # C2 - the heartbeat too, and the sweeper would then orphan calls that were being served.
       API_BEARER_TOKEN: ${API_BEARER_TOKEN:-}
+      # Unset on the self-hosted profile, which has no SIP at all. The control plane reads it to
+      # answer a question it used to guess at: whether a scheduled voice re-dial has anywhere to
+      # dial. Without it every unanswered call was re-dialled over a trunk that does not exist,
+      # burning a room, a dispatch and a worker job slot per lap (C4).
+      LIVEKIT_SIP_OUTBOUND_TRUNK_ID: ${LIVEKIT_SIP_OUTBOUND_TRUNK_ID:-}
     mem_limit: 768m
     ports:
       - "8080:8080"
@@ -171,6 +176,9 @@ services:
       # The other half of the pair on the server service above. The worker presents this on the
       # turn stream, on signals and on the heartbeat.
       API_BEARER_TOKEN: ${API_BEARER_TOKEN:-}
+      # The worker has always read this; it is listed now so it and the server agree about whether
+      # an outbound call can be placed at all (C4).
+      LIVEKIT_SIP_OUTBOUND_TRUNK_ID: ${LIVEKIT_SIP_OUTBOUND_TRUNK_ID:-}
     # The arithmetic, from `docker stats` on this container rather than from host processes — which
     # is the only honest source now that the worker only ever runs here (2026-09-01, W11):
     #

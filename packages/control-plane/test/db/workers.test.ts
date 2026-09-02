@@ -45,7 +45,7 @@ const rt = makeRuntime(services.pipe(Layer.provideMerge(makeInfraLayer())));
 const rtNoAnswer = makeRuntime(
   services.pipe(
     Layer.provideMerge(
-      makeInfraLayer({ livekit: { url: "http://127.0.0.1:1", apiKey: "k", apiSecret: Redacted.make("s"), agentName: "feather-lite-agent" } }),
+      makeInfraLayer({ livekit: { url: "http://127.0.0.1:1", apiKey: "k", apiSecret: Redacted.make("s"), agentName: "feather-lite-agent", sipOutboundTrunkId: "trunk-for-the-dispatch-test" } }),
     ),
   ),
 );
