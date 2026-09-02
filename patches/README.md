@@ -149,3 +149,42 @@ pnpm patch-commit <that directory>        # rewrites patches/*.patch and reinsta
 
 After changing either patch, re-run the measurement it claims. A patch whose number is stale is
 worse than no patch, because the next person believes it.
+
+---
+
+## Not patched: job processes ignore SIGTERM (issue #4, W7)
+
+Recorded here rather than fixed, because it is the framework's behaviour and not this repo's, and
+because a probe says the consequence is narrower than it first looked.
+
+`agents/dist/ipc/job_proc_lazy_main.js:187-191` installs the job process's own `SIGINT` and `SIGTERM`
+handlers, and both only log. `ipc/supervised_proc.js` then uses `proc.kill()` — plain SIGTERM — as
+its fallback in three places: a wedged job, a failed `initialize`, and the memory-limit `close()`.
+
+**Probed on the running container, 2026-09-02.** Four warm `job_proc_lazy_main` processes; the
+worker was sent `kill -TERM` on one of them:
+
+```
+PID 606 SURVIVED SIGTERM
+warm job processes now: 5
+```
+
+It survived, stayed in the pool's count, and the worker went on reporting healthy. So on Linux — the
+platform that ships — the per-job memory ceiling and the unresponsive-job watchdog both depend on
+the **IPC shutdown path**, and a job that stops answering IPC cannot be killed by the framework's
+fallback.
+
+**Why it is not patched.** The failure needs a job that is both wedged *and* still holding its slot,
+which nothing here has produced: `WORKER_JOB_MEMORY_LIMIT_MB` has fired in anger (the win32 native
+VAD arena, 2026-09-01) and the jobs it killed went away, because they were answering IPC. Patching
+`process.exit(143)` into a dependency's signal handler to cover a case that has not occurred is the
+opposite of this file's rule — every entry here carries a measurement or the defect it makes
+measurable.
+
+**What was corrected instead.** The 2026-09-02 review first reported this as a repo defect, on the
+strength of `agent.ts`'s own `process.once("SIGTERM", abandonWaits)`. That handler is redundant
+inside a job process and is **not** the cause; the SDK installs the same no-op handlers itself. The
+correction is in that spec's §Corrections, and this note is the evidence behind it.
+
+**Trigger:** the first job observed surviving a memory-limit `close()`, or a wedged job that holds a
+slot through a watchdog timeout. Either makes a `process.exit(143)` patch worth its maintenance.
