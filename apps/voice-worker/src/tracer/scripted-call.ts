@@ -181,6 +181,14 @@ export interface ScriptedCallResult {
   readonly agentSegments: ReadonlyArray<string>;
   readonly agentAudioFrames: number;
   readonly durationMs: number;
+  /**
+   * When the call finished, in epoch milliseconds (H3).
+   *
+   * `durationMs` cannot close a join window: the measurements it is compared against are absolute
+   * instants, matched to `conversation_turns.started_at`. Without an absolute end the last line's
+   * window ran to infinity and could claim a turn the ledger opened after the call was over.
+   */
+  readonly endedAtMs: number;
   /** Per-turn response latency, in scripted order. See {@link TurnLatency}. */
   readonly turnLatencies: ReadonlyArray<TurnLatency>;
   /** Per-line STT accuracy, in scripted order. See {@link WerLine}. */
@@ -457,6 +465,7 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
         agentSegments: agentSaid.map((s) => s.text),
         agentAudioFrames: audioFrames,
         durationMs: Date.now() - t0,
+        endedAtMs: Date.now(),
         turnLatencies: [...turnLatencies],
         werLines: [...werLines],
         unmatchedTranscripts: [...unmatchedTranscripts],
@@ -524,6 +533,7 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       agentSegments: agentSaid.map((s) => s.text),
       agentAudioFrames: audioFrames,
       durationMs: Date.now() - t0,
+      endedAtMs: Date.now(),
       turnLatencies: [...turnLatencies],
       werLines: [...werLines],
       unmatchedTranscripts: [...unmatchedTranscripts],
@@ -540,6 +550,7 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       agentSegments: agentSaid.map((s) => s.text),
       agentAudioFrames: audioFrames,
       durationMs: Date.now() - t0,
+      endedAtMs: Date.now(),
       turnLatencies: [...turnLatencies],
       werLines: [...werLines],
       unmatchedTranscripts: [...unmatchedTranscripts],

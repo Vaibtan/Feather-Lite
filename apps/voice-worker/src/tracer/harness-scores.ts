@@ -73,13 +73,18 @@ export const buildHarnessScores = (params: {
    * ledger for its TTS numbers.
    */
   readonly ledgerTurns: ReadonlyArray<LedgerTurn>;
+  /**
+   * When the call ended, closing the last measurement's join window (H3). Without it the final line
+   * reaches forward forever and can claim a post-call turn.
+   */
+  readonly callEndedAtMs?: number;
   /** Told what could not be joined, and how many rows that is. Never fails the run. */
   readonly log?: (message: string) => void;
 }): ReadonlyArray<HarnessScore> => {
   const wer = summariseWer(params.werLines);
   const measuredLines = params.werLines.filter((l): l is (typeof params.werLines)[number] & { wer: number } => l.wer !== null);
-  const werTurnIds = matchLedgerTurns(measuredLines, params.ledgerTurns);
-  const latencyTurnIds = matchLedgerTurns(params.turnLatencies, params.ledgerTurns);
+  const werTurnIds = matchLedgerTurns(measuredLines, params.ledgerTurns, params.callEndedAtMs);
+  const latencyTurnIds = matchLedgerTurns(params.turnLatencies, params.ledgerTurns, params.callEndedAtMs);
   /**
    * A measurement that could not be joined is **dropped**, not posted with a null turn id
    * (review #10).
@@ -152,16 +157,43 @@ export const buildHarnessScores = (params: {
  * below the gap between two scripted lines.
  */
 const CLOCK_GRACE_MS = 250;
-export const matchLedgerTurns = (measurements: ReadonlyArray<{ readonly atMs: number }>, ledgerTurns: ReadonlyArray<LedgerTurn>): ReadonlyArray<string | null> => {
+export const matchLedgerTurns = (
+  measurements: ReadonlyArray<{ readonly atMs: number }>,
+  ledgerTurns: ReadonlyArray<LedgerTurn>,
+  /**
+   * When the call ended, closing the last measurement's window (H3).
+   *
+   * Without it the final line's window runs to infinity and claims whatever turn the ledger opened
+   * next — a post-call turn, or the sweeper's close, joined to a line the borrower spoke a minute
+   * earlier. Optional so a caller that genuinely does not know keeps the old behaviour rather than
+   * being handed a wrong bound.
+   */
+  callEndedAtMs?: number,
+): ReadonlyArray<string | null> => {
   const turns = [...ledgerTurns].sort((a, b) => a.startedAtMs - b.startedAtMs);
   const claimed = new Set<string>();
-  // In the order the measurements were taken, whatever order the array happens to be in.
-  const byTime = measurements.map((m, index) => ({ index, atMs: m.atMs })).sort((a, b) => a.atMs - b.atMs);
+  /**
+   * Only measurements that can be ordered (H3).
+   *
+   * An abandoned line carries `atMs: NaN`, and `(a, b) => a.atMs - b.atMs` returns `NaN` for every
+   * comparison involving it — an inconsistent comparator, which `Array.prototype.sort` is entitled
+   * to answer by permuting the array however it likes. Measured on the case below: one `NaN` among
+   * four measurements moved a *finite* line off its own turn, so a score was posted under another
+   * turn's id. Only the nulls are counted as unjoined, so nothing would have said so — and this
+   * file's own note is that a wrong join is worse than an absent one, silently.
+   *
+   * A non-finite instant can never join anything anyway, so it is dropped before the sort and left
+   * `null`, which is what "this measurement has no turn" already means everywhere else here.
+   */
+  const byTime = measurements
+    .map((m, index) => ({ index, atMs: m.atMs }))
+    .filter((m) => Number.isFinite(m.atMs))
+    .sort((a, b) => a.atMs - b.atMs);
   const out: Array<string | null> = measurements.map(() => null);
   byTime.forEach((m, i) => {
     // The next line's instant closes this line's window: a turn that started after the borrower had
-    // already moved on belongs to that later line.
-    const until = byTime[i + 1]?.atMs ?? Number.POSITIVE_INFINITY;
+    // already moved on belongs to that later line. For the last line it is the end of the call.
+    const until = byTime[i + 1]?.atMs ?? callEndedAtMs ?? Number.POSITIVE_INFINITY;
     const hit = turns.find((t) => !claimed.has(t.turn_id) && t.startedAtMs >= m.atMs - CLOCK_GRACE_MS && t.startedAtMs < until);
     if (!hit) return;
     claimed.add(hit.turn_id);

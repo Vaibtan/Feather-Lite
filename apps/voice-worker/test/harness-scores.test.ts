@@ -25,6 +25,34 @@ describe("matchLedgerTurns", () => {
     expect(matchLedgerTurns(measurements, turns)).toEqual(["t1", "t2", "t3"]);
   });
 
+  it("does not let a NaN instant permute the join (H3)", () => {
+    // An abandoned line carries `atMs: NaN`, and a comparator that returns NaN makes `sort`
+    // reorder unpredictably — so every measurement could land under a *different* turn, silently,
+    // because only the nulls are counted as unjoined. The file's own note says a wrong join is
+    // worse than an absent one; this is the case that produced one.
+    const measurements = [{ atMs: 1_000 }, { atMs: Number.NaN }, { atMs: 5_000 }, { atMs: 9_000 }];
+    const turns = [turn("t1", 1_400), turn("t2", 5_600), turn("t3", 9_300)];
+    // The finite measurements keep their own turns, in order; the NaN one joins nothing.
+    expect(matchLedgerTurns(measurements, turns)).toEqual(["t1", null, "t2", "t3"]);
+  });
+
+  it("drops any non-finite instant rather than trying to order it", () => {
+    const turns = [turn("t1", 1_400)];
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(matchLedgerTurns([{ atMs: bad }, { atMs: 1_000 }], turns)).toEqual([null, "t1"]);
+    }
+  });
+
+  it("bounds the last measurement's window by the end of the call", () => {
+    // Without an upper bound the final line reaches forward forever and claims a turn opened long
+    // after the borrower stopped speaking — a post-call turn, or the sweeper's close.
+    const measurements = [{ atMs: 1_000 }];
+    const turns = [turn("t-late", 60_000)];
+    expect(matchLedgerTurns(measurements, turns, 5_000)).toEqual([null]);
+    // ...and with the turn inside the call, it still joins.
+    expect(matchLedgerTurns(measurements, [turn("t1", 1_400)], 5_000)).toEqual(["t1"]);
+  });
+
   it("survives a turn row the harness never measured — the barge-in case", () => {
     // This is what positional pairing could not do: an extra row in the middle shifted every
     // later measurement onto the wrong turn, so the old code refused to join anything at all.

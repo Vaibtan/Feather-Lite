@@ -416,6 +416,8 @@ for (const { call, eq } of equivalences) {
       turnLatencies: call.turnLatencies,
       // The ledger's own turns, which this run already fetched for its TTS numbers (O8).
       ledgerTurns: (rowsByConversation.get(call.conversationId) ?? []).map((r) => ({ turn_id: r.turn_id, startedAtMs: Date.parse(r.started_at) })),
+      // Closes the last line's join window at the end of its call (H3).
+      callEndedAtMs: call.endedAtMs,
       log,
     }),
   );
