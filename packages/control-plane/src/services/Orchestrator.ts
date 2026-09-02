@@ -791,9 +791,17 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
               }
             }
 
-            // Non-terminal ENDING (model said goodbye): treat as FAILED-free close -> COMPLETED with no outcome? No:
-            // a call that ends without a disposition is recorded as FAILED so the workflow retries.
-            if (outcome === null && nextState === "ENDING") outcome = "FAILED";
+            /**
+             * The model said goodbye and no tool recorded anything (C13).
+             *
+             * This used to be `FAILED`, which conflated "the call had no outcome" with "the system
+             * broke" — and `FAILED` schedules a re-dial, so a borrower who was told goodbye politely
+             * got called again for it, while the funnel counted the call as a failure.
+             *
+             * `NO_DISPOSITION` is a completed call with nothing to record. It does not retry:
+             * nothing went wrong that trying again would fix.
+             */
+            if (outcome === null && nextState === "ENDING") outcome = "NO_DISPOSITION";
 
             // 3. AGENT_TURN with the full spoken text of this turn (deltas + says)
             const fullText = [agentText.trim(), ...says.map((s) => s.text)].filter((s) => s.length > 0).join(" ");

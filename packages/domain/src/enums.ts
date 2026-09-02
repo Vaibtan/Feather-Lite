@@ -43,6 +43,15 @@ export const OUTCOMES = [
   "VOICEMAIL_LEFT",
   "THIRD_PARTY_CONTACT",
   "NO_ANSWER",
+  /**
+   * The call ran, the borrower and the agent said goodbye, and no tool recorded a disposition
+   * (issue #4, C13). Distinct from `FAILED`, which means the system broke.
+   *
+   * They used to be the same value, so a polite close with nothing to record was counted as a
+   * system failure on the funnel *and* scheduled a re-dial — punishing the borrower for a call that
+   * simply had no outcome. This one does not retry: nothing went wrong that trying again would fix.
+   */
+  "NO_DISPOSITION",
   "FAILED",
 ] as const;
 export const Outcome = Schema.Literal(...OUTCOMES);
