@@ -41,7 +41,7 @@ import { harnessHeaders, harnessJsonHeaders } from "@feather-lite/load-test/harn
 // The threshold and the hangover come from `domain`, not a second copy here: the live detector and
 // the post-hoc `speechWindows()` have to agree, and a harness and a metric drifting apart on the
 // value is exactly the failure the domain module was written to prevent (H1).
-import { SILENCE_HANGOVER_MS, SPEECH_RMS, type RmsSample } from "@feather-lite/domain";
+import { SILENCE_HANGOVER_MS, SPEECH_RMS, type BorrowerEvent, type RmsSample } from "@feather-lite/domain";
 
 /**
  * A different voice than the agent's, so a human listening can tell the two apart.
@@ -230,6 +230,8 @@ export interface ScriptedCallResult {
   readonly rmsSamples: ReadonlyArray<RmsSample>;
   /** How many stretches the live detector counted, for reconciliation against the post-hoc index. */
   readonly liveStretchCount: number;
+  /** The borrower's own events, for `turnTakingMetrics` (issue #1, D4). */
+  readonly borrowerEvents: ReadonlyArray<BorrowerEvent>;
   /**
    * Borrower transcripts that arrived with no spoken line waiting for them. Non-empty means the
    * reference/hypothesis pairing above may be off by one, so the WER is not to be trusted for that
@@ -441,6 +443,8 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
    * the turn-taking metrics have something to be computed from.
    */
   const rmsSamples: Array<RmsSample> = [];
+  /** What the borrower said and when, for the turn-taking metrics (issue #1, D4). */
+  const borrowerEvents: Array<BorrowerEvent> = [];
   /**
    * Every fourth sample, not every sample (W8). Frames are ~10 ms and the onset detector needs that
    * 10 ms of resolution — it does not need the RMS of a 10 ms frame over all ~480 of its samples at
@@ -665,6 +669,7 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
     };
 
     const speak = async (label: string, line: ScriptedLine) => {
+      const startedAt = Date.now();
       closeCurrentLine();
       // Opened before playout: the STT can emit a final for the first phrase while the rest is
       // still being spoken, and that phrase is part of this line, not a stray.
@@ -675,6 +680,15 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       log(`finished: ${label}`);
       // The line is over; both measurements about it are anchored to this instant.
       const spokenAt = Date.now();
+      /**
+       * What the borrower did, for the turn-taking metrics (issue #1, D4).
+       *
+       * `kind` is `line` for everything the promise-to-pay script speaks: each one is a bid for the
+       * turn. Tier 3's scenarios are what introduce backchannels and non-directed noise, and they
+       * label their own — which is why this is recorded here, where the script's intent is known,
+       * rather than inferred from audio afterwards.
+       */
+      borrowerEvents.push({ kind: "line", label, startMs: startedAt, endMs: spokenAt });
       currentLine.closedAt = spokenAt;
       abandonPendingReply("before the next line"); // the script waited, timed out, and moved on
       awaiting.reply = { turn: label, at: spokenAt, audioAt: null };
@@ -751,6 +765,7 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       werLines: [...werLines],
       rmsSamples: [...rmsSamples],
       liveStretchCount: liveStretches,
+      borrowerEvents: [...borrowerEvents],
       unmatchedTranscripts: [...unmatchedTranscripts],
       unansweredTurns: [...unansweredTurns],
       error: null,
@@ -770,6 +785,7 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       werLines: [...werLines],
       rmsSamples: [...rmsSamples],
       liveStretchCount: liveStretches,
+      borrowerEvents: [...borrowerEvents],
       unmatchedTranscripts: [...unmatchedTranscripts],
       unansweredTurns: [...unansweredTurns],
       error: String(e),

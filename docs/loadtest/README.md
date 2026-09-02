@@ -180,6 +180,46 @@ Turn latency p50/p95 3 009 / 3 313 ms and `total_ms` 2 405 / 2 746 ms on this ru
 calmer than the previous hour's (`ttft_ms` p95 1 236 against 3 651), which is OpenAI's variance and
 not this change.
 
+## 2026-09-02 — the first turn-taking numbers (issue #1 Phase 1)
+
+D4's six metrics, computed from a real call for the first time. Every piece existed and none of them
+had been joined: H1 keeps the agent's speech stretches, `withPlayoutTruth` attaches the ledger's
+`AGENT_TURN_PLAYOUT.interrupted` to each, the script records what the borrower did and when, and
+`turnTakingMetrics` turns the pair into numbers. This is the joining.
+
+**These are VAD-interruption numbers, and the report says so** (issue #4, amendment 8). Adaptive
+interruption has never run on this profile — W1 made the config admit it — so Phase 2's A/B has to
+compare like with like.
+
+`2026-09-02-tier2-n5-phase1-baseline.json`, 5/5 equivalent, WER p50/p95 0.000 / 0.000:
+
+| metric | median over 5 calls |
+|---|---:|
+| `turn.response_rate` | 0.667 |
+| `turn.yield_rate` | 0 |
+| `turn.yield_latency_ms` | 999.5 |
+| `turn.false_interrupt_rate` | n/a |
+| `turn.agent_interrupt_rate` | 0.333 |
+| `turn.selectivity` | n/a |
+| stretches with no playout (excluded) | **8** |
+
+**Read the last row before any of the others.** Eight of the run's agent speech stretches had no
+playout report behind them, so they are `truncated: null` — excluded from every rate and counted
+(H11). What is left is a thin denominator, and the rates move with it: an N=2 run an hour earlier, on
+the same code, gave `response_rate` 1.0, `yield_rate` 1.0 and `agent_interrupt_rate` 0 with one or
+two unknown stretches per call.
+
+That is not a contradiction, it is the finding: **on the tier-2 script these six numbers are not yet
+stable enough to be a baseline**, and the reason is legible rather than mysterious because the count
+is reported. Two things narrow it, both in Phase 1's remaining work — the scenario tables supply
+`truncated` per turn from `event_timeline` (amendment 7) rather than relying on a time join, and a
+scenario knows which of its own events were backchannels, which is what gives
+`false_interrupt_rate` and `selectivity` a denominator at all.
+
+`turn.yield_latency_ms` is the number that is already meaningful: ~940–1 000 ms from the borrower's
+barge-in to the agent falling silent, on VAD interruption, consistently across both runs. That is the
+number D5.2's `minDuration` A/B will move.
+
 ### Known open: `GET /api/borrowers` is unbounded, and the chaos probe cannot get past it
 
 The containerised chaos verdict (H12) is **still not recorded**, and now for a diagnosed reason

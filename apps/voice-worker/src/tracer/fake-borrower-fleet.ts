@@ -30,7 +30,7 @@ import type { ScriptedCallResult } from "./scripted-call.js";
 import type { BorrowerProcMessage, BorrowerProcRequest } from "./borrower-proc.js";
 import { harnessJsonHeaders } from "@feather-lite/load-test/harness-http";
 import { parseFleetArgs, reportFileName } from "./fleet-args.js";
-import { speechWindows } from "@feather-lite/domain";
+import { speechWindows, turnTakingMetrics, withPlayoutTruth } from "@feather-lite/domain";
 
 loadEnv({ path: fileURLToPath(new URL("../../../../.env", import.meta.url)) });
 
@@ -306,6 +306,49 @@ const worstLine = servedResults.flatMap((r) => r.werLines).reduce<{ turn: string
   (worst, l) => (l.wer !== null && (worst === null || l.wer > worst.wer) ? { turn: l.turn, wer: l.wer, reference: l.reference, hypothesis: l.hypothesis } : worst),
   null,
 );
+/**
+ * The six turn-taking numbers, per call (issue #1, D4 — Phase 1's headline).
+ *
+ * Every piece was already here and none of them had been joined: H1 keeps the agent's speech
+ * stretches, `withPlayoutTruth` attaches the ledger's `AGENT_TURN_PLAYOUT.interrupted` to each, the
+ * script records what the borrower did and when, and `turnTakingMetrics` turns the pair into the
+ * numbers. This is the joining.
+ *
+ * **They are VAD-interruption numbers and the report says so** (issue #4, amendment 8). Adaptive
+ * interruption has never run on this profile — W1 made the config admit it — so Phase 2's A/B has to
+ * compare against a baseline labelled with the mode that produced it.
+ *
+ * `truncated: null` for a stretch with no playout behind it, excluded from every rate and counted
+ * (H11), so a thin denominator is visible rather than flattering.
+ */
+const playoutsByConversation = new Map<string, Array<{ atMs: number; interrupted: boolean }>>();
+for (const { call } of equivalences) {
+  if (!call.conversationId) continue;
+  try {
+    const res = await fetch(`${CONTROL_PLANE_URL}/api/conversations/${call.conversationId}`, { headers: harnessJsonHeaders() });
+    if (!res.ok) {
+      log(`event timeline for ${call.label} failed: ${res.status}`);
+      continue;
+    }
+    const detail = (await res.json()) as { event_timeline: Array<{ type: string; created_at: string; payload: Record<string, unknown> }> };
+    playoutsByConversation.set(
+      call.conversationId,
+      detail.event_timeline
+        .filter((e) => e.type === "AGENT_TURN_PLAYOUT")
+        .map((e) => ({ atMs: Date.parse(e.created_at), interrupted: e.payload["interrupted"] === true }))
+        .filter((p) => Number.isFinite(p.atMs)),
+    );
+  } catch (e) {
+    log(`event timeline for ${call.label} failed: ${String(e)}`);
+  }
+}
+
+const turnTaking = results.map((r) => {
+  const playouts = (r.conversationId ? playoutsByConversation.get(r.conversationId) : undefined) ?? [];
+  const agent = withPlayoutTruth(speechWindows(r.rmsSamples), playouts);
+  return { label: r.label, metrics: turnTakingMetrics({ borrower: r.borrowerEvents, agent }) };
+});
+
 const unmatched = results.reduce((n, r) => n + r.unmatchedTranscripts.length, 0);
 
 /**
@@ -366,6 +409,21 @@ console.log(`  turn latency  n       ${turnMs.length} (${unanswered} unanswered)
 console.log(`  turn latency p50/p95  ${turnPct(50)}ms / ${turnPct(95)}ms`);
 console.log(`  stt wer  n            ${werValues.length}${unmatched > 0 ? `  (${unmatched} unmatched transcript(s) — pairing may be off)` : ""}`);
 console.log(`  stt wer  p50/p95      ${werPct(50) === null ? "n/a" : werPct(50)!.toFixed(3)} / ${werP95 === null ? "n/a" : werP95.toFixed(3)}   (gate ${MAX_WER}${werBreached ? " — BREACHED" : ""})`);
+/**
+ * Printed as a block per metric rather than per call: six numbers over five calls is a table nobody
+ * reads, and the median across the fleet is what a baseline is.
+ */
+{
+  const med = (pick: (m: (typeof turnTaking)[number]["metrics"]) => number | null): string => {
+    const vs = turnTaking.map((t) => pick(t.metrics)).filter((v): v is number => v !== null).sort((a, b) => a - b);
+    return vs.length === 0 ? "n/a" : String(percentile(vs, 50) ?? "n/a");
+  };
+  const unknown = turnTaking.reduce((n, t) => n + t.metrics.counts.unknown_truncation, 0);
+  console.log(`  turn-taking (VAD)     response ${med((m) => m.response_rate)}  yield ${med((m) => m.yield_rate)}  yield_ms ${med((m) => m.yield_latency_ms)}`);
+  console.log(`                        false_interrupt ${med((m) => m.false_interrupt_rate)}  agent_interrupt ${med((m) => m.agent_interrupt_rate)}  selectivity ${med((m) => m.selectivity)}`);
+  console.log(`                        medians over ${String(turnTaking.length)} call(s); ${String(unknown)} agent stretch(es) had no playout behind them and are excluded (H11)`);
+  console.log(`                        **VAD-interruption numbers**: adaptive has never run on this profile (W1), so Phase 2's A/B compares against this label.`);
+}
 if (stretchDisagreements.length > 0) {
   console.log(`  agent stretches       DISAGREE on ${String(stretchDisagreements.length)} call(s): ${stretchDisagreements.map((d) => `${d.call} live=${String(d.live)} post-hoc=${String(d.postHoc)}`).join(", ")}`);
 } else {
@@ -416,6 +474,12 @@ const report = {
   never_served_calls: neverServedCalls,
   /** Live vs post-hoc onset detection, per H1. Empty means the two agree on every call. */
   agent_stretch_disagreements: stretchDisagreements,
+  /**
+   * D4's six numbers per call, and the label that makes them comparable (issue #1 Phase 1, issue #4
+   * amendment 8). `interruption_mode` is what the session asked for and what it actually ran, which
+   * since W1 are the same thing.
+   */
+  turn_taking: { interruption_mode: process.env["WORKER_INTERRUPTION_MODE"] ?? "vad", per_call: turnTaking },
   equivalence_green: green,
   duration_ms: { p50: pct(50), p95: pct(95), max: durations.at(-1) ?? 0 },
   turn_latency_ms: { n: turnMs.length, unanswered, p50: turnPct(50), p95: turnPct(95), max: turnMs.at(-1) ?? 0 },
