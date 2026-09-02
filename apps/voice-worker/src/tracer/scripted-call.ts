@@ -34,7 +34,7 @@ import {
   TrackSource,
 } from "@livekit/rtc-node";
 import { AccessToken, AgentDispatchClient, RoomServiceClient } from "livekit-server-sdk";
-import { wordErrorRate } from "@feather-lite/domain";
+import { addNoiseAtSnr, dropFrames, makeRng, muLawRoundTrip, wordErrorRate, type DegradationProfile } from "@feather-lite/domain";
 import { buildSpeechStack, speechProvider } from "../speech.js";
 import { synthesizeCached } from "./line-cache.js";
 import { harnessHeaders, harnessJsonHeaders } from "@feather-lite/load-test/harness-http";
@@ -172,6 +172,13 @@ export interface ScriptedCallOptions {
    * two segment columns can tell it apart. Left unset by tier 2, whose calls belong in the window.
    */
   readonly harness?: string | undefined;
+  /**
+   * The persona's line quality (issue #1, D4). Absent or null means a studio-clean borrower, which
+   * is what every run before Phase 4 measured.
+   */
+  readonly degradation?: DegradationProfile | null | undefined;
+  /** Seeds the noise and the frame loss, so a degraded run is repeatable. */
+  readonly degradationSeed?: number | undefined;
   readonly log?: (message: string) => void;
   /**
    * Chaos hook: once the agent has actually replied — so there is a live call to break — this is
@@ -731,14 +738,45 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       log(`stt wer (${turn}): ${r.wer === null ? "n/a" : r.wer.toFixed(3)} (S${r.substitutions} I${r.insertions} D${r.deletions} / N${r.referenceWords}, ${parts.length} final(s))`);
     };
 
-    const speak = async (label: string, line: ScriptedLine) => {
+    /**
+   * The persona's degradation chain, or a pass-through when there is none (D4).
+   *
+   * Order is physical: the room's noise reaches the microphone first, the codec quantises what the
+   * microphone captured, and the network loses whole frames of the encoded stream last. Doing it in
+   * any other order would model a system that does not exist.
+   */
+  const degradeFrames = (frames: ReadonlyArray<AudioFrame>): ReadonlyArray<AudioFrame | null> => {
+    const profile = opts.degradation;
+    if (profile === undefined || profile === null) return [...frames];
+    const rng = makeRng(opts.degradationSeed ?? 1);
+    const shaped = frames.map((f) => {
+      let pcm = f.data;
+      if (profile.snrDb > 0) pcm = addNoiseAtSnr(pcm, profile.snrDb, rng);
+      if (profile.muLaw) pcm = muLawRoundTrip(pcm);
+      return new AudioFrame(pcm, f.sampleRate, f.channels, f.samplesPerChannel);
+    });
+    return dropFrames(shaped, { lossRate: profile.lossRate, burstiness: profile.burstiness, rng });
+  };
+
+  const speak = async (label: string, line: ScriptedLine) => {
       const startedAt = Date.now();
       closeCurrentLine();
       // Opened before playout: the STT can emit a final for the first phrase while the rest is
       // still being spoken, and that phrase is part of this line, not a stray.
       currentLine = { turn: label, reference: line.text, parts: [], closedAt: null };
       log(`speaking: ${label}`);
-      for (const f of line.frames) await source.captureFrame(f);
+      /**
+       * The borrower arrives through a phone, not a studio microphone (issue #1, D4 — Phase 4).
+       *
+       * Applied here, at the last moment before the frames are published, so everything upstream —
+       * the line cache, the WAV parsing, the persona's voice — is unchanged and the degradation is
+       * the only difference between a clean run and a degraded one. `null` frames are simply not
+       * sent: a lost frame is absent audio, not silence, and sending silence would be a different
+       * degradation with a different effect on the endpointer.
+       */
+      for (const f of degradeFrames(line.frames)) {
+        if (f !== null) await source.captureFrame(f);
+      }
       await source.waitForPlayout();
       log(`finished: ${label}`);
       // The line is over; both measurements about it are anchored to this instant.

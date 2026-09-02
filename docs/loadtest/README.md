@@ -180,6 +180,47 @@ Turn latency p50/p95 3 009 / 3 313 ms and `total_ms` 2 405 / 2 746 ms on this ru
 calmer than the previous hour's (`ttft_ms` p95 1 236 against 3 651), which is OpenAI's variance and
 not this change.
 
+## 2026-09-02 — Phase 4: the borrower stops sounding like a studio microphone
+
+D4's second half. The simulator's borrower has always been 16 kHz, clean, every frame delivered — so
+every WER and entity number the harness has ever reported was measured on the optimistic version.
+
+**Five personas, fixed per seed**, each carrying its own degradation profile rather than an
+adjective: an accent and a bad line are the same question asked twice, so one seed picks a whole
+borrower instead of two knobs a caller has to keep consistent. One persona (`clean`) is deliberately
+undegraded — without a control, a WER change could be the accent, the noise or the codec.
+
+The chain is applied at the last moment before frames are published, in physical order: **the room's
+noise reaches the microphone, the codec quantises what the microphone captured, the network loses
+whole frames of the encoded stream.** A lost frame is *not* sent rather than sent as silence — absent
+audio and silent audio affect the endpointer differently, and only one of them is what a network
+does.
+
+### Measured on three profiles, same scenario, same seed
+
+| persona | profile | WER, the three borrower lines | outcome |
+|---|---|---|---|
+| `clean` | — | 0.250 / 0.000 / 0.000 | null (see below) |
+| `mobile` | 25 dB SNR, 0.5 % loss, μ-law | **0.000 / 0.000 / 0.000** | **PROMISE_TO_PAY** |
+| `street` | 15 dB SNR, 1 % loss, μ-law | 0.750 / **1.000** / **1.000** | NO_ANSWER |
+
+The chain is emphatically not inert, and **the cliff sits between 25 dB and 15 dB**. At 25 dB with
+the codec and bursty loss the recogniser is perfect and the call completes; at 15 dB it collapses
+entirely.
+
+### The profiles are first-draft numbers and are NOT calibrated
+
+15 dB SNR does not destroy a real phone call, and a person outdoors is intelligible to Deepgram. The
+difference is that this generator produces **white noise across the whole band**, while traffic,
+rooms and wind are mostly low-frequency — so white noise at a stated SNR is much harsher than real
+background noise at the same stated SNR. `street`, `poor-signal` and `speakerphone` would fail every
+gate as written. **Only `mobile` is usable as a degraded profile today.** Shaping the noise, or
+calibrating the numbers against a real recording, is the next piece of Phase 4.
+
+Note also that the *clean* run scored 0.250 on one line and ended `null` while `mobile` scored 0.000
+throughout — that is the box's own flakiness, not degradation improving anything. Do not read the
+first row as a baseline.
+
 ## 2026-09-02 — D3 complete: the entity gate, and biasing the recogniser after verification
 
 ### The entity gate caught a wrong promise on its first run

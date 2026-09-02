@@ -5,17 +5,25 @@
     "given": "1",
     "resolved": 1
   },
-  "persona": null,
+  "persona": {
+    "id": "clean",
+    "voice": "aura-2-asteria-en",
+    "requested": "clean",
+    "degradation": null
+  },
   "interruption_mode": "vad",
-  "label": "d3-bias",
-  "conversation_id": "b40ee866-0dbc-4937-88de-7906ceb768d5",
+  "label": "d4-clean",
+  "conversation_id": "b68d9e83-ff00-4d8c-98d4-33d20d660ea6",
   "harness": "sim",
   "expected": {
-    "failures": [],
-    "verdict": "as expected",
-    "exit_code": 0,
+    "failures": [
+      "outcome null != expected PROMISE_TO_PAY",
+      "2 read-back(s), expected at most 1"
+    ],
+    "verdict": "2 FAILURE(S)",
+    "exit_code": 1,
     "expected_to_fail": null,
-    "outcome": "PROMISE_TO_PAY",
+    "outcome": null,
     "tools": [
       "confirm_right_party",
       "propose_promise_to_pay",
@@ -24,18 +32,18 @@
     "not_yet_asserted": []
   },
   "turn_taking": {
-    "response_rate": 0.3333,
+    "response_rate": 0.6667,
     "yield_rate": 0,
     "yield_latency_ms": null,
     "false_interrupt_rate": null,
-    "agent_interrupt_rate": 0.3333,
+    "agent_interrupt_rate": 0,
     "selectivity": null,
     "counts": {
       "lines": 3,
-      "interruptions": 2,
+      "interruptions": 1,
       "non_directed": 0,
       "non_directed_during_agent_speech": 0,
-      "unknown_truncation": 2
+      "unknown_truncation": 5
     }
   },
   "dispositions": [
@@ -62,13 +70,9 @@
     "excluded_by_rule": "harness IS NOT DISTINCT FROM null (Queries.latencyAggregateForSegment)"
   },
   "compliance": {
-    "checks": {
-      "compliance.mini_miranda_first": true,
-      "compliance.no_promise_without_readback": true,
-      "compliance.no_protected_before_rpc": true
-    },
+    "checks": {},
     "failed": [],
-    "count": 3
+    "count": 0
   },
   "entities": {
     "measured": false,
@@ -76,22 +80,22 @@
     "note": "stt.entity_er is D3 (Phase 3); not measured"
   },
   "agent_stretches": {
-    "live": 4,
-    "post_hoc": 4
+    "live": 6,
+    "post_hoc": 6
   },
   "stt_wer": [
     {
       "turn": "yes this is the borrower",
-      "wer": 0
+      "wer": 0.25
     },
     {
       "turn": "BARGE-IN: I can pay 550 on Friday",
-      "wer": 0.1111
+      "wer": 0
     },
     {
       "turn": "yes, that's correct",
       "wer": 0
     }
   ],
-  "duration_ms": 92259
+  "duration_ms": 115678
 }

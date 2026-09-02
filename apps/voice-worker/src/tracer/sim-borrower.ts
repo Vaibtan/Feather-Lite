@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { config as loadEnv } from "dotenv";
 import { initializeLogger } from "@livekit/agents";
-import { seedFrom, speechWindows, turnTakingMetrics, withPlayoutTruth } from "@feather-lite/domain";
+import { PERSONAS, personaForSeed, speechWindows, turnTakingMetrics, withPlayoutTruth } from "@feather-lite/domain";
 import { harnessJsonHeaders } from "@feather-lite/load-test/harness-http";
 import { loadScriptedLines, runScriptedCall } from "./scripted-call.js";
 import { parseSimArgs } from "./harness-args.js";
@@ -87,10 +87,27 @@ const borrowerName = await mintBorrower();
 const INTERRUPTION_MODE = process.env["WORKER_INTERRUPTION_MODE"] ?? "vad";
 
 log(`borrower=${borrowerName}`);
-log(`scenario=${scenario.id} seed=${seedGiven}(${String(seed)}) persona=${persona ?? "(default)"} label=${label}`);
+log(`scenario=${scenario.id} seed=${seedGiven}(${String(seed)}) label=${label}`);
 log(scenario.what);
 
-const lines = await loadScriptedLines(persona);
+/**
+ * The persona is the seed's, unless one was named (issue #1, D4 — Phase 4).
+ *
+ * Voice *and* line quality together, because an accent and a bad line are the same question asked
+ * twice: can the recogniser still hear the amount? One seed therefore picks a whole borrower rather
+ * than two knobs a caller has to remember to set consistently. `--persona` still overrides, for the
+ * case where the point is to hear one particular voice.
+ */
+const named = persona === undefined ? undefined : PERSONAS.find((p) => p.id === persona || p.voice === persona);
+if (persona !== undefined && named === undefined) {
+  console.error(`[tier3] no persona ${JSON.stringify(persona)}. Known: ${PERSONAS.map((p) => p.id).join(", ")}`);
+  process.exit(2);
+}
+const chosen = named ?? personaForSeed(seed);
+log(`persona=${chosen.id} voice=${chosen.voice} — ${chosen.what}`);
+log(chosen.degradation === null ? "line quality: clean (the control)" : `line quality: ${JSON.stringify(chosen.degradation)}`);
+
+const lines = await loadScriptedLines(chosen.voice);
 log(`borrower lines ready (${lines.cached ? "cached" : "synthesised"}, ${lines.describe})`);
 
 const call = await runScriptedCall({
@@ -105,6 +122,8 @@ const call = await runScriptedCall({
    * the default SLO segment selects — so neither of the other two columns can tell it apart.
    */
   harness: "sim",
+  degradation: chosen.degradation,
+  degradationSeed: seed,
   log,
   script: scenario.script(rngFor(seed)),
 });
@@ -154,7 +173,7 @@ const agent = withPlayoutTruth(speechWindows(call.rmsSamples), playouts);
 const metrics = turnTakingMetrics({ borrower: call.borrowerEvents, agent });
 
 console.log("");
-console.log(`  scenario              ${scenario.id}  seed=${seedGiven}  persona=${persona ?? "(default)"}`);
+console.log(`  scenario              ${scenario.id}  seed=${seedGiven}  persona=${chosen.id}`);
 const verdict = verdictFor(failures, scenario.expectedToFail);
 console.log(`  ledger shape          ${verdict.line}`);
 for (const f of failures) console.log(`      - ${f}`);
@@ -241,7 +260,7 @@ const report = {
   scenario: scenario.id,
   /** All four, because a tier-3 number without them is not reproducible (D4). */
   seed: { given: seedGiven, resolved: seed },
-  persona: persona ?? null,
+  persona: { id: chosen.id, voice: chosen.voice, requested: persona ?? null, degradation: chosen.degradation },
   interruption_mode: INTERRUPTION_MODE,
   label,
   conversation_id: call.conversationId,
