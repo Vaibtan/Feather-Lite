@@ -14,7 +14,13 @@
  * So the label is required and lands in the filename, and an unknown flag is a refusal. Both are
  * about the same thing: a measurement you cannot identify afterwards is not evidence, and a gate
  * you think you passed is worse than one you know you skipped.
+ *
+ * The scanner itself lives in `harness-args.ts` — tier 3 needed the same two rules, and the lesson
+ * is not fleet-specific. What stays here is the fleet's own flags and their bounds.
  */
+import { labelOrRefusal, normaliseLabel, refusalOf, scanFlags, type FlagSpec } from "./harness-args.js";
+
+export { normaliseLabel };
 
 /** A flag that takes a value, and what it means when a refusal has to name it. */
 const VALUE_FLAGS = {
@@ -45,55 +51,19 @@ export interface FleetArgs {
 
 export type ParsedFleetArgs = { readonly ok: true; readonly args: FleetArgs } | { readonly ok: false; readonly message: string };
 
-const usage = (): string => {
-  const lines = [
-    ...Object.entries(VALUE_FLAGS).map(([k, why]) => `  --${k} <value>   ${why}`),
-    ...Object.entries(BOOLEAN_FLAGS).map(([k, why]) => `  --${k}   ${why}`),
-  ];
-  return `usage: fake-borrower-fleet --label <name> [--calls N] [--max-wer R] [flags]\n${lines.join("\n")}`;
+const SPEC: FlagSpec = {
+  value: VALUE_FLAGS,
+  boolean: BOOLEAN_FLAGS,
+  usage: "usage: fake-borrower-fleet --label <name> [--calls N] [--max-wer R] [flags]",
 };
 
-/**
- * Lower-case, digits and dashes. Not a general slug: the label becomes a filename in a directory
- * that is read by humans and globbed by scripts, and a run called `N=10 (retry?)` is a filename
- * nobody can type.
- */
-export const normaliseLabel = (raw: string): string =>
-  raw
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-
 export const parseFleetArgs = (argv: ReadonlyArray<string>): ParsedFleetArgs => {
-  const refuse = (why: string): ParsedFleetArgs => ({ ok: false, message: `${why}\n${usage()}` });
+  const scanned = scanFlags(argv, SPEC);
+  if (!scanned.ok) return scanned;
+  const { values, booleans } = scanned;
 
-  const values = new Map<string, string>();
-  const booleans = new Set<string>();
-  for (let i = 0; i < argv.length; i++) {
-    const token = argv[i]!;
-    if (!token.startsWith("--")) continue;
-    const name = token.slice(2);
-    if (name in VALUE_FLAGS) {
-      const value = argv[i + 1];
-      if (value === undefined || value.startsWith("--")) return refuse(`--${name} needs a value.`);
-      values.set(name, value);
-      i += 1;
-      continue;
-    }
-    if (name in BOOLEAN_FLAGS) {
-      booleans.add(name);
-      continue;
-    }
-    // The point of H6's second half: a flag nobody implemented used to be accepted in silence, so a
-    // run invoked with a misspelled gate ran without it.
-    return refuse(`--${name} is not a flag this harness has.`);
-  }
-
-  const label = normaliseLabel(values.get("label") ?? "");
-  if (label.length === 0) {
-    return refuse("--label is required: without it a second run on the same day overwrites the first, which is how a tracked report was lost on 2026-09-02.");
-  }
+  const label = labelOrRefusal(SPEC, values.get("label"));
+  if (typeof label !== "string") return label;
 
   const number = (name: "calls" | "max-wer", fallback: number, min: number, max: number): number | null => {
     const raw = values.get(name);
@@ -103,9 +73,9 @@ export const parseFleetArgs = (argv: ReadonlyArray<string>): ParsedFleetArgs => 
     return n;
   };
   const calls = number("calls", 5, 1, 1000);
-  if (calls === null || !Number.isInteger(calls)) return refuse("--calls must be a whole number of calls, at least 1.");
+  if (calls === null || !Number.isInteger(calls)) return refusalOf(SPEC, "--calls must be a whole number of calls, at least 1.");
   const maxWer = number("max-wer", 0.2, 0, 1);
-  if (maxWer === null) return refuse("--max-wer must be a rate between 0 and 1.");
+  if (maxWer === null) return refusalOf(SPEC, "--max-wer must be a rate between 0 and 1.");
 
   return {
     ok: true,
