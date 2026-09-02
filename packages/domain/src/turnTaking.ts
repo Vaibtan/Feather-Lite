@@ -61,8 +61,15 @@ export interface AgentSpeech {
    * `started_at`, bounded by the next measurement's instant. There is no default: a caller that
    * does not know whether the agent was interrupted cannot be given a false-interrupt rate,
    * because every rule below turns on this flag.
+   *
+   * **`null` is "no playout was joined to this stretch"** (issue #4, H11), and it is a third answer
+   * rather than a soft `false`. Not every stretch has a turn behind it: the opening line, a
+   * `safeFallback`, the no-input prompt, any `say` the control plane emitted outside a turn. Booking
+   * those as untruncated says the agent *was not* interrupted — a claim the harness cannot make from
+   * silence — and on the hold-request scenario that is precisely the number under test. An unknown
+   * stretch is excluded from every rate and counted in `counts.unknown_truncation`.
    */
-  readonly truncated: boolean;
+  readonly truncated: boolean | null;
 }
 
 export interface TurnTakingEvents {
@@ -98,6 +105,8 @@ export interface TurnTakingMetrics {
     readonly interruptions: number;
     readonly non_directed: number;
     readonly non_directed_during_agent_speech: number;
+    /** Stretches with no playout behind them, excluded from every rate above (H11). */
+    readonly unknown_truncation: number;
   };
 }
 
@@ -135,7 +144,7 @@ export const turnTakingMetrics = (events: TurnTakingEvents): TurnTakingMetrics =
     // straight through a "mm-hm" is booked as having answered it and loses its selectivity for the
     // one thing it got right. When the line *was* cut off by this event, what follows does answer
     // it — the same playout truth, applied to the other direction.
-    if (during !== undefined && !(during.truncated && proximateCause(during) === e)) return undefined;
+    if (during !== undefined && !(during.truncated === true && proximateCause(during) === e)) return undefined;
     return agent.find((s) => s.startMs >= e.endMs && s.startMs < nextBorrowerStart(e));
   };
 
@@ -154,10 +163,21 @@ export const turnTakingMetrics = (events: TurnTakingEvents): TurnTakingMetrics =
    */
   const yields = interruptions.flatMap(({ line, speech }) => {
     const latency = speech.endMs - line.startMs;
-    return speech.truncated && latency <= YIELD_WINDOW_MS ? [latency] : [];
+    return speech.truncated === true && latency <= YIELD_WINDOW_MS ? [latency] : [];
   });
 
-  const duringAgentSpeech = nonDirected.filter((e) => interrupted(e) !== undefined);
+  /**
+   * Non-directed events during agent speech the harness can actually judge (H11).
+   *
+   * An event inside a stretch with no playout behind it is out of the denominator as well as the
+   * numerator: "did the agent wrongly stop for this?" has no answer when nothing recorded whether
+   * the agent stopped. Leaving it in the denominator would report a false-interrupt rate of 0 for a
+   * run that measured nothing, which is the flattering direction.
+   */
+  const duringAgentSpeech = nonDirected.filter((e) => {
+    const s2 = interrupted(e);
+    return s2 !== undefined && s2.truncated !== null;
+  });
 
   /**
    * A false interrupt: a stretch the playout says was cut off, whose proximate cause was not a bid
@@ -167,7 +187,7 @@ export const turnTakingMetrics = (events: TurnTakingEvents): TurnTakingMetrics =
   const falseInterrupts = [
     ...new Set(
       agent.flatMap((speech) => {
-        if (!speech.truncated) return [];
+        if (speech.truncated !== true) return [];
         const cause = proximateCause(speech);
         return cause !== undefined && cause.kind !== "line" ? [cause] : [];
       }),
@@ -196,6 +216,9 @@ export const turnTakingMetrics = (events: TurnTakingEvents): TurnTakingMetrics =
       interruptions: interruptions.length,
       non_directed: nonDirected.length,
       non_directed_during_agent_speech: duringAgentSpeech.length,
+      // Reported rather than hidden: a run whose stretches mostly lack playout truth has thin rates,
+      // and the reader should be able to see that from the counts (H11).
+      unknown_truncation: agent.filter((s2) => s2.truncated === null).length,
     },
   };
 };

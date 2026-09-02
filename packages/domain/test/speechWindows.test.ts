@@ -106,20 +106,37 @@ describe("withPlayoutTruth", () => {
     ];
     const playouts = [{ atMs: 6_500, interrupted: true }];
     expect(withPlayoutTruth(windows, playouts)).toEqual([
-      { startMs: 0, endMs: 4_000, truncated: false },
+      // Unknown rather than untruncated (H11): nothing reported on this stretch, and the next
+      // stretch's report is not evidence about it.
+      { startMs: 0, endMs: 4_000, truncated: null },
       { startMs: 5_000, endMs: 6_400, truncated: true },
     ]);
   });
 
-  it("treats a stretch with no playout at all as played in full", () => {
-    // Which is what it is: `AGENT_TURN_PLAYOUT` is written when a turn's audio finishes, and the
-    // one case with no signal is the opening line, which nothing interrupts. Assuming truncation
-    // instead would invent false interrupts out of missing data.
-    expect(withPlayoutTruth([{ startMs: 0, endMs: 3_000 }], [])).toEqual([{ startMs: 0, endMs: 3_000, truncated: false }]);
+  it("reports a stretch with no playout as unknown, not as played in full (H11)", () => {
+    // It used to answer `false`, on the argument that the one line reliably without a turn behind it
+    // is the opening, which nothing interrupts. True of the opening and false of the others:
+    // `safeFallback`, the no-input prompt and any `say` outside a turn also produce a stretch with
+    // no playout, and `false` asserts the agent was not interrupted — a claim about audio nobody
+    // reported. On the hold-request scenario that assertion is the metric under test.
+    expect(withPlayoutTruth([{ startMs: 0, endMs: 3_000 }], [])).toEqual([{ startMs: 0, endMs: 3_000, truncated: null }]);
   });
 
   it("ignores a playout reported before the agent ever spoke", () => {
-    expect(withPlayoutTruth([{ startMs: 5_000, endMs: 6_000 }], [{ atMs: 100, interrupted: true }])).toEqual([{ startMs: 5_000, endMs: 6_000, truncated: false }]);
+    expect(withPlayoutTruth([{ startMs: 5_000, endMs: 6_000 }], [{ atMs: 100, interrupted: true }])).toEqual([{ startMs: 5_000, endMs: 6_000, truncated: null }]);
+  });
+
+  it("allows a report a little ahead of the stretch, which is clock skew (H11)", () => {
+    // The harness stamps the stretch from audio it is receiving; the control plane stamps the report
+    // from its own clock. A few milliseconds either way is skew, not evidence — and without the
+    // grace such a report was booked to the *previous* stretch, giving two stretches the wrong truth.
+    expect(withPlayoutTruth([{ startMs: 5_000, endMs: 6_000 }], [{ atMs: 4_900, interrupted: true }])).toEqual([
+      { startMs: 5_000, endMs: 6_000, truncated: true },
+    ]);
+    // Beyond the grace it is still somebody else's report.
+    expect(withPlayoutTruth([{ startMs: 5_000, endMs: 6_000 }], [{ atMs: 4_000, interrupted: true }])).toEqual([
+      { startMs: 5_000, endMs: 6_000, truncated: null },
+    ]);
   });
 
   it("is not confused by the order either list arrives in", () => {

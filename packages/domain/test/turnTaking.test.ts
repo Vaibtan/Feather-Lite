@@ -14,7 +14,7 @@
  * Milliseconds from the start of the call throughout.
  */
 import { describe, expect, it } from "vitest";
-import { bargeInT90, turnTakingMetrics, type AgentSpeech, type BorrowerEvent } from "../src/turnTaking.js";
+import { bargeInT90, turnTakingMetrics, type AgentSpeech, type BorrowerEvent, type TurnTakingEvents } from "../src/turnTaking.js";
 
 const line = (label: string, startMs: number, endMs: number): BorrowerEvent => ({ kind: "line", label, startMs, endMs });
 const backchannel = (label: string, startMs: number, endMs: number): BorrowerEvent => ({ kind: "backchannel", label, startMs, endMs });
@@ -53,7 +53,7 @@ describe("turnTakingMetrics", () => {
     expect(m.agent_interrupt_rate).toBe(0);
     // Both non-directed events correctly ignored.
     expect(m.selectivity).toBe(1);
-    expect(m.counts).toEqual({ lines: 2, interruptions: 1, non_directed: 2, non_directed_during_agent_speech: 2 });
+    expect(m.counts).toEqual({ lines: 2, interruptions: 1, non_directed: 2, non_directed_during_agent_speech: 2, unknown_truncation: 0 });
   });
 
   it("counts an agent that stops for a backchannel as a false interrupt, and as lost selectivity", () => {
@@ -244,3 +244,45 @@ describe("bargeInT90", () => {
     expect(bargeInT90([])).toBeNull();
   });
 });
+
+describe("a stretch whose playout is unknown (issue #4, H11)", () => {
+  it("is excluded from the rates rather than counted as untruncated", () => {
+    // `truncated: null` means "no playout report was joined to this stretch" — the opening line, a
+    // `safeFallback`, the no-input prompt, any `say` with no turn behind it. Booking those as
+    // `false` says the agent *was not* interrupted, which is a claim the harness cannot make, and on
+    // the hold-request scenario it is the number under test.
+    const events: TurnTakingEvents = {
+      borrower: [{ kind: "backchannel", label: "mm-hm", startMs: 1_200, endMs: 1_400 }],
+      agent: [{ startMs: 1_000, endMs: 3_000, truncated: null }],
+    };
+    const m = turnTakingMetrics(events);
+    // The backchannel landed inside a stretch nobody can say was cut off, so it produces no
+    // false-interrupt verdict either way.
+    expect(m.false_interrupt_rate).toBeNull();
+    expect(m.counts.unknown_truncation).toBe(1);
+  });
+
+  it("counts the unknown stretches so a thin denominator is visible", () => {
+    const events: TurnTakingEvents = {
+      borrower: [{ kind: "line", label: "opening reply", startMs: 0, endMs: 500 }],
+      agent: [
+        { startMs: 1_000, endMs: 2_000, truncated: null },
+        { startMs: 3_000, endMs: 4_000, truncated: false },
+        { startMs: 5_000, endMs: 6_000, truncated: null },
+      ],
+    };
+    expect(turnTakingMetrics(events).counts.unknown_truncation).toBe(2);
+  });
+
+  it("still reads a known stretch normally", () => {
+    // The regression guard: `null` must not leak into the cases that do have playout truth.
+    const events: TurnTakingEvents = {
+      borrower: [{ kind: "line", label: "barge-in", startMs: 1_200, endMs: 1_600 }],
+      agent: [{ startMs: 1_000, endMs: 1_500, truncated: true }],
+    };
+    const m = turnTakingMetrics(events);
+    expect(m.counts.unknown_truncation).toBe(0);
+    expect(m.yield_rate).not.toBeNull();
+  });
+});
+

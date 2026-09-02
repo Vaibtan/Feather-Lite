@@ -114,15 +114,39 @@ export interface PlayoutReport {
  * nothing interrupts. Assuming truncation instead would manufacture false interrupts out of
  * silence, which is precisely the failure Phase C0 removed from the other end of this contract.
  */
+/**
+ * How far a playout report may appear to precede the stretch it belongs to (issue #4, H11).
+ *
+ * The same quantity, and the same reasoning, as `harness-scores.ts`'s join: the harness stamps the
+ * stretch from audio it is receiving and the control plane stamps the report from its own clock, and
+ * a few milliseconds either way is skew rather than evidence. Without it a report that landed a
+ * millisecond before its stretch's first energetic frame was booked to the *previous* stretch, and
+ * both stretches then carried the wrong truth.
+ */
+export const CLOCK_GRACE_MS = 250;
+
 export const withPlayoutTruth = (
   windows: ReadonlyArray<SpeechWindow>,
   playouts: ReadonlyArray<PlayoutReport>,
-): ReadonlyArray<SpeechWindow & { readonly truncated: boolean }> => {
+): ReadonlyArray<SpeechWindow & { readonly truncated: boolean | null }> => {
   const ordered = [...windows].sort((a, b) => a.startMs - b.startMs);
   const reports = [...playouts].sort((a, b) => a.atMs - b.atMs);
   return ordered.map((w, i) => {
     const until = ordered[i + 1]?.startMs ?? Number.POSITIVE_INFINITY;
-    const hit = reports.find((p) => p.atMs >= w.startMs && p.atMs < until);
-    return { ...w, truncated: hit?.interrupted ?? false };
+    const hit = reports.find((p) => p.atMs >= w.startMs - CLOCK_GRACE_MS && p.atMs < until);
+    /**
+     * **`null`, not `false`, when nothing was joined** (issue #4, H11).
+     *
+     * This used to answer `false`, on the argument that the one line reliably without a turn behind
+     * it is the opening, which nothing interrupts. That is true of the opening and false of the
+     * others: `safeFallback`, the no-input prompt and any `say` the control plane emits outside a
+     * turn all produce a stretch with no playout — and answering `false` for those asserts the agent
+     * was *not* interrupted, which is a claim about audio nobody reported. On the hold-request
+     * scenario that assertion is the metric under test.
+     *
+     * `turnTakingMetrics` excludes an unknown stretch from every rate and counts it, so a run whose
+     * stretches mostly lack playout truth reads as thin rather than as clean.
+     */
+    return { ...w, truncated: hit === undefined ? null : hit.interrupted };
   });
 };
