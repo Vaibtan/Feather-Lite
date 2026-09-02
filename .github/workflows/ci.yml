@@ -121,9 +121,22 @@ jobs:
           curl -sS http://127.0.0.1:8080/readyz || true
           exit 1
 
+      # The harness is an image now (issue #4, Phase D), and an image that measures is one CI should
+      # build and boot like the two it measures — otherwise the artefact every number comes from is
+      # the only one nobody checks compiles.
+      #
+      # Tier 1 rather than tier 2: it drives the control plane over HTTP with a scripted decider and
+      # needs no provider credentials, so it runs on a fork's PR. `--concurrency 5` is enough to
+      # exercise the path; the numbers are not a measurement (a CI runner is not a quiet box) and
+      # nothing here gates on them.
+      - name: Tier 1 through the harness container
+        run: |
+          export LIVEKIT_NODE_IP=$(hostname -I | awk '{print $1}')
+          docker compose --profile livekit --profile app --profile harness run --rm harness             apps/load-test/src/tier1.ts --concurrency 5
+
       - name: Logs, if any of that failed
         if: failure()
-        run: docker compose --profile livekit --profile app logs --tail 200
+        run: docker compose --profile livekit --profile app --profile harness logs --tail 200
       - name: Tear down
         if: always()
         run: docker compose --profile livekit --profile app down -v

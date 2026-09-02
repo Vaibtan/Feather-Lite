@@ -74,6 +74,31 @@ const containerNames = containers.split("\n").map((n) => n.trim()).filter(Boolea
 console.log(`[quiet] containers up: ${containerNames.join(", ") || "(none)"}`);
 
 /**
+ * The stray check that still applies now the worker lives in a container (issue #4, Phase D).
+ *
+ * The host-process check above is a native-comparison-run check and cannot see into the VM. What can
+ * go wrong on the measured stack is the container equivalent: **more than one worker**, from a
+ * `docker compose up` in a second checkout or a `run` that was never cleaned up. Two workers share
+ * the SFU's dispatches, so a fleet run measures a concurrency it did not set and a per-call memory
+ * figure divided by the wrong denominator.
+ *
+ * Counted by name prefix, because `docker compose run` names its containers
+ * `feather-lite-harness-run-<hash>` — and a harness left running is its own kind of noise.
+ */
+const workerContainers = containerNames.filter((n) => n.startsWith("feather-lite-worker"));
+let strayWorkerContainer = false;
+if (workerContainers.length > 1) {
+  strayWorkerContainer = !allowWorker;
+  console.log(`[quiet] ${workerContainers.length} worker containers are up: ${workerContainers.join(", ")}`);
+  console.log("[quiet]   They share the SFU's dispatches, so a run measures a concurrency it did not set.");
+}
+const strayHarness = containerNames.filter((n) => n.startsWith("feather-lite-harness"));
+if (strayHarness.length > 0) {
+  console.log(`[quiet] a harness container is still up: ${strayHarness.join(", ")}`);
+  console.log("[quiet]   A previous run did not clean up; `docker rm -f` it before measuring.");
+}
+
+/**
  * How much memory the **worker tree** can still get, which since 2026-09-01 is usually not a
  * question about Windows.
  *
@@ -141,8 +166,8 @@ if (lowMemory) {
  * produces numbers that belong to something other than what is being measured. Which one failed
  * matters more than the code, because the two have different fixes.
  */
-if (lowMemory || strayWorker) {
-  const why = [strayWorker ? "a stray voice worker" : null, lowMemory ? `not enough free memory ${vmAvailableMb === null ? "on the host" : "in the container VM"}` : null].filter(Boolean).join(" and ");
+if (lowMemory || strayWorker || strayWorkerContainer) {
+  const why = [strayWorker ? "a stray voice worker" : null, strayWorkerContainer ? "more than one worker container" : null, lowMemory ? `not enough free memory ${vmAvailableMb === null ? "on the host" : "in the container VM"}` : null].filter(Boolean).join(" and ");
   console.log(`[quiet] NOT quiet enough to measure on: ${why}.`);
   process.exitCode = 1;
 } else {
