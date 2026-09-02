@@ -27,6 +27,7 @@ import {
   WorkflowService,
   withFrozenClock,
 } from "../../src/index.js";
+import { READBACK_UNCONFIRMED_DETAIL } from "@feather-lite/domain";
 import { makeInfraLayer, makeRuntime, truncateAll } from "./harness.js";
 
 const NOW = DateTime.unsafeMake("2026-08-16T14:00:00Z");
@@ -136,6 +137,39 @@ describe("reliability counts (from the ledger)", () => {
     );
     // Tied to the ledger rather than to a constant: the count's only job is to agree with the
     // events it is derived from, and an assertion that cannot fail would not check that.
+    expect(out.rejections).toBe(1);
+    expect((out.after["readbacks_repeated_unheard"] ?? 0) - (out.before["readbacks_repeated_unheard"] ?? 0)).toBe(out.rejections);
+  });
+
+  it("counts a read-back repeated because nothing ever reported it (C1)", async () => {
+    // The other half of the same counter. Here the read-back's playout report never arrives at all
+    // — the worker was killed after speaking, or the signal POST failed — and the guard refuses on
+    // the absence rather than on a report that says "interrupted". Different detail, same counter:
+    // both are a read-back repeated because nobody can say the borrower heard it.
+    const out = await rt.runPromise(
+      withFrozenClock(NOW)(
+        Effect.gen(function* () {
+          const before = yield* reliability;
+          const { borrowerId, cpId } = yield* seedBorrower("Unreported Person", "+15550004009");
+          const wf = yield* WorkflowService;
+          const orch = yield* Orchestrator;
+          const q = yield* Queries;
+          const started = yield* wf.startCall({ borrowerId, contactPointId: cpId, channel: "voice", now: NOW });
+          yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t1", userText: "yes this is speaking" }, () => Effect.void);
+          yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t2", userText: "I can pay 550 on Friday" }, () => Effect.void);
+          // No playout signal for t2 at all — the difference from the test above.
+          yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t3", userText: "yes" }, () => Effect.void);
+          const detail = yield* q.conversationDetail(started.conversationId);
+          return {
+            before,
+            after: yield* reliability,
+            rejections: detail.events.filter(
+              (e) => e.type === "TOOL_REJECTED" && e.payload.name === "record_promise_to_pay" && e.payload.detail === READBACK_UNCONFIRMED_DETAIL,
+            ).length,
+          };
+        }),
+      ),
+    );
     expect(out.rejections).toBe(1);
     expect((out.after["readbacks_repeated_unheard"] ?? 0) - (out.before["readbacks_repeated_unheard"] ?? 0)).toBe(out.rejections);
   });

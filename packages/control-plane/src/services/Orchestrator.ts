@@ -48,6 +48,7 @@ import {
   promiseReadback,
   promiseRecordedConfirmation,
   READBACK_INTERRUPTED_DETAIL,
+  READBACK_UNCONFIRMED_DETAIL,
   replay,
   safeFallback,
   thirdPartyClose,
@@ -115,6 +116,45 @@ interface SaySegment {
 }
 
 /* ------------------------------------------------------------------ */
+
+/**
+ * What the ledger says about whether the borrower heard the read-back (PRD §5.2.8, ADR 0008).
+ *
+ * The evidence is the `AGENT_TURN_PLAYOUT` the voice runtime reports for the read-back turn. A
+ * report that says `interrupted` refuses, as it always has. The empty case is the one that used to
+ * be wrong: the guard read "no report says interrupted" as "heard in full", so a read-back whose
+ * report never arrived — a worker killed after speaking, a signal POST that failed, a job process
+ * that died — recorded the promise on no evidence at all. ADR 0008's TTS cross-check covers a
+ * report that arrives *wrong*; nothing covered one that never arrives.
+ *
+ * So on `voice` the guard requires a report that positively says the line was heard. On
+ * `simulated` the absence keeps its vacuous pass: the scenario runner drives the orchestrator
+ * directly and there is no playout reporter in that path by design, so demanding one would fail
+ * the twenty scenarios over a fact about the harness rather than about the call.
+ *
+ * **The residual, stated rather than discovered later.** The worker posts that report as a
+ * fire-and-forget signal (`agent.ts`: `void agent.reportPlayout(item)`), so in principle it can
+ * land *after* the borrower's "yes" has already been processed, and the guard would repeat a
+ * read-back that was in fact heard. Measured over every voice call in the local ledger, the report
+ * precedes the `record_promise_to_pay` on 122 of 122 — the ordering ADR 0008 observed on eight
+ * instrumented runs, counted rather than sampled. The cost when it does lose the race is one
+ * repeated read-back, not a wrong record, which is the direction this guard is supposed to fail
+ * in. Closing it properly is issue #1's D1 `held`: a turn arriving against an unreported
+ * non-interruptible segment waits for the segment's playout instead of judging without it.
+ */
+type ReadBackVerdict = "heard" | "interrupted" | "unconfirmed";
+
+const readBackVerdict = (events: ReadonlyArray<EventRecord>, readBackTurnId: string | null, channel: string): ReadBackVerdict => {
+  // A proposal carrying no read-back turn id has no evidence by construction, not by accident.
+  const reported = (pred: (p: { readonly interrupted: boolean; readonly heard_text: string }) => boolean) =>
+    readBackTurnId !== null && events.some((e) => e.type === "AGENT_TURN_PLAYOUT" && e.payload.turn_id === readBackTurnId && pred(e.payload));
+  if (reported((p) => p.interrupted)) return "interrupted";
+  // Heard-in-full needs text: an empty `heard_text` is the silent-playout shape, not evidence.
+  if (reported((p) => p.heard_text.trim().length > 0)) return "heard";
+  return channel === "voice" ? "unconfirmed" : "heard";
+};
+
+const unheardDetail = (v: ReadBackVerdict): string => (v === "interrupted" ? READBACK_INTERRUPTED_DETAIL : READBACK_UNCONFIRMED_DETAIL);
 
 const attemptStatusFor = (o: Outcome): CallAttemptStatus =>
   o === "NO_ANSWER" ? "NO_ANSWER" : o === "VOICEMAIL_LEFT" ? "VOICEMAIL" : o === "FAILED" ? "FAILED" : "COMPLETED";
@@ -329,11 +369,9 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           }
           case "record_promise_to_pay": {
             const proposal = row.pendingProposal;
-            const heardFully = proposal
-              ? !params.events.some((e) => e.type === "AGENT_TURN_PLAYOUT" && e.payload.turn_id === proposal.read_back_turn_id && e.payload.interrupted)
-              : false;
-            if (!proposal || !heardFully) {
-              rejected = { reason: "INVALID_ARGS", detail: proposal ? READBACK_INTERRUPTED_DETAIL : NO_PENDING_PROPOSAL_DETAIL };
+            const verdict = proposal ? readBackVerdict(params.events, proposal.read_back_turn_id, row.channel) : "unconfirmed";
+            if (!proposal || verdict !== "heard") {
+              rejected = { reason: "INVALID_ARGS", detail: proposal ? unheardDetail(verdict) : NO_PENDING_PROPOSAL_DETAIL };
               yield* append(row.id, { type: "TOOL_REJECTED", payload: { name: call.name, tool_call_id: toolCallId, state, reason: rejected.reason, detail: rejected.detail } }, at);
               if (proposal) {
                 // Repeat the read-back and re-arm the guard for this turn.

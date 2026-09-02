@@ -23,7 +23,7 @@ import {
   WorkflowService,
   withFrozenClock,
 } from "../../src/index.js";
-import { makeInfraLayer, makeRuntime, truncateAll } from "./harness.js";
+import { makeInfraLayer, makeRuntime, playoutOfAgentTurn, truncateAll } from "./harness.js";
 
 const NOW = DateTime.unsafeMake("2026-08-16T14:00:00Z");
 
@@ -65,7 +65,10 @@ const promiseCall = (name: string) =>
     const orch = yield* Orchestrator;
     yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t1", userText: "yes this is speaking" }, () => Effect.void);
     yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t2", userText: "I can pay 550 on Friday" }, () => Effect.void);
-    yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t3", userText: "yes" }, () => Effect.void);
+    // The worker reports the read-back it played; without it the fully-heard guard (C1) refuses
+    // to record the promise on a voice call, and this fixture is a call that reaches one.
+    const playout = yield* playoutOfAgentTurn(started.conversationId, "t2");
+    yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t3", userText: "yes", playout }, () => Effect.void);
     return started.conversationId;
   });
 

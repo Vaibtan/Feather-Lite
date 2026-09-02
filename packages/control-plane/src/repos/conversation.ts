@@ -19,7 +19,7 @@ import type {
   WorkflowExecutionStatus,
   WorkflowType,
 } from "@feather-lite/domain";
-import { decodeEventRecord, ORPHANED_REASON, READBACK_INTERRUPTED_DETAIL } from "@feather-lite/domain";
+import { decodeEventRecord, ORPHANED_REASON, READBACK_UNHEARD_DETAILS } from "@feather-lite/domain";
 import {
   CallAttemptRow,
   ConversationContextRow,
@@ -295,7 +295,7 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
               )
           )::text AS tts_silent_playouts,
           count(*) FILTER (WHERE type = 'TOOL_REJECTED' AND payload->>'name' = 'record_promise_to_pay'
-                             AND payload->>'reason' = 'INVALID_ARGS' AND payload->>'detail' = ${READBACK_INTERRUPTED_DETAIL})::text AS readbacks_repeated_unheard,
+                             AND payload->>'reason' = 'INVALID_ARGS' AND payload->>'detail' IN ${sql.in(READBACK_UNHEARD_DETAILS)})::text AS readbacks_repeated_unheard,
           count(*) FILTER (WHERE type = 'CALL_CONTROL' AND payload->>'action' = 'HANGUP' AND payload->>'reason' = ${ORPHANED_REASON})::text AS calls_orphaned
         FROM conversation_events
         WHERE conversation_id IN ${sql.in(conversationIds)}`.pipe(
@@ -340,7 +340,7 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
               )
           )::text AS tts_silent_playouts,
           count(*) FILTER (WHERE type = 'TOOL_REJECTED' AND payload->>'name' = 'record_promise_to_pay'
-                             AND payload->>'reason' = 'INVALID_ARGS' AND payload->>'detail' = ${READBACK_INTERRUPTED_DETAIL})::text AS readbacks_repeated_unheard,
+                             AND payload->>'reason' = 'INVALID_ARGS' AND payload->>'detail' IN ${sql.in(READBACK_UNHEARD_DETAILS)})::text AS readbacks_repeated_unheard,
           count(*) FILTER (WHERE type = 'CALL_CONTROL' AND payload->>'action' = 'HANGUP' AND payload->>'reason' = ${ORPHANED_REASON})::text AS calls_orphaned
         FROM conversation_events`,
     });

@@ -39,14 +39,24 @@ const spokenAmount = (amount: MoneyAmount | string): string => {
 };
 
 /**
- * Why a `record_promise_to_pay` was refused. Both are `TOOL_REJECTED` / `INVALID_ARGS`, and they
- * mean opposite things: the first is the fully-heard guard doing its job on a real proposal, the
- * second is the model inventing a record with nothing to record. They live here, next to the
- * read-back they are about, because the reliability counter keys off the difference — matching a
- * prose string written somewhere else is exactly how a counter starts lying.
+ * Why a `record_promise_to_pay` was refused. All three are `TOOL_REJECTED` / `INVALID_ARGS`, and
+ * they mean different things: the first two are the fully-heard guard doing its job on a real
+ * proposal, the third is the model inventing a record with nothing to record. They live here, next
+ * to the read-back they are about, because the reliability counter keys off the difference —
+ * matching a prose string written somewhere else is exactly how a counter starts lying.
+ *
+ * The guard distinguishes a read-back the borrower demonstrably did not hear all of from one
+ * nobody can say anything about, because they are diagnosed differently: the first is a barge-in
+ * (normal, and the repeat is the product working), the second is a worker that died after
+ * speaking, a signal POST that failed or a job process that went away (a fault, and the repeat is
+ * damage control). Both count into `readbacks_repeated_unheard`.
  */
 export const READBACK_INTERRUPTED_DETAIL = "read-back was interrupted; repeating it";
+export const READBACK_UNCONFIRMED_DETAIL = "no playout confirmed the read-back was heard; repeating it";
 export const NO_PENDING_PROPOSAL_DETAIL = "no pending proposal to record";
+
+/** The two details the fully-heard guard rejects with — the reliability counter's filter. */
+export const READBACK_UNHEARD_DETAILS = [READBACK_INTERRUPTED_DETAIL, READBACK_UNCONFIRMED_DETAIL] as const;
 
 /** Read-back for a proposed promise to pay (non-interruptible). */
 export const promiseReadback = (p: { readonly amount: MoneyAmount | string; readonly date: IsoDate | string }): string =>

@@ -5,7 +5,7 @@
 import { Effect, Layer, ManagedRuntime, Redacted } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import pg from "pg";
-import { AppConfigTest, DatabaseLive, Metrics, NoLlmClientLive, NoopTracingLive } from "../../src/index.js";
+import { AppConfigTest, DatabaseLive, Metrics, NoLlmClientLive, NoopTracingLive, Queries } from "../../src/index.js";
 import type { AppConfigShape } from "../../src/index.js";
 
 /**
@@ -61,3 +61,18 @@ export const truncateAll = Effect.gen(function* () {
 });
 
 export const makeRuntime = <R, E>(layer: Layer.Layer<R, E, never>) => ManagedRuntime.make(layer);
+
+/**
+ * What the voice worker reports after speaking an agent line: how much of it the borrower heard.
+ *
+ * A `voice` fixture that drives a promise to pay has to report this, because the fully-heard guard
+ * (C1) refuses to record a promise whose read-back nothing says was heard — the absence of a report
+ * is the absence of evidence, not a pass. The text is read back out of the ledger rather than
+ * written into the fixture so the report says what the agent actually said.
+ */
+export const playoutOfAgentTurn = (conversationId: string, turnId: string) =>
+  Effect.gen(function* () {
+    const detail = yield* (yield* Queries).conversationDetail(conversationId);
+    const agentTurn = detail.events.find((e) => e.type === "AGENT_TURN" && e.payload.turn_id === turnId);
+    return { turnId, heardText: agentTurn?.type === "AGENT_TURN" ? agentTurn.payload.text : "", interrupted: false } as const;
+  });
