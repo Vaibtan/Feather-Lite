@@ -201,7 +201,22 @@ export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/Turn
                   const startedAlready = turn.frames.some((f) => f.type === "turn_start");
                   const err = startError(cause);
                   if (!startedAlready && err) {
-                    // Belongs to the caller: 404 / 409 with a normal body.
+                    /**
+                     * Belongs to the caller: 404 / 409 with a normal body.
+                     *
+                     * But it may not be the only caller (C6). A second client can attach by turn id
+                     * while T1 is still running — a reconnect, or the console watching the same
+                     * call — and `subscribe` has already handed it a stream fed from this queue.
+                     * Deleting the entry and failing the deferred answers the first caller and says
+                     * nothing to the second, whose SSE stream then never ends: no `turn_end`, no
+                     * error, no close, just an open connection on a turn that never started.
+                     *
+                     * So they are told first, and told *what* happened rather than merely cut off,
+                     * and only then is the entry dropped so a retry can claim the id afresh.
+                     */
+                    yield* broadcast(turn, { type: "error", turn_id: params.turnId, code: err._tag, message: err.message });
+                    yield* broadcast(turn, END);
+                    turn.subscribers.clear();
                     live.delete(key);
                     yield* Deferred.fail(started, err);
                     return;
