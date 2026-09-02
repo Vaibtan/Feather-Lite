@@ -42,6 +42,9 @@ const MAX_RETRIES = 3;
 const JUDGE_MAX_RETRIES = 5;
 const retriesFor = (jobType: OutboxJobType): number => (jobType === "JUDGE" ? JUDGE_MAX_RETRIES : MAX_RETRIES);
 
+/** Why a job was failed without being run: every attempt so far ended with a dead process (C3). */
+export const RECLAIM_BUDGET_EXHAUSTED = "reclaimed past the retry budget; every attempt lost its process";
+
 /**
  * What the judge came back with. `verdict` and `invalid` are exclusive: a verdict, or the reason
  * there isn't one after the retry D3 allows.
@@ -327,27 +330,44 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
         return yield* Effect.forEach(
           jobs,
           (job) =>
-            processJob(job, now).pipe(
-              Effect.catchAll((err) =>
-                Effect.gen(function* () {
-                  const retry = Number(job.payload["retry_count"] ?? 0) + 1;
-                  if (retry < retriesFor(job.jobType)) {
-                    yield* sched.finishJob({
-                      id: job.id,
-                      status: "PENDING",
-                      result: {},
-                      error: String(err),
-                      processedAt: null,
-                      availableAt: new Date(now.getTime() + Math.min(60, retry * 5) * 60_000),
-                      payloadPatch: { retry_count: retry },
-                    });
-                    return { jobId: job.id, jobType: job.jobType, status: "PENDING" as const };
-                  }
-                  yield* sched.finishJob({ id: job.id, status: "FAILED", result: {}, error: String(err), processedAt: now, payloadPatch: { retry_count: retry } });
-                  return { jobId: job.id, jobType: job.jobType, status: "FAILED" as const };
-                }),
-              ),
-            ),
+            /**
+             * A job that has burned its whole budget on *reclaims* is a job that has taken a
+             * process down every time it was tried, and it is stopped here rather than tried again
+             * (C3).
+             *
+             * The lease is what makes this reachable at all. Before it a stranded claim was inert;
+             * after it, a job whose work reliably kills its process would come back every lease
+             * period forever — a slow crash loop introduced by the fix for the opposite problem.
+             * The failure path below cannot catch that case, because a process that dies never
+             * reaches a `catchAll`. So the count the claim keeps is read here, once, before any
+             * work is done: at budget the job is `FAILED` with the reason, which is a state an
+             * operator can see, rather than a loop nobody is told about.
+             */
+            Number(job.payload["retry_count"] ?? 0) >= retriesFor(job.jobType)
+              ? sched
+                  .finishJob({ id: job.id, status: "FAILED", result: {}, error: RECLAIM_BUDGET_EXHAUSTED, processedAt: now })
+                  .pipe(Effect.as({ jobId: job.id, jobType: job.jobType, status: "FAILED" as const }))
+              : processJob(job, now).pipe(
+                  Effect.catchAll((err) =>
+                    Effect.gen(function* () {
+                      const retry = Number(job.payload["retry_count"] ?? 0) + 1;
+                      if (retry < retriesFor(job.jobType)) {
+                        yield* sched.finishJob({
+                          id: job.id,
+                          status: "PENDING",
+                          result: {},
+                          error: String(err),
+                          processedAt: null,
+                          availableAt: new Date(now.getTime() + Math.min(60, retry * 5) * 60_000),
+                          payloadPatch: { retry_count: retry },
+                        });
+                        return { jobId: job.id, jobType: job.jobType, status: "PENDING" as const };
+                      }
+                      yield* sched.finishJob({ id: job.id, status: "FAILED", result: {}, error: String(err), processedAt: now, payloadPatch: { retry_count: retry } });
+                      return { jobId: job.id, jobType: job.jobType, status: "FAILED" as const };
+                    }),
+                  ),
+                ),
           { concurrency: OUTBOX_CONCURRENCY },
         );
       });

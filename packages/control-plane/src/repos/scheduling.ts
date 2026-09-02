@@ -11,6 +11,40 @@ import { HeartbeatRow, OutboxJobRow, ScheduledActionRow } from "../db/rows.js";
 const SA_COLS = "id, workflow_execution_id, action_type, due_at, status, payload";
 const OB_COLS = "id, conversation_id, job_type, status, payload, result, error, available_at, claimed_at, processed_at";
 
+/**
+ * How long a claim is good for before another process may take the row (C3).
+ *
+ * A claim used to be permanent: `CLAIMED` was written by both claim statements and read by nothing,
+ * so a process killed between claiming and finishing stranded its rows for good — no SUMMARY, so
+ * the borrower's next call loses its `wrap_up`; no EVALUATION and no judge, so the call never
+ * reaches the quality page; a callback that simply never happens. Nothing raised, because a stuck
+ * row and a row in flight are the same row.
+ *
+ * Five minutes is chosen from the two clocks either side of it. The floor is the longest a live
+ * claim legitimately lasts: a JUDGE job waits on a reasoning model, which is tens of seconds, and
+ * `Effect.forEach` runs a batch four at a time — so a minute is plausible and five is not. The
+ * ceiling is how long a borrower can be left behind a stranded call, and five minutes is well
+ * inside the sweeper's own patience. Between them the value is not delicate: anything from about
+ * two to fifteen minutes behaves identically, which is why this is a constant with an argument
+ * rather than a knob with a default nobody has tuned.
+ */
+export const CLAIM_LEASE_MS = 5 * 60_000;
+
+/**
+ * `retry_count + 1`, but only for a row that was already `CLAIMED` — a reclaim means a process died
+ * holding it, and that is worth counting. A row claimed from `PENDING` keeps the count it had, so
+ * an ordinary claim costs a job nothing.
+ *
+ * A job that is reclaimed and *then* fails is charged twice, once here and once by the failure path
+ * in `Outbox.runOnce`, and that is the intended reading rather than a leak: the two are different
+ * events — a process that died holding the row, and work that ran and raised — and a job that has
+ * suffered both has had two bad attempts out of its budget of three. `claimLease.test.ts` pins it.
+ */
+const bumpRetryOnReclaim = (table: string) =>
+  `CASE WHEN due.prev_status = 'CLAIMED'
+        THEN jsonb_set(${table}.payload, '{retry_count}', to_jsonb(COALESCE((${table}.payload->>'retry_count')::int, 0) + 1))
+        ELSE ${table}.payload END`;
+
 export class SchedulingRepo extends Effect.Service<SchedulingRepo>()("@feather-lite/SchedulingRepo", {
   effect: Effect.gen(function* () {
     const sql = yield* PgClient.PgClient;
@@ -80,17 +114,26 @@ export class SchedulingRepo extends Effect.Service<SchedulingRepo>()("@feather-l
       Result: ScheduledActionRow,
       execute: ({ now, limit }) => sql`
         WITH due AS (
-          SELECT id FROM scheduled_actions WHERE status = 'PENDING' AND due_at <= ${now}
+          SELECT id, status AS prev_status FROM scheduled_actions
+          WHERE (status = 'PENDING' AND due_at <= ${now})
+             OR (status = 'CLAIMED' AND claimed_at < ${new Date(now.getTime() - CLAIM_LEASE_MS)})
           ORDER BY due_at ASC LIMIT ${limit} FOR UPDATE SKIP LOCKED
         )
-        UPDATE scheduled_actions a SET status = 'CLAIMED' FROM due WHERE a.id = due.id
+        UPDATE scheduled_actions a
+           SET status = 'CLAIMED', claimed_at = ${now}, payload = ${sql.unsafe(bumpRetryOnReclaim("a"))}
+        FROM due WHERE a.id = due.id
         RETURNING a.id, a.workflow_execution_id, a.action_type, a.due_at, a.status, a.payload`,
     });
 
+    /**
+     * `claimed_at` is cleared whenever the row goes back to `PENDING`, the same rule `finishJob`
+     * has always applied to the outbox. Without it a rescheduled action would carry the dead
+     * claim's timestamp, and the lease would read it as already expired the moment it came due.
+     */
     const setActionStatus = (id: string, status: ScheduledActionStatus, payloadPatch: Record<string, unknown> = {}, dueAt?: Date) =>
       (dueAt === undefined
-        ? sql`UPDATE scheduled_actions SET status = ${status}, payload = payload || ${sql.json(payloadPatch)} WHERE id = ${id}`
-        : sql`UPDATE scheduled_actions SET status = ${status}, due_at = ${dueAt}, payload = payload || ${sql.json(payloadPatch)} WHERE id = ${id}`
+        ? sql`UPDATE scheduled_actions SET status = ${status}, claimed_at = CASE WHEN ${status} = 'PENDING' THEN NULL ELSE claimed_at END, payload = payload || ${sql.json(payloadPatch)} WHERE id = ${id}`
+        : sql`UPDATE scheduled_actions SET status = ${status}, due_at = ${dueAt}, claimed_at = CASE WHEN ${status} = 'PENDING' THEN NULL ELSE claimed_at END, payload = payload || ${sql.json(payloadPatch)} WHERE id = ${id}`
       ).pipe(Effect.asVoid);
 
     /* ------------------------------ outbox ------------------------------ */
@@ -114,10 +157,14 @@ export class SchedulingRepo extends Effect.Service<SchedulingRepo>()("@feather-l
       Result: OutboxJobRow,
       execute: ({ now, limit }) => sql`
         WITH due AS (
-          SELECT id FROM outbox_jobs WHERE status = 'PENDING' AND available_at <= ${now}
+          SELECT id, status AS prev_status FROM outbox_jobs
+          WHERE (status = 'PENDING' AND available_at <= ${now})
+             OR (status = 'CLAIMED' AND claimed_at < ${new Date(now.getTime() - CLAIM_LEASE_MS)})
           ORDER BY available_at ASC LIMIT ${limit} FOR UPDATE SKIP LOCKED
         )
-        UPDATE outbox_jobs j SET status = 'CLAIMED', claimed_at = ${now}, updated_at = now() FROM due WHERE j.id = due.id
+        UPDATE outbox_jobs j
+           SET status = 'CLAIMED', claimed_at = ${now}, payload = ${sql.unsafe(bumpRetryOnReclaim("j"))}, updated_at = now()
+        FROM due WHERE j.id = due.id
         RETURNING ${sql.unsafe(OB_COLS.split(", ").map((c) => `j.${c}`).join(", "))}`,
     });
 
