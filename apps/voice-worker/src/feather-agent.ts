@@ -340,11 +340,19 @@ export class FeatherAgent extends voice.Agent {
     const userText = (lastUser?.textContent ?? "").trim();
     const turnId = randomUUID();
     const previousTurnId = this.currentTurnId;
-    this.currentTurnId = turnId;
 
     /**
      * The previous turn is over, so report everything it spoke — before this turn's request goes
-     * out (W4).
+     * out, and **before `currentTurnId` moves** (W4).
+     *
+     * The order of those two is not cosmetic. `onTtsMetrics` has no item to be stamped with and
+     * still keys on `currentTurnId`, so switching first sent the previous turn's trailing TTS
+     * metrics to *this* turn — and the previous turn, having no audio recorded against it, was then
+     * reported silent. That is a read-back the guard refuses and repeats, on a call where the
+     * borrower heard it perfectly well. It cost one call of the first containerised N=5:
+     * `1/15 silent playouts` and `call00 MISMATCH outcome FAILED != PROMISE_TO_PAY`, at 150 s
+     * against a 134 s median. The host arm never showed it, because the race needs the extra
+     * latency to open.
      *
      * The ordering is the point rather than a convenience. The fully-heard guard reads the
      * read-back's playout during *this* turn's T1/T2, so posting it here puts it in the ledger
@@ -352,6 +360,7 @@ export class FeatherAgent extends voice.Agent {
      * 122 of 122 recorded calls happened to win).
      */
     if (previousTurnId) await this.reportTurnPlayout(previousTurnId);
+    this.currentTurnId = turnId;
 
     const playout =
       previousTurnId && lastAssistant && lastAssistant.interrupted && previousTurnId !== this.lastReportedTurnId
