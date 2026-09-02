@@ -44,16 +44,59 @@ const writeWav = (path: string, pcm: Int16Array, sampleRate: number, channels: n
   writeFileSync(path, buf);
 };
 
-const readWav = (path: string): { pcm: Int16Array; sampleRate: number; channels: number } => {
-  const buf = readFileSync(path);
-  if (buf.length < 44 || buf.toString("ascii", 0, 4) !== "RIFF" || buf.toString("ascii", 8, 12) !== "WAVE") throw new Error(`not a WAV file: ${path}`);
-  const channels = buf.readUInt16LE(22);
-  const sampleRate = buf.readUInt32LE(24);
-  const dataBytes = buf.readUInt32LE(40);
-  const pcm = new Int16Array(dataBytes / 2);
-  for (let i = 0; i < pcm.length; i += 1) pcm[i] = buf.readInt16LE(44 + i * 2);
+/**
+ * Parse a WAV by walking its chunks (issue #4, H10).
+ *
+ * This read the header positionally — channels at byte 22, sample rate at 24, the data length at 40
+ * and the samples from 44 — which is the layout of a *canonical* 44-byte RIFF header and only that.
+ * A file with anything between `fmt ` and `data` reads garbage: `LIST`/`INFO` (encoder name, which
+ * plenty of tools write), a `fact` chunk, padding. The failure is not a throw — it is samples read
+ * from the middle of a metadata string, which is noise the borrower then speaks.
+ *
+ * The involuntary-sound asset D4 needs is exactly the kind of file that carries one, which is why
+ * this is fixed before tier 3 rather than after the first mysterious run.
+ *
+ * Exported so it can be tested on a buffer rather than through the filesystem and the cache.
+ */
+export const parseWav = (buf: Buffer, source = "<buffer>"): { pcm: Int16Array; sampleRate: number; channels: number } => {
+  if (buf.length < 12 || buf.toString("ascii", 0, 4) !== "RIFF" || buf.toString("ascii", 8, 12) !== "WAVE") throw new Error(`not a WAV file: ${source}`);
+
+  let channels: number | null = null;
+  let sampleRate: number | null = null;
+  let bitsPerSample: number | null = null;
+  let data: Buffer | null = null;
+
+  // Chunks start after `RIFF<size>WAVE`; each is a four-byte id, a four-byte little-endian size,
+  // then that many bytes — padded to an even boundary, which is the part a positional reader misses
+  // even when it does walk.
+  let off = 12;
+  while (off + 8 <= buf.length) {
+    const id = buf.toString("ascii", off, off + 4);
+    const size = buf.readUInt32LE(off + 4);
+    const body = off + 8;
+    if (body + size > buf.length) break; // truncated file: keep whatever was complete
+    if (id === "fmt ") {
+      channels = buf.readUInt16LE(body + 2);
+      sampleRate = buf.readUInt32LE(body + 4);
+      bitsPerSample = buf.readUInt16LE(body + 14);
+    } else if (id === "data") {
+      data = buf.subarray(body, body + size);
+    }
+    off = body + size + (size % 2); // pad byte when the size is odd
+  }
+
+  if (channels === null || sampleRate === null || bitsPerSample === null) throw new Error(`WAV has no fmt chunk: ${source}`);
+  if (data === null) throw new Error(`WAV has no data chunk: ${source}`);
+  // 16-bit is what the TTS writes and what `AudioFrame` takes; anything else would be read as noise
+  // rather than converted, so it is a refusal.
+  if (bitsPerSample !== 16) throw new Error(`WAV is ${String(bitsPerSample)}-bit, expected 16: ${source}`);
+
+  const pcm = new Int16Array(Math.floor(data.length / 2));
+  for (let i = 0; i < pcm.length; i += 1) pcm[i] = data.readInt16LE(i * 2);
   return { pcm, sampleRate, channels };
 };
+
+const readWav = (path: string): { pcm: Int16Array; sampleRate: number; channels: number } => parseWav(readFileSync(path), path);
 
 const toFrames = (pcm: Int16Array, sampleRate: number, channels: number): AudioFrame[] => {
   const samplesPerChannel = Math.max(1, Math.round((sampleRate * FRAME_MS) / 1000));
