@@ -1097,7 +1097,21 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
         }),
       )).pipe(Effect.tap(finalizeTracingIfEnded(conversationId)), Effect.annotateLogs({ conversation_id: conversationId, path: `signal:${signal.kind}` }));
 
-    return { processTurn, processNoInput, processSignal } as const;
+    /**
+     * Let go of a turn this process claimed and will not finish (C10).
+     *
+     * Called only from `TurnRunner`'s shutdown finalizer, and only for turns still in flight after
+     * the drain. It is the orchestrator's to do rather than the HTTP layer's for the reason ADR 0001
+     * gives: the conversation's state belongs here, and `TurnRunner` is plumbing. The CAS in
+     * `releaseTurn` means a turn that finished in the meantime is untouched.
+     */
+    const releaseStrandedTurn = (conversationId: string, turnId: string): Effect.Effect<void> =>
+      // Errors are swallowed on purpose: this runs inside a shutdown finalizer, and a database that
+      // is already going away must not turn a clean stop into a failed one. The row it would have
+      // cleared is no worse off than it was before this existed.
+      conv.releaseTurn(conversationId, turnId).pipe(Effect.ignore);
+
+    return { processTurn, processNoInput, processSignal, releaseStrandedTurn } as const;
   }),
   dependencies: [ConversationRepo.Default, CrmRepo.Default, IdGen.Default, ContextBuilder.Default, CallControl.Default, SchedulingService.Default, OutboxService.Default],
 }) {}

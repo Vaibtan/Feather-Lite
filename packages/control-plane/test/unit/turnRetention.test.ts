@@ -29,7 +29,7 @@ const resultOf = (p: TurnParams): TurnResult => ({
 });
 
 const orchestratorThat = (processTurn: (params: TurnParams, emit: Emit) => Effect.Effect<TurnResult>) =>
-  Layer.succeed(Orchestrator, Orchestrator.make({ processTurn, processNoInput: () => Effect.die("not exercised"), processSignal: () => Effect.die("not exercised") }));
+  Layer.succeed(Orchestrator, Orchestrator.make({ processTurn, processNoInput: () => Effect.die("not exercised"), processSignal: () => Effect.die("not exercised"), releaseStrandedTurn: () => Effect.void }));
 
 /** A turn that starts, streams one delta and ends — the ordinary shape. */
 const completes = orchestratorThat((p, emit) =>

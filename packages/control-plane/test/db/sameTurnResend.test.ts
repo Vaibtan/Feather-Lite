@@ -16,7 +16,7 @@ import { Deferred, Effect, Fiber, Layer, Stream } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { decision } from "@feather-lite/domain";
-import { ConversationRepo, IdGen, Orchestrator, Queries, StaticTurnDeciderLive, WorkflowService, FROZEN_NOW } from "../../src/index.js";
+import { ConversationRepo, IdGen, Orchestrator, Queries, StaticTurnDeciderLive, TurnRunner, WorkflowService, FROZEN_NOW } from "../../src/index.js";
 import { makeInfraLayer, makeRuntime, truncateAll } from "./harness.js";
 
 /** Held so the first copy of `t1` is still in flight when the re-send arrives. */
@@ -33,7 +33,7 @@ const decider = StaticTurnDeciderLive((input) => {
   return Stream.fromEffect(Deferred.await(held)).pipe(Stream.flatMap(() => reply));
 });
 
-const layer = Layer.mergeAll(Orchestrator.Default, WorkflowService.Default, Queries.Default, ConversationRepo.Default, IdGen.Default).pipe(
+const layer = Layer.mergeAll(Orchestrator.Default, TurnRunner.Default, WorkflowService.Default, Queries.Default, ConversationRepo.Default, IdGen.Default).pipe(
   Layer.provide(decider),
   Layer.provideMerge(makeInfraLayer()),
 );
@@ -44,6 +44,51 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   await rt.dispose();
+});
+
+describe("a turn still in flight when the process stops", () => {
+  it("does not leave active_turn_id set on the conversation (C10)", async () => {
+    // A separate runtime, because the thing under test is what happens when its scope closes. The
+    // turn is left blocked in the decider — the shape of a process stopped mid-turn — and on a
+    // `simulated` call nothing else would ever release it: no worker reconnects, no sweeper touches
+    // `active_turn_id`, so every later turn on that conversation would 409 forever.
+    const shutdownRt = makeRuntime(layer);
+    const conversationId = await shutdownRt.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* PgClient.PgClient;
+        const ids = yield* IdGen;
+        const borrowerId = yield* ids.next();
+        const cpId = yield* ids.next();
+        yield* sql`INSERT INTO borrowers ${sql.insert({ id: borrowerId, name: "Jordan Avery", timezone: "America/New_York", status: "ACTIVE" })}`;
+        yield* sql`INSERT INTO contact_points ${sql.insert({ id: cpId, value: "+15550007003", isValid: true, consentStatus: "ALLOWED", timezoneOverride: null })}`;
+        yield* sql`INSERT INTO borrower_contact_points ${sql.insert({ borrowerId, contactPointId: cpId, priority: 1, relationship: "PRIMARY" })}`;
+        yield* sql`INSERT INTO loans ${sql.insert({ id: yield* ids.next(), borrowerId, principal: "1000.00", balanceDue: "550.00", dueDate: "2026-08-01", status: "DELINQUENT", delinquencyDays: 10 })}`;
+        const started = yield* (yield* WorkflowService).startCall({ borrowerId, contactPointId: cpId, channel: "simulated", now: FROZEN_NOW });
+        const runner = yield* TurnRunner;
+        // `run` returns once `turn_start` is emitted; the turn behind it is blocked in the decider.
+        yield* runner.run({ conversationId: started.conversationId, turnId: "x1", userText: "hello" });
+        let tries = 0;
+        while (tries < 200) {
+          const row = yield* (yield* ConversationRepo).findConversation(started.conversationId);
+          if (row._tag === "Some" && row.value.activeTurnId === "x1") break;
+          tries += 1;
+          yield* Effect.sleep("20 millis");
+        }
+        return started.conversationId;
+      }),
+    );
+
+    // The process stops with that turn still held.
+    await shutdownRt.dispose();
+
+    const after = await rt.runPromise(
+      Effect.gen(function* () {
+        const row = yield* (yield* ConversationRepo).findConversation(conversationId);
+        return row._tag === "Some" ? row.value.activeTurnId : "missing";
+      }),
+    );
+    expect(after).toBeNull();
+  }, 20_000);
 });
 
 describe("a turn id that was superseded", () => {

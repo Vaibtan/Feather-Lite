@@ -34,6 +34,7 @@ const failsInT1 = Layer.succeed(
       ) as unknown as Effect.Effect<TurnResult>,
     processNoInput: () => Effect.die("not exercised"),
     processSignal: () => Effect.die("not exercised"),
+    releaseStrandedTurn: () => Effect.void,
   }),
 );
 

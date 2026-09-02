@@ -6,7 +6,7 @@
  * T1 failures (NotFound / ConversationCompleted / TurnInProgress) surface as Effect errors
  * BEFORE any frame is streamed, so the API can answer 404/409 with a normal body.
  */
-import { Cause, Chunk, Clock, Deferred, Duration, Effect, Queue, Schedule, Stream } from "effect";
+import { Cause, Chunk, Clock, Deferred, Duration, Effect, Fiber, Queue, Schedule, Stream } from "effect";
 import type { TurnFrame } from "@feather-lite/contracts";
 import { ConversationCompleted, NotFound, TurnInProgress, TurnSuperseded } from "../errors.js";
 import { Orchestrator, type TurnParams } from "../services/Orchestrator.js";
@@ -136,6 +136,46 @@ export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/Turn
      */
     yield* Effect.forkScoped(Clock.currentTimeMillis.pipe(Effect.map(gc), Effect.repeat(Schedule.spaced(SWEEP_INTERVAL))));
 
+    /**
+     * Turns this process claimed and has not seen finish, so shutdown can let go of them (C10).
+     *
+     * Keyed the same way as `live`, and removed by `finish` — which every completion path goes
+     * through — so what remains at scope close is exactly what was still in flight.
+     */
+    const claimed = new Map<string, { conversationId: string; turnId: string; fiber: Fiber.RuntimeFiber<unknown, unknown> | null }>();
+
+    /**
+     * On shutdown: give the turns in flight a moment to finish on their own, then release whatever
+     * is left (C10).
+     *
+     * The wait is what makes the release safe. A turn that finishes normally releases its own
+     * `active_turn_id` in T2, so anything still held after the drain is a turn that will not commit
+     * — and leaving that set is worse than clearing it, because on a `simulated` call nothing else
+     * ever will. Three seconds is longer than a turn's ordinary tail and short enough not to hold a
+     * container's SIGTERM window open.
+     */
+    const releaseClaimedAtShutdown: Effect.Effect<void> = Effect.gen(function* () {
+      if (claimed.size === 0) return;
+      const outstanding = [...claimed.values()];
+      yield* Effect.logWarning(`releasing ${String(outstanding.length)} turn(s) still claimed at shutdown`);
+      /**
+       * Interrupted first, then released, and in that order for a reason.
+       *
+       * These fibres are daemons, so closing the scope does not stop them — they would run on into a
+       * process that is going away. Clearing `active_turn_id` underneath one that was about to commit
+       * would have T2 find the slot no longer its own and discard the turn, which is a silently lost
+       * turn rather than an interrupted one. Interruption unwinds the transaction it is in, so
+       * nothing half-commits, and only then is the slot safe to clear.
+       *
+       * Deterministic rather than timed: no sleep, so this behaves the same under a test clock as
+       * under a real one, and a shutdown cannot hang waiting on a turn that was never going to
+       * finish.
+       */
+      yield* Effect.forEach(outstanding, (t) => (t.fiber === null ? Effect.void : Fiber.interrupt(t.fiber).pipe(Effect.ignore)), { discard: true });
+      yield* Effect.forEach(outstanding, (t) => orch.releaseStrandedTurn(t.conversationId, t.turnId), { discard: true });
+    });
+    yield* Effect.addFinalizer(() => releaseClaimedAtShutdown);
+
     /** Start (or attach to) a turn. Fails with the T1 error if the turn cannot start. */
     const run = (params: TurnParams): Effect.Effect<Stream.Stream<TurnFrame>, StartError> =>
       Effect.gen(function* () {
@@ -145,6 +185,7 @@ export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/Turn
 
         const turn: LiveTurn = { frames: [], subscribers: new Set(), done: false, startedAt: yield* Clock.currentTimeMillis, finishedAt: null };
         live.set(key, turn);
+        claimed.set(key, { conversationId: params.conversationId, turnId: params.turnId, fiber: null });
         const started = yield* Deferred.make<void, StartError>();
 
         const emit = (frame: TurnFrame) =>
@@ -162,6 +203,9 @@ export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/Turn
             }
             turn.done = true;
             turn.finishedAt = yield* Clock.currentTimeMillis;
+            // It committed (or failed after starting) and released its own turn, so shutdown has
+            // nothing to let go of here.
+            claimed.delete(key);
             /**
              * Deltas are dropped the moment the turn is over (C1).
              *
@@ -181,7 +225,18 @@ export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/Turn
             turn.subscribers.clear();
           });
 
-        yield* Effect.forkDaemon(
+        /**
+         * Still `forkDaemon`, and deliberately (C10).
+         *
+         * `forkScoped` here would attach the turn to whatever scope the *caller* provides, which for
+         * an HTTP request is the request's — tying a turn's life to its connection, which is the
+         * exact coupling plan rev.2 R7 forks a daemon to avoid. The compiler says so too: `run`'s
+         * signature has no `Scope` in it, and that is not an oversight to be widened away.
+         *
+         * What C10 needed was not a different fork but a *handle* on what is outstanding, which is
+         * the `claimed` map above and the finalizer that drains it.
+         */
+        const fiber = yield* Effect.forkDaemon(
           /**
            * The annotation is applied out here rather than inside `processTurn`, which carries its
            * own: the failure branch below logs from the *handler*, outside that effect, and that
@@ -218,6 +273,7 @@ export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/Turn
                     yield* broadcast(turn, END);
                     turn.subscribers.clear();
                     live.delete(key);
+                    claimed.delete(key);
                     yield* Deferred.fail(started, err);
                     return;
                   }
@@ -229,6 +285,9 @@ export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/Turn
             Effect.annotateLogs({ conversation_id: params.conversationId, turn_id: params.turnId }),
           ),
         );
+        // Recorded so the shutdown finalizer can interrupt this turn before letting go of its slot.
+        const entry = claimed.get(key);
+        if (entry) entry.fiber = fiber;
         yield* Deferred.await(started);
         return yield* subscribe(turn);
       });

@@ -32,7 +32,7 @@ const capturing = (into: Captured[]) =>
 
 /** Only `processTurn` differs between the two cases; the signals are not exercised here. */
 const orchestratorThat = (processTurn: (params: TurnParams, emit: Emit) => Effect.Effect<never, ConversationCompleted | NotFound>) =>
-  Layer.succeed(Orchestrator, Orchestrator.make({ processTurn, processNoInput: () => Effect.die("not exercised"), processSignal: () => Effect.die("not exercised") }));
+  Layer.succeed(Orchestrator, Orchestrator.make({ processTurn, processNoInput: () => Effect.die("not exercised"), processSignal: () => Effect.die("not exercised"), releaseStrandedTurn: () => Effect.void }));
 
 const params = { conversationId: "c-9f2a", turnId: "t-4b71", userText: "yes" } satisfies TurnParams;
 
