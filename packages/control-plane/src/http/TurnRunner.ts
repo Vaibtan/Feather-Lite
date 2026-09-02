@@ -8,10 +8,12 @@
  */
 import { Cause, Chunk, Clock, Deferred, Duration, Effect, Fiber, Queue, Schedule, Stream } from "effect";
 import type { TurnFrame } from "@feather-lite/contracts";
-import { ConversationCompleted, NotFound, TurnInProgress, TurnSuperseded } from "../errors.js";
+import { turnStartErrorOf, type TurnStartError } from "../errors.js";
+import { Gauges } from "../services/Gauges.js";
 import { Orchestrator, type TurnParams } from "../services/Orchestrator.js";
 
-type StartError = NotFound | ConversationCompleted | TurnInProgress | TurnSuperseded;
+/** T1's refusal, owned by the orchestrator's error module rather than redeclared here (F6). */
+type StartError = TurnStartError;
 
 interface LiveTurn {
   /** Not readonly: `finish` replaces it with the frames worth keeping. */
@@ -63,32 +65,19 @@ const MAX_LIFETIME_MS = Math.max(1, Number(process.env["TURN_MAX_LIFETIME_SECOND
  */
 const SWEEP_INTERVAL = Duration.seconds(10);
 
-const startError = (cause: Cause.Cause<unknown>): StartError | null => {
-  for (const f of Chunk.toReadonlyArray(Cause.failures(cause))) {
-    if (f instanceof NotFound || f instanceof ConversationCompleted || f instanceof TurnInProgress || f instanceof TurnSuperseded) return f;
-  }
-  return null;
-};
-
-/**
- * Gauges for the process metrics, set when the service is built (D3).
- *
- * Module-level rather than on the service because `/status` is answered by a handler that already
- * has enough dependencies, and because a process that never built a `TurnRunner` should report
- * zero rather than fail to answer.
- */
-export let liveTurnCount: () => number = () => 0;
-export let subscriberCount: () => number = () => 0;
-
 export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/TurnRunner", {
   scoped: Effect.gen(function* () {
     const orch = yield* Orchestrator;
+    const gauges = yield* Gauges;
     const live = new Map<string, LiveTurn>();
-    // Published for the process gauges (D3). C1 in the audit is that this map retains every turn
-    // including delta frames for five minutes and is walked on every run; its size is the first
-    // thing worth watching, and the soak's +3.1 MB/min of growth is what makes it worth watching.
-    liveTurnCount = () => live.size;
-    subscriberCount = () => [...live.values()].reduce((n, t) => n + t.subscribers.size, 0);
+    /**
+     * Published for the process gauges (D3), through the registry rather than a module-level `let`
+     * two builds would share (F5). This map retains every turn including delta frames for five
+     * minutes and is walked on every run; its size is the first thing worth watching, and the soak's
+     * +3.1 MB/min of growth is what makes it worth watching.
+     */
+    gauges.set("live_turns", () => live.size);
+    gauges.set("sse_streams", () => [...live.values()].reduce((n, t) => n + t.subscribers.size, 0));
     const keyOf = (p: { conversationId: string; turnId: string }) => `${p.conversationId}:${p.turnId}`;
 
     const broadcast = (turn: LiveTurn, item: TurnFrame | typeof END) =>
@@ -254,7 +243,7 @@ export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/Turn
               onFailure: (cause) =>
                 Effect.gen(function* () {
                   const startedAlready = turn.frames.some((f) => f.type === "turn_start");
-                  const err = startError(cause);
+                  const err = turnStartErrorOf(cause);
                   if (!startedAlready && err) {
                     /**
                      * Belongs to the caller: 404 / 409 with a normal body.
@@ -294,5 +283,5 @@ export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/Turn
 
     return { run } as const;
   }),
-  dependencies: [Orchestrator.Default],
+  dependencies: [Orchestrator.Default, Gauges.Default],
 }) {}

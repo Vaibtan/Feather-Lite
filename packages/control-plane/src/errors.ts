@@ -2,7 +2,7 @@
  * The control plane's typed error channel (plan §5 error registry). Every failure a caller
  * can see has a name here; HTTP mapping lives in the API layer.
  */
-import { Data } from "effect";
+import { Cause, Chunk, Data } from "effect";
 import type { PreCallFailure } from "@feather-lite/domain";
 
 export class NotFound extends Data.TaggedError("NotFound")<{
@@ -81,3 +81,37 @@ export class UnknownScenario extends Data.TaggedError("UnknownScenario")<{
 }> {}
 
 export class Unauthorized extends Data.TaggedError("Unauthorized")<{}> {}
+
+/**
+ * What T1 — claiming the turn — can refuse with, as a type the orchestrator owns (F6).
+ *
+ * `TurnRunner` declared its own copy of this union and its own `instanceof` chain to recover it from
+ * a `Cause`. Two consequences: the knowledge of what T1 can fail with lived away from the errors
+ * themselves, so adding a fifth would have compiled while silently reporting `INTERNAL` for it; and
+ * the chain narrowed by constructor identity, which a `Data.TaggedError` already answers better.
+ *
+ * Tag-based, so the list is data and the exhaustiveness is checkable.
+ */
+export const TURN_START_ERROR_TAGS = ["NotFound", "ConversationCompleted", "TurnInProgress", "TurnSuperseded"] as const;
+
+export type TurnStartError = NotFound | ConversationCompleted | TurnInProgress | TurnSuperseded;
+
+/** Compile-time proof that the tag list and the union describe the same four errors. */
+const _tagsCoverUnion: ReadonlyArray<TurnStartError["_tag"]> = TURN_START_ERROR_TAGS;
+void _tagsCoverUnion;
+
+const isTurnStartError = (u: unknown): u is TurnStartError =>
+  typeof u === "object" && u !== null && (TURN_START_ERROR_TAGS as ReadonlyArray<string>).includes(String((u as { _tag?: unknown })._tag));
+
+/**
+ * The T1 refusal inside a cause, or null if the cause is something else.
+ *
+ * Walks `Cause.failures` rather than taking `failureOption`: a turn that fails while a sibling fiber
+ * also fails produces a parallel cause, and the refusal the caller must report can be either side.
+ * A defect (`Cause.die`) is deliberately not one of these — it is `INTERNAL`, not a 409.
+ */
+export const turnStartErrorOf = (cause: Cause.Cause<unknown>): TurnStartError | null => {
+  for (const f of Chunk.toReadonlyArray(Cause.failures(cause))) if (isTurnStartError(f)) return f;
+  return null;
+};
+
