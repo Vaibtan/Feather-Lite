@@ -4,6 +4,7 @@
  * layers. `HttpLive` needs an `HttpServer` (Node in apps/server; a web handler for the edge stretch).
  */
 import { HttpApiBuilder, HttpApiSwagger, HttpMiddleware, HttpServerRequest, HttpServerResponse } from "@effect/platform";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { Effect, Layer, Redacted } from "effect";
 import { FeatherApi } from "@feather-lite/contracts";
 import { AppConfig } from "../config.js";
@@ -46,6 +47,21 @@ export const ServicesLive = Layer.mergeAll(
   SchedulingRepo.Default,
 );
 
+/**
+ * Constant-time comparison for the two secrets an request can present (C15).
+ *
+ * `===` on a string returns as soon as it finds a differing byte, so how long the comparison takes
+ * is a function of how many leading bytes the caller got right. That is a byte-at-a-time oracle for
+ * anyone who can time the response — slow to exploit over a network and not slow enough to be a
+ * reason to keep it, since the fix is three lines.
+ *
+ * The digests are compared rather than the values, so `timingSafeEqual` always gets two buffers of
+ * the same length: it throws on a length mismatch, and comparing raw values would otherwise leak
+ * the secret's length through that throw. Hashing costs a few microseconds on strings this short.
+ */
+const secretEquals = (presented: string, expected: string): boolean =>
+  timingSafeEqual(createHash("sha256").update(presented).digest(), createHash("sha256").update(expected).digest());
+
 const RATE_LIMITED_PREFIXES = ["/api/calls/start", "/api/voice/sessions", "/api/conversations"];
 
 /**
@@ -78,7 +94,7 @@ export const securityMiddleware = HttpMiddleware.make((app) =>
     const open = method === "GET" || method === "OPTIONS" || url.startsWith("/healthz") || url.startsWith("/readyz") || url.startsWith("/docs");
     if (!open && cfg.apiBearerToken !== null) {
       const auth = req.headers["authorization"] ?? "";
-      if (auth !== `Bearer ${Redacted.value(cfg.apiBearerToken)}`) {
+      if (!secretEquals(auth, `Bearer ${Redacted.value(cfg.apiBearerToken)}`)) {
         return HttpServerResponse.unsafeJson({ _tag: "ApiUnauthorized", message: "missing or invalid bearer token" }, { status: 401 });
       }
     }
@@ -95,7 +111,7 @@ export const securityMiddleware = HttpMiddleware.make((app) =>
        * the traffic was exempt rather than budgeted.
        */
       const presented = req.headers["x-ratelimit-bypass"];
-      if (cfg.rateLimitBypassToken !== null && presented !== undefined && presented === Redacted.value(cfg.rateLimitBypassToken)) {
+      if (cfg.rateLimitBypassToken !== null && presented !== undefined && secretEquals(presented, Redacted.value(cfg.rateLimitBypassToken))) {
         yield* metrics.increment("rate_limit_bypassed");
         return yield* app;
       }
