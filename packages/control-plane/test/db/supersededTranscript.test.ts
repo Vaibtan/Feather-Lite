@@ -63,10 +63,15 @@ describe("superseded turns and the decider's transcript", () => {
         const orch = yield* Orchestrator;
         const started = yield* wf.startCall({ borrowerId, contactPointId: cpId, channel: "simulated", now: FROZEN_NOW });
 
+        /**
+         * The text matters: it must reach the decider. A pure hold request ("hold on a second",
+         * which this fixture used to say) is answered by D1's `wait` without consulting the decider
+         * at all, so it can never be in flight to be superseded.
+         */
         // t1 goes in flight and blocks in the decider.
         const frames1 = yield* Ref.make<TurnFrame[]>([]);
         const fiber1 = yield* Effect.fork(
-          orch.processTurn({ conversationId: started.conversationId, turnId: "t1", userText: "hold on a second" }, (f) => Ref.update(frames1, (xs) => [...xs, f])),
+          orch.processTurn({ conversationId: started.conversationId, turnId: "t1", userText: "I need to check my account balance first" }, (f) => Ref.update(frames1, (xs) => [...xs, f])),
         );
         let tries = 0;
         while (!(yield* Ref.get(frames1)).some((f) => f.type === "turn_start") && tries < 200) {
@@ -86,14 +91,14 @@ describe("superseded turns and the decider's transcript", () => {
     const t2Input = seen.find((i) => i.turnId === "t2");
     expect(t2Input).toBeDefined();
     const texts = t2Input!.recentTranscript.map((e) => e.text);
-    expect(texts).not.toContain("hold on a second");
+    expect(texts).not.toContain("I need to check my account balance first");
     // ...and no two borrower lines end up adjacent.
     const speakers = t2Input!.recentTranscript.map((e) => e.speaker);
     expect(speakers.some((s, i) => i > 0 && s === "BORROWER" && speakers[i - 1] === "BORROWER")).toBe(false);
 
     // The ledger still has it: the borrower did say those words.
-    expect(out.events.some((e) => e.type === "USER_TURN_FINAL" && e.payload.text === "hold on a second")).toBe(true);
-    expect(out.transcript.some((e) => e.text === "hold on a second")).toBe(true);
+    expect(out.events.some((e) => e.type === "USER_TURN_FINAL" && e.payload.text === "I need to check my account balance first")).toBe(true);
+    expect(out.transcript.some((e) => e.text === "I need to check my account balance first")).toBe(true);
     expect(out.events.some((e) => e.type === "TURN_SUPERSEDED" && e.payload.turn_id === "t1")).toBe(true);
   });
 });

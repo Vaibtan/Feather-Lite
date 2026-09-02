@@ -26,7 +26,8 @@ const fakeOrchestrator = (segments: () => Segment, seen: TurnParams[]) =>
           return {
             turnId: params.turnId,
             decider: "model" as const,
-            disposition: "spoke" as const,
+            disposition: params.heldMs === undefined ? ("respond" as const) : ("held" as const),
+            resolution: "spoke" as const,
             ...(params.heldMs === undefined ? {} : { heldMs: params.heldMs }),
             agentText: "ok",
             newState: "CONFIRMING_OUTCOME" as const,

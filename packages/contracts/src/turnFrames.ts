@@ -54,6 +54,13 @@ export const TurnEndFrame = Schema.Struct({
   degraded: Schema.Boolean,
   /** Milliseconds from turn start to first emitted text (decision TTFT). */
   ttft_ms: Schema.NullOr(Schema.Number),
+  /**
+   * On a `wait`, how much longer to hold off the no-input strike (issue #1, D1).
+   *
+   * The agent said nothing on purpose, so without this the silence the borrower asked for looks
+   * exactly like a borrower who has walked away. Absent on every other turn.
+   */
+  extend_away_ms: Schema.optional(Schema.Number),
 });
 
 export const ErrorFrame = Schema.Struct({

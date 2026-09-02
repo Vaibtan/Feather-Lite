@@ -588,7 +588,7 @@ export class ScenarioRunner extends Effect.Service<ScenarioRunner>()("@feather-l
                 .pipe(Effect.either);
               if (r._tag === "Right") turnResults.push(r.right);
               // The turn failed outright, so no arm decided it and it has no disposition of its own (F3).
-              else turnResults.push({ turnId: step.turnId ?? `t${stepNo}`, decider: "none", disposition: "degraded", agentText: `ERROR ${String(r.left)}`, newState: "GREETING", toolCalled: null, callControlAction: null, outcome: null, endCall: false, degraded: true, ttftMs: null });
+              else turnResults.push({ turnId: step.turnId ?? `t${stepNo}`, decider: "none", disposition: "respond", resolution: "degraded", agentText: `ERROR ${String(r.left)}`, newState: "GREETING", toolCalled: null, callControlAction: null, outcome: null, endCall: false, degraded: true, ttftMs: null });
             } else if (step.kind === "no_input") {
               turnResults.push(yield* orch.processNoInput(started.conversationId));
             } else {

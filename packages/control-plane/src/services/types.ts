@@ -41,20 +41,39 @@ export type { TurnChunk };
 export type TurnDecisionSource = "override" | "fast-path" | "model" | "scripted" | "none";
 
 /**
- * How the turn ended, in one field instead of four (F3).
+ * What the control plane did about this turn (issue #1, D1).
  *
- * `degraded`, `toolCalled`, the rejection branch and the superseded early return each carried a
- * piece of this, and a reader had to reassemble it. `superseded` is not a failure and `rejected` is
- * not degradation; keeping them apart is the point.
+ * The spec's vocabulary, from the four-state turn models in the research: `respond` is today's
+ * behaviour and the only one the decider is consulted for. `wait` is the borrower asking for a
+ * moment — the agent says nothing and the away timer is extended. `held` is a turn that arrived
+ * while a non-interruptible segment was still playing and was parked until it finished (F2).
+ * `resume` is the worker resuming a line paused by a backchannel, and is not produced yet: D5.2
+ * measures `interruption.minDuration` first, and the interim classifier is built only if that
+ * measurement says it is needed.
  */
-export type TurnDisposition = "spoke" | "tool" | "rejected" | "degraded" | "superseded" | "none";
+export type TurnDisposition = "respond" | "wait" | "resume" | "held";
+
+/**
+ * How the turn ended.
+ *
+ * A different axis from `disposition`, and worth keeping separate: `disposition` is what the system
+ * decided to do, this is what came of it. `degraded`, `toolCalled`, the tool-rejection branch and
+ * the superseded early return each carried a piece of this and a reader had to reassemble it.
+ * `superseded` is not a failure and `rejected` is not degradation; keeping them apart is the point.
+ *
+ * `none` goes with `decider: "none"`: a playout signal and a no-input close both wear the
+ * `TurnResult` shape without ever having been decided.
+ */
+export type TurnResolution = "spoke" | "tool" | "rejected" | "degraded" | "superseded" | "none";
 
 export interface TurnResult {
   readonly turnId: string;
   /** Which arm decided this turn — the turn-level predicate the SLO segment reads (F3, F4). */
   readonly decider: TurnDecisionSource;
-  /** How this turn ended (F3). */
+  /** What the control plane did about this turn (D1). */
   readonly disposition: TurnDisposition;
+  /** How it came out (F3). */
+  readonly resolution: TurnResolution;
   /**
    * How long this turn waited for a non-interruptible segment to finish before it claimed (F2).
    *
@@ -64,6 +83,13 @@ export interface TurnResult {
    * in `conversation_turns.result`, so the cost of the hold is measurable per turn.
    */
   readonly heldMs?: number | undefined;
+  /**
+   * How much longer the worker should wait before its next no-input strike (issue #1, D1's `wait`).
+   *
+   * Present only on a `wait`. The agent deliberately said nothing, so without this the silence the
+   * borrower asked for would look exactly like a borrower who had walked away.
+   */
+  readonly extendAwayMs?: number | undefined;
   readonly agentText: string;
   readonly newState: ConversationState;
   readonly toolCalled: ToolCall | null;

@@ -20,7 +20,8 @@ import { Gauges } from "../../src/services/Gauges.js";
 const resultOf = (p: TurnParams): TurnResult => ({
   turnId: p.turnId,
   decider: "model",
-  disposition: "spoke",
+  disposition: "respond",
+  resolution: "spoke",
   agentText: "one moment",
   newState: "CONFIRMING_OUTCOME",
   toolCalled: null,

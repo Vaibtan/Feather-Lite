@@ -527,6 +527,24 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
         return { turnId: row.turnId, channel: row.channel, startedAtMs: row.createdAt.getTime(), ttsAudioMs: row.ttsAudioMs };
       });
 
+    /**
+     * What the control plane did about the previous turn (issue #1, D1).
+     *
+     * Read from `conversation_turns.result`, which is where `TurnResult` already lands — the ledger
+     * is the truth about the call (Q4), and a second consecutive `wait` has to be recognised from
+     * something durable rather than from process memory a replica would not share.
+     */
+    const lastDisposition = (conversationId: string, excludingTurnId: string) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<{ disposition: string | null }>`
+          SELECT result->>'disposition' AS disposition
+          FROM conversation_turns
+          WHERE conversation_id = ${conversationId} AND turn_id <> ${excludingTurnId} AND result IS NOT NULL
+          ORDER BY started_at DESC, turn_id DESC
+          LIMIT 1`.pipe(Effect.orDie);
+        return rows[0]?.disposition ?? null;
+      });
+
     const listEvents = (conversationId: string) =>
       listEventRows(conversationId).pipe(
         Effect.map((rows) =>
@@ -649,6 +667,7 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
       updateConversation,
       appendEvent,
       unreportedNonInterruptible,
+      lastDisposition,
       contextForConversation,
       listEvents,
       insertTurn,

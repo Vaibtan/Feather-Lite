@@ -66,7 +66,9 @@ describe("the ledger records which arm decided a turn (F3)", () => {
       }),
     );
     expect(out["decider"]).toBe("scripted");
-    expect(out["disposition"]).toBe("tool");
+    // `resolution` is how it came out; `disposition` is what the control plane decided to do (D1).
+    expect(out["resolution"]).toBe("tool");
+    expect(out["disposition"]).toBe("respond");
   });
 
   it("names the override when a deterministic rule answered without the model", async () => {
@@ -94,6 +96,7 @@ describe("the ledger records which arm decided a turn (F3)", () => {
     );
     expect(typeof out["decider"]).toBe("string");
     expect(typeof out["disposition"]).toBe("string");
+    expect(typeof out["resolution"]).toBe("string");
   });
 });
 
