@@ -17,6 +17,7 @@ import { describe, expect, it } from "vitest";
 import { ConversationCompleted } from "../../src/errors.js";
 import { Orchestrator, type Emit, type TurnParams } from "../../src/services/Orchestrator.js";
 import type { TurnResult } from "../../src/services/types.js";
+import { Gauges } from "../../src/services/Gauges.js";
 import { TurnRunner } from "../../src/http/TurnRunner.js";
 
 /**
@@ -67,7 +68,7 @@ describe("a turn whose T1 fails after a second client attached", () => {
         // It is told what happened, rather than just being cut off.
         expect(frames.some((f) => f.type === "error")).toBe(true);
       }).pipe(
-        Effect.provide(TurnRunner.DefaultWithoutDependencies.pipe(Layer.provide(failsInT1))),
+        Effect.provide(TurnRunner.DefaultWithoutDependencies.pipe(Layer.provide(failsInT1), Layer.provide(Gauges.Default))),
         Effect.provide(TestContext.TestContext),
         Effect.orDie,
       ),

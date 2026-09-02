@@ -26,6 +26,7 @@ export * from "./services/Sweeper.js";
 export * from "./services/Scenarios.js";
 export * from "./services/Seed.js";
 export * from "./services/VoiceSessions.js";
+export * from "./services/Gauges.js";
 export * from "./services/Metrics.js";
 export * from "./services/ProcessMetrics.js";
 export * from "./services/Profiler.js";

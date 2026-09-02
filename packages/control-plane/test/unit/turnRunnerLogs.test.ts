@@ -14,6 +14,7 @@ import { Effect, Layer, Logger, Stream } from "effect";
 import { describe, expect, it } from "vitest";
 import { ConversationCompleted, NotFound } from "../../src/errors.js";
 import { Orchestrator, type Emit, type TurnParams } from "../../src/services/Orchestrator.js";
+import { Gauges } from "../../src/services/Gauges.js";
 import { TurnRunner } from "../../src/http/TurnRunner.js";
 
 interface Captured {
@@ -50,7 +51,7 @@ describe("TurnRunner failure logging", () => {
         const frames = yield* runner.run(params);
         // Draining the stream waits for the turn to finish, which is when the line is logged.
         yield* Stream.runDrain(frames);
-      }).pipe(Effect.provide(TurnRunner.DefaultWithoutDependencies.pipe(Layer.provide(failsAfterStart))), Effect.provide(capturing(captured)), Effect.orDie),
+      }).pipe(Effect.provide(TurnRunner.DefaultWithoutDependencies.pipe(Layer.provide(failsAfterStart), Layer.provide(Gauges.Default))), Effect.provide(capturing(captured)), Effect.orDie),
     );
 
     const line = captured.find((c) => String(c.message).includes("turn failed after start"));
@@ -69,7 +70,7 @@ describe("TurnRunner failure logging", () => {
       Effect.gen(function* () {
         const runner = yield* TurnRunner;
         return yield* runner.run(params);
-      }).pipe(Effect.provide(TurnRunner.DefaultWithoutDependencies.pipe(Layer.provide(failsAtStart))), Effect.provide(capturing(captured))),
+      }).pipe(Effect.provide(TurnRunner.DefaultWithoutDependencies.pipe(Layer.provide(failsAtStart), Layer.provide(Gauges.Default))), Effect.provide(capturing(captured))),
     );
 
     expect(exit._tag).toBe("Failure");

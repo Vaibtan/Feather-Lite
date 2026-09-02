@@ -6,7 +6,7 @@
  * gauge that would show a retention leak — showed a plateau instead, and the soak's RSS slope could
  * not separate that from real growth.
  *
- * The seam is `liveTurnCount`, which is what the gauge reads (`prometheus.ts`), driven through the
+ * The seam is the `live_turns` gauge, which is what `prometheus.ts` reads (F5), driven through the
  * real `TurnRunner` with a stub orchestrator. The clock is Effect's, so the sweeper's schedule and
  * the retention window are both advanced by `TestClock` rather than waited on.
  */
@@ -14,7 +14,8 @@ import { Duration, Effect, Layer, Stream, TestClock, TestContext } from "effect"
 import { describe, expect, it } from "vitest";
 import { Orchestrator, type Emit, type TurnParams } from "../../src/services/Orchestrator.js";
 import type { TurnResult } from "../../src/services/types.js";
-import { TurnRunner, liveTurnCount } from "../../src/http/TurnRunner.js";
+import { TurnRunner } from "../../src/http/TurnRunner.js";
+import { Gauges } from "../../src/services/Gauges.js";
 
 const resultOf = (p: TurnParams): TurnResult => ({
   turnId: p.turnId,
@@ -60,8 +61,20 @@ const neverFinishes = orchestratorThat((p, emit) => emit({ type: "turn_start", t
 
 const turn = (turnId: string): TurnParams => ({ conversationId: "c-1", turnId, userText: "yes" });
 
-const withRunner = (orchestrator: Layer.Layer<Orchestrator>, body: Effect.Effect<void, never, TurnRunner>) =>
-  Effect.runPromise(body.pipe(Effect.provide(TurnRunner.DefaultWithoutDependencies.pipe(Layer.provide(orchestrator))), Effect.provide(TestContext.TestContext)));
+const withRunner = (orchestrator: Layer.Layer<Orchestrator>, body: Effect.Effect<void, never, TurnRunner | Gauges>) =>
+  Effect.runPromise(
+    body.pipe(
+      // `provideMerge`, so the body reads the **same** registry the runner registered into — which
+      // is the property `export let` could not give and F5's own test pins.
+      Effect.provide(TurnRunner.DefaultWithoutDependencies.pipe(Layer.provide(orchestrator), Layer.provideMerge(Gauges.Default))),
+      Effect.provide(TestContext.TestContext),
+    ),
+  );
+
+/** What the Prometheus gauge would report right now. */
+const liveTurns = Effect.gen(function* () {
+  return (yield* Gauges).read("live_turns");
+});
 
 describe("the turn-retention map at idle", () => {
   it("returns to zero after the retention window with no further turns", async () => {
@@ -71,12 +84,12 @@ describe("the turn-retention map at idle", () => {
         const runner = yield* TurnRunner;
         yield* Stream.runDrain(yield* runner.run(turn("t-1")));
         // Still held: a reconnect on the same turn id must re-attach rather than ask the database.
-        expect(liveTurnCount()).toBe(1);
+        expect(yield* liveTurns).toBe(1);
 
         // Nothing else happens on this process. Under the old expiry this is where the entry stayed
         // until the next run — which on an idle box is never.
         yield* TestClock.adjust(Duration.seconds(90));
-        expect(liveTurnCount()).toBe(0);
+        expect(yield* liveTurns).toBe(0);
       }).pipe(Effect.orDie),
     );
   });
@@ -90,7 +103,7 @@ describe("the turn-retention map at idle", () => {
         // Swept three times inside the window, and the entry survives all of them: the sweeper must
         // not become an eviction that defeats the reconnect the map exists for.
         yield* TestClock.adjust(Duration.seconds(30));
-        expect(liveTurnCount()).toBe(1);
+        expect(yield* liveTurns).toBe(1);
       }).pipe(Effect.orDie),
     );
   });
@@ -102,17 +115,17 @@ describe("the turn-retention map at idle", () => {
         const runner = yield* TurnRunner;
         // `run` returns once `turn_start` is emitted; the fibre behind it never returns.
         yield* runner.run(turn("t-3"));
-        expect(liveTurnCount()).toBe(1);
+        expect(yield* liveTurns).toBe(1);
 
         // A minute and a half is past the retention window and nowhere near the lifetime ceiling.
         // The entry has no `finishedAt`, so the window cannot apply to it and it is still held.
         yield* TestClock.adjust(Duration.seconds(90));
-        expect(liveTurnCount()).toBe(1);
+        expect(yield* liveTurns).toBe(1);
 
         // Past the ceiling it goes, deltas and all — which is the difference between a wedged turn
         // costing five minutes of memory and costing the life of the process.
         yield* TestClock.adjust(Duration.seconds(300));
-        expect(liveTurnCount()).toBe(0);
+        expect(yield* liveTurns).toBe(0);
       }).pipe(Effect.orDie),
     );
   });

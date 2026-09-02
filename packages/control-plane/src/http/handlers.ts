@@ -205,6 +205,15 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
               })),
             ),
             rate_limiting: {
+              /**
+               * **Every count here is per process, since boot** (F5).
+               *
+               * They are in-memory counters and the buckets are an in-memory map, so a restart
+               * zeroes them and a second replica keeps its own. A reader who takes
+               * `rejected_daily_cap: 0` for "nobody hit the cap today" is reading it wrong, and the
+               * field says so rather than relying on them knowing.
+               */
+              basis: "per process, since boot",
               per_minute: cfg.rateLimitPerMinute,
               daily_turn_cap: cfg.dailyTurnCap,
               rejected_start: counted("rate_limited_start"),

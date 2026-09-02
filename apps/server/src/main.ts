@@ -19,13 +19,13 @@ import {
   DatabaseLive,
   HttpLive,
   LangfuseTracingLive,
-  liveTurnCount,
   LiveKitMediaPlaneLive,
   MediaPlane,
   Metrics,
   OpenAILlmClientLive,
   OpenAITurnDeciderLive,
   OutboxService,
+  Gauges,
   pgPoolGauge,
   ProcessMetrics,
   ProcessMetricsLive,
@@ -34,7 +34,6 @@ import {
   ScriptedTurnDeciderLive,
   ServicesLive,
   rateLimitBucketCount,
-  subscriberCount,
   Sweeper,
 } from "@feather-lite/control-plane";
 
@@ -172,15 +171,25 @@ const MainLive = Layer.mergeAll(HttpLive, RootRoute, SchedulersLive).pipe(
   Layer.provideMerge(Metrics.Default),
   // The process's own gauges (D3). Its sources are functions rather than services because the
   // things it reports on — the pool, the SSE map, the rate-limit buckets — are owned by modules
-  // that must not depend on a metrics service to be observable.
+  // that must not depend on a metrics service to be observable. The live-turn and SSE numbers now
+  // come through the `Gauges` registry rather than two module-level `let`s a second build would
+  // clobber (F5); the pool and the limiter still read their own module, which owns them outright.
   Layer.provideMerge(
-    ProcessMetricsLive({
-      pgPool: pgPoolGauge,
-      sseStreams: () => subscriberCount(),
-      liveTurns: () => liveTurnCount(),
-      rateLimitBuckets: rateLimitBucketCount,
-    }),
+    Layer.unwrapEffect(
+      Effect.gen(function* () {
+        // The same registry `TurnRunner` registers into: `Gauges.Default` is one layer value, and
+        // Effect memoizes layers by reference within a build (measured under F1), so both see it.
+        const gauges = yield* Gauges;
+        return ProcessMetricsLive({
+          pgPool: pgPoolGauge,
+          sseStreams: () => gauges.read("sse_streams"),
+          liveTurns: () => gauges.read("live_turns"),
+          rateLimitBuckets: rateLimitBucketCount,
+        });
+      }),
+    ),
   ),
+  Layer.provideMerge(Gauges.Default),
   Layer.provideMerge(DatabaseLive),
   Layer.provideMerge(AppConfigLive),
   Layer.provide(NodeServerLive),

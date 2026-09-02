@@ -514,6 +514,12 @@ export const SystemStatus = Schema.Struct({
     rate_limit_buckets: Schema.Number,
   }),
   rate_limiting: Schema.Struct({
+    /**
+     * What these counts are of (F5). In-memory counters and an in-memory bucket map, so a restart
+     * zeroes them and a second replica keeps its own: `rejected_daily_cap: 0` does not mean nobody
+     * hit the cap today.
+     */
+    basis: Schema.String,
     per_minute: Schema.Number,
     daily_turn_cap: Schema.Number,
     rejected_start: Schema.Number,
