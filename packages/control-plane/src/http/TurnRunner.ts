@@ -8,10 +8,10 @@
  */
 import { Cause, Chunk, Clock, Deferred, Duration, Effect, Queue, Schedule, Stream } from "effect";
 import type { TurnFrame } from "@feather-lite/contracts";
-import { ConversationCompleted, NotFound, TurnInProgress } from "../errors.js";
+import { ConversationCompleted, NotFound, TurnInProgress, TurnSuperseded } from "../errors.js";
 import { Orchestrator, type TurnParams } from "../services/Orchestrator.js";
 
-type StartError = NotFound | ConversationCompleted | TurnInProgress;
+type StartError = NotFound | ConversationCompleted | TurnInProgress | TurnSuperseded;
 
 interface LiveTurn {
   /** Not readonly: `finish` replaces it with the frames worth keeping. */
@@ -65,7 +65,7 @@ const SWEEP_INTERVAL = Duration.seconds(10);
 
 const startError = (cause: Cause.Cause<unknown>): StartError | null => {
   for (const f of Chunk.toReadonlyArray(Cause.failures(cause))) {
-    if (f instanceof NotFound || f instanceof ConversationCompleted || f instanceof TurnInProgress) return f;
+    if (f instanceof NotFound || f instanceof ConversationCompleted || f instanceof TurnInProgress || f instanceof TurnSuperseded) return f;
   }
   return null;
 };

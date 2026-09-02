@@ -63,7 +63,7 @@ import {
 import type { TurnFrame } from "@feather-lite/contracts";
 import { spokenIsoDate, spokenMoney } from "@feather-lite/domain";
 import { AppConfig } from "../config.js";
-import { ConversationCompleted, NotFound, TurnInProgress } from "../errors.js";
+import { ConversationCompleted, NotFound, TurnInProgress, TurnSuperseded } from "../errors.js";
 import type { ConversationRow, PendingProposalJson } from "../db/rows.js";
 import { ConversationRepo } from "../repos/conversation.js";
 import { CrmRepo } from "../repos/crm.js";
@@ -533,6 +533,21 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
              * up to `TURN_MAX_LIFETIME_SECONDS`; this is the same promise kept in the database, so it
              * survives that window and a second replica.
              */
+            /**
+             * A turn that was superseded is over, and re-sending it does not restart it (C9).
+             *
+             * Idempotency replayed only `DONE`, so a `SUPERSEDED` row fell through to the claim —
+             * and by then the barge-in that superseded it has released `active_turn_id`, so the
+             * claim succeeds and the turn runs again: a second `USER_TURN_FINAL` for a line the
+             * ledger already holds, and a fresh reply decided against a conversation that has moved
+             * on. Half-executed, because `TURN_SUPERSEDED` is already in the log above it.
+             *
+             * The retry fails explicitly instead. It is a conflict, like `TurnInProgress`, and a
+             * different one: not "somebody holds the line now" but "this turn is over".
+             */
+            if (Option.isSome(existing) && existing.value.status === "SUPERSEDED") {
+              return yield* Effect.fail(new TurnSuperseded({ conversationId: row.id, turnId: params.turnId }));
+            }
             if (Option.isSome(existing) && existing.value.status === "RUNNING" && row.activeTurnId === params.turnId) {
               return { replay: null, row, ctx: null, events: [] as ReadonlyArray<EventRecord>, attach: true as const };
             }

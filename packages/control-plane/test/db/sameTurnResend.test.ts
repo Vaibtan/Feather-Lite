@@ -21,12 +21,16 @@ import { makeInfraLayer, makeRuntime, truncateAll } from "./harness.js";
 
 /** Held so the first copy of `t1` is still in flight when the re-send arrives. */
 const gate = await Effect.runPromise(Deferred.make<void>());
+/** The supersede test releases its own deciders through this one. */
+const gate2 = await Effect.runPromise(Deferred.make<void>());
+/** Counted for `t1` only: the supersede test below shares this decider and has its own turns. */
 let deciderCalls = 0;
 
 const decider = StaticTurnDeciderLive((input) => {
-  deciderCalls += 1;
+  if (input.turnId === "t1") deciderCalls += 1;
   const reply = Stream.make(decision({ message: `reply to ${input.userText}`, toolCall: null, intentSatisfied: false, suggestedNextState: "VERIFYING_IDENTITY" }));
-  return Stream.fromEffect(Deferred.await(gate)).pipe(Stream.flatMap(() => reply));
+  const held = input.turnId.startsWith("s") ? gate2 : gate;
+  return Stream.fromEffect(Deferred.await(held)).pipe(Stream.flatMap(() => reply));
 });
 
 const layer = Layer.mergeAll(Orchestrator.Default, WorkflowService.Default, Queries.Default, ConversationRepo.Default, IdGen.Default).pipe(
@@ -40,6 +44,57 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   await rt.dispose();
+});
+
+describe("a turn id that was superseded", () => {
+  it("is refused rather than run again (C9)", async () => {
+    const out = await rt.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* PgClient.PgClient;
+        const ids = yield* IdGen;
+        const borrowerId = yield* ids.next();
+        const cpId = yield* ids.next();
+        yield* sql`INSERT INTO borrowers ${sql.insert({ id: borrowerId, name: "Jordan Avery", timezone: "America/New_York", status: "ACTIVE" })}`;
+        yield* sql`INSERT INTO contact_points ${sql.insert({ id: cpId, value: "+15550007002", isValid: true, consentStatus: "ALLOWED", timezoneOverride: null })}`;
+        yield* sql`INSERT INTO borrower_contact_points ${sql.insert({ borrowerId, contactPointId: cpId, priority: 1, relationship: "PRIMARY" })}`;
+        yield* sql`INSERT INTO loans ${sql.insert({ id: yield* ids.next(), borrowerId, principal: "1000.00", balanceDue: "550.00", dueDate: "2026-08-01", status: "DELINQUENT", delinquencyDays: 10 })}`;
+        const started = yield* (yield* WorkflowService).startCall({ borrowerId, contactPointId: cpId, channel: "simulated", now: FROZEN_NOW });
+        const orch = yield* Orchestrator;
+
+        // `s1` goes in flight and is superseded by the barge-in `s2`, exactly as a real one is.
+        const s1 = yield* Effect.fork(orch.processTurn({ conversationId: started.conversationId, turnId: "s1", userText: "hello" }, () => Effect.void));
+        let tries = 0;
+        while (tries < 200) {
+          const row = yield* (yield* ConversationRepo).findConversation(started.conversationId);
+          if (row._tag === "Some" && row.value.activeTurnId === "s1") break;
+          tries += 1;
+          yield* Effect.sleep("20 millis");
+        }
+        const s2 = yield* Effect.fork(orch.processTurn({ conversationId: started.conversationId, turnId: "s2", userText: "actually, wait", supersede: true }, () => Effect.void));
+        yield* Effect.sleep("100 millis");
+        yield* Deferred.succeed(gate2, void 0);
+        yield* Fiber.join(s1).pipe(Effect.either);
+        yield* Fiber.join(s2).pipe(Effect.either);
+
+        // The worker reconnects and re-sends the turn it never saw an answer for.
+        const resend = yield* orch.processTurn({ conversationId: started.conversationId, turnId: "s1", userText: "hello" }, () => Effect.void).pipe(Effect.either);
+        const detail = yield* (yield* Queries).conversationDetail(started.conversationId);
+        return {
+          resend,
+          userLines: detail.events.filter((e) => e.type === "USER_TURN_FINAL" && e.payload.turn_id === "s1").length,
+          agentLines: detail.events.filter((e) => e.type === "AGENT_TURN" && e.payload.turn_id === "s1").length,
+        };
+      }),
+    );
+
+    // Explicitly refused, rather than quietly re-run.
+    expect(out.resend._tag).toBe("Left");
+    if (out.resend._tag === "Left") expect(out.resend.left._tag).toBe("TurnSuperseded");
+    // The ledger still holds one borrower line for that turn and no agent line: the turn was
+    // superseded before it committed one, and re-running it would have written both.
+    expect(out.userLines).toBe(1);
+    expect(out.agentLines).toBe(0);
+  });
 });
 
 describe("the same turn id, sent twice while the first is still running", () => {

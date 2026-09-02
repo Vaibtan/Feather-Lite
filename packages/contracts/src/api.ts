@@ -39,7 +39,7 @@ export class ApiPreCallRejected extends Schema.TaggedError<ApiPreCallRejected>()
 }, HttpApiSchema.annotations({ status: 422 })) {}
 
 export class ApiConflict extends Schema.TaggedError<ApiConflict>()("ApiConflict", {
-  code: Schema.Literal("CONVERSATION_COMPLETED", "TURN_IN_PROGRESS"),
+  code: Schema.Literal("CONVERSATION_COMPLETED", "TURN_IN_PROGRESS", "TURN_SUPERSEDED"),
   message: Schema.String,
 }, HttpApiSchema.annotations({ status: 409 })) {}
 

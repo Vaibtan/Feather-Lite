@@ -30,6 +30,22 @@ export class ConversationCompleted extends Data.TaggedError("ConversationComplet
   }
 }
 
+/**
+ * The turn id was superseded by a later turn, and is not runnable again (issue #4, C9).
+ *
+ * Distinct from `TurnInProgress`, which says somebody else holds the line *now*: this one says this
+ * particular turn is over, decided against, and re-sending it would append the borrower's line and
+ * a fresh reply to a turn the ledger has already closed.
+ */
+export class TurnSuperseded extends Data.TaggedError("TurnSuperseded")<{
+  readonly conversationId: string;
+  readonly turnId: string;
+}> {
+  override get message(): string {
+    return `Turn ${this.turnId} on conversation ${this.conversationId} was superseded by a later turn`;
+  }
+}
+
 export class TurnInProgress extends Data.TaggedError("TurnInProgress")<{
   readonly conversationId: string;
   readonly activeTurnId: string;

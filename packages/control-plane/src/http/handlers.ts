@@ -19,7 +19,7 @@ import {
 } from "@feather-lite/contracts";
 import { scoreRecordProblem } from "@feather-lite/domain";
 import { AppConfig } from "../config.js";
-import { ConversationCompleted, NotFound, PreCallRejected, TelephonyError, TurnInProgress, UnknownScenario } from "../errors.js";
+import { ConversationCompleted, NotFound, PreCallRejected, TelephonyError, TurnInProgress, TurnSuperseded, UnknownScenario } from "../errors.js";
 import { prometheusText } from "./prometheus.js";
 import { rateLimitBucketCount } from "./rateLimit.js";
 import { unknownTurnIdMessage, unknownTurnIds } from "./scoreTargets.js";
@@ -45,8 +45,11 @@ const SERVICE_VERSION = "2.0.0";
 /* --------------------------- error mapping --------------------------- */
 
 const mapNotFound = (e: NotFound) => new ApiNotFound({ entity: e.entity, id: e.id });
-const mapConflict = (e: ConversationCompleted | TurnInProgress) =>
-  new ApiConflict({ code: e instanceof ConversationCompleted ? "CONVERSATION_COMPLETED" : "TURN_IN_PROGRESS", message: e.message });
+const mapConflict = (e: ConversationCompleted | TurnInProgress | TurnSuperseded) =>
+  new ApiConflict({
+    code: e instanceof ConversationCompleted ? "CONVERSATION_COMPLETED" : e instanceof TurnSuperseded ? "TURN_SUPERSEDED" : "TURN_IN_PROGRESS",
+    message: e.message,
+  });
 const mapPreCall = (e: PreCallRejected) => new ApiPreCallRejected({ error: "Pre-call validation failed", validation_failures: e.failures });
 
 const parseNow = (iso: string | undefined): DateTime.Utc | undefined => {
@@ -294,6 +297,7 @@ export const ConversationsLive = HttpApiBuilder.group(FeatherApi, "conversations
               NotFound: (e) => Effect.fail(mapNotFound(e)),
               ConversationCompleted: (e) => Effect.fail(mapConflict(e)),
               TurnInProgress: (e) => Effect.fail(mapConflict(e)),
+              TurnSuperseded: (e) => Effect.fail(mapConflict(e)),
             }),
             Effect.orDie,
           );
@@ -330,6 +334,7 @@ export const ConversationsLive = HttpApiBuilder.group(FeatherApi, "conversations
                 NotFound: (e) => Effect.fail(mapNotFound(e)),
                 ConversationCompleted: (e) => Effect.fail(mapConflict(e)),
                 TurnInProgress: (e) => Effect.fail(mapConflict(e)),
+                TurnSuperseded: (e) => Effect.fail(mapConflict(e)),
               }),
             );
           yield* metrics.increment("turns_processed");
