@@ -218,7 +218,10 @@ export default defineAgent({
         interruption: { enabled: true, mode: INTERRUPTION_MODE, minDuration: knob(KNOBS.interruptionMinDurationMs, INTERRUPTION_MIN_DURATION_MS.fallback), falseInterruptionTimeout: 2000, resumeFalseInterruption: true, discardAudioIfUninterruptible: false },
         preemptiveGeneration: { enabled: false }, // one control-plane turn per confirmed user turn
       },
-      userAwayTimeout: 12,
+      // Disabled deliberately: `FeatherAgent` owns the only silence clock, so the deadline is the
+      // control plane's number rather than the SDK's, and the strike that closes a dead call can
+      // actually be reached. See `FeatherAgent`'s silence-clock note.
+      userAwayTimeout: null,
       aecWarmupDuration: 3000,
     });
 
@@ -237,6 +240,7 @@ export default defineAgent({
     session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev) => {
       if (ev.oldState === "speaking" && ev.newState !== "speaking") pausedAtMs = Date.now();
       if (ev.newState === "speaking") pausedAtMs = null;
+      agent.noteAgentListening(ev.newState === "listening");
     });
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (ev) => {
       // `_activity` is the SDK's own seam for tightly-coupled internals; if it or its timer is gone,
@@ -255,7 +259,7 @@ export default defineAgent({
       agent.onResumed(pausedFor);
     });
     session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev) => {
-      if (ev.newState === "away") void agent.onSilence();
+      agent.noteUserListening(ev.newState === "listening");
     });
     session.on(voice.AgentSessionEventTypes.MetricsCollected, (ev) => {
       const m = ev.metrics as Record<string, unknown>;

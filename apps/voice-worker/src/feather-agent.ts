@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { type llm, voice } from "@livekit/agents";
 import type { TurnFrame } from "@feather-lite/contracts";
-import { safeFallback } from "@feather-lite/domain";
+import { safeFallback, SILENCE_WINDOW_MS } from "@feather-lite/domain";
 import type { ControlPlaneClient } from "./control-plane-client.js";
 
 export interface FeatherAgentDeps {
@@ -108,10 +108,59 @@ export class FeatherAgent extends voice.Agent {
     await this.deps.client.signal(this.deps.conversationId, { kind: "opening_played", text: this.deps.openingText }).catch((e) => this.deps.log("opening_played signal failed", { error: String(e) }));
   }
 
+  /**
+   * The call's only silence clock. The SDK's `userAwayTimeout` is disabled, because it fires once
+   * and then wedges — `_updateUserState` returns early on an unchanged state and only a final
+   * transcript leaves `away` — so the strike that closes a dead call would never arrive. Two clocks
+   * cannot share the job either: each firing increments a strike, and the second strike hangs up.
+   *
+   * The window is whatever the control plane last sent, so a borrower who asked for a moment gets
+   * the moment they asked for and nobody else waits any longer for it.
+   */
+  private silenceTimer: NodeJS.Timeout | null = null;
+  private silenceWindowMs: number = SILENCE_WINDOW_MS;
+  private agentListening = false;
+  private userListening = true;
+
+  setSilenceWindow(ms: number): void {
+    if (!Number.isFinite(ms) || ms <= 0) return;
+    this.silenceWindowMs = ms;
+    this.refreshSilenceClock();
+  }
+
+  noteAgentListening(listening: boolean): void {
+    this.agentListening = listening;
+    this.refreshSilenceClock();
+  }
+
+  noteUserListening(listening: boolean): void {
+    this.userListening = listening;
+    this.refreshSilenceClock();
+  }
+
+  /** Restarts the clock, which is what every one of its callers means. */
+  private refreshSilenceClock(): void {
+    this.cancelSilenceClock();
+    if (this.endRequested || !this.agentListening || !this.userListening) return;
+    const windowMs = this.silenceWindowMs;
+    this.silenceTimer = setTimeout(() => {
+      this.silenceTimer = null;
+      this.deps.log("silence clock fired", { windowMs });
+      void this.onSilence();
+    }, windowMs);
+  }
+
+  private cancelSilenceClock(): void {
+    if (this.silenceTimer === null) return;
+    clearTimeout(this.silenceTimer);
+    this.silenceTimer = null;
+  }
+
   async onSilence(): Promise<void> {
     if (this.endRequested) return;
     try {
       const r = await this.deps.client.noInput(this.deps.conversationId);
+      if (r.extend_away_ms !== undefined) this.silenceWindowMs = r.extend_away_ms;
       const handle = this.session.say(r.agent_text, { allowInterruptions: !r.end_call });
       if (r.end_call) {
         await handle.waitForPlayout();
@@ -119,6 +168,8 @@ export class FeatherAgent extends voice.Agent {
       }
     } catch (e) {
       this.deps.log("no_input failed", { error: String(e) });
+      // Re-armed, or one failed probe would leave the call with no silence deadline at all.
+      this.refreshSilenceClock();
     }
   }
 
@@ -248,6 +299,7 @@ export class FeatherAgent extends voice.Agent {
   async endCall(reason: string): Promise<void> {
     if (this.endRequested) return;
     this.endRequested = true;
+    this.cancelSilenceClock();
     await Promise.allSettled(this.pendingSays);
     // The last turn of the call has no next turn to report it.
     if (this.currentTurnId) await this.reportTurnPlayout(this.currentTurnId);
@@ -309,13 +361,14 @@ export class FeatherAgent extends voice.Agent {
         this.trackSay(handle.waitForPlayout());
       },
       (end) => {
-        this.deps.log("turn_end", { turnId, state: end.new_state, tool: end.tool_called?.name ?? null, outcome: end.outcome, endCall: end.end_call, ttftMs: end.ttft_ms });
+        this.deps.log("turn_end", { turnId, state: end.new_state, tool: end.tool_called?.name ?? null, outcome: end.outcome, endCall: end.end_call, ttftMs: end.ttft_ms, extendAwayMs: end.extend_away_ms ?? null });
         if (end.bias_terms !== undefined) {
           // Sent once, on the turn that verified the borrower: the control plane will not repeat it,
           // because applying it re-opens the STT socket.
           this.deps.log("biasing recogniser", { keyterms: end.bias_terms.keyterms.length, keywords: end.bias_terms.keywords.length });
           this.deps.biasRecogniser?.(end.bias_terms);
         }
+        if (end.extend_away_ms !== undefined) this.setSilenceWindow(end.extend_away_ms);
         if (end.end_call) void this.endCall(end.outcome ?? "completed");
       },
       (err) => {

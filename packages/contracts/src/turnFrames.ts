@@ -55,10 +55,12 @@ export const TurnEndFrame = Schema.Struct({
   /** Milliseconds from turn start to first emitted text (decision TTFT). */
   ttft_ms: Schema.NullOr(Schema.Number),
   /**
-   * On a `wait`, how much longer to hold off the no-input strike (issue #1, D1).
+   * How long to wait for the borrower before the next no-input strike, in milliseconds (issue #1,
+   * D1). Sent on every turn: it is the only clock the worker arms, so a turn that omitted it would
+   * leave the call with no silence deadline at all.
    *
-   * The agent said nothing on purpose, so without this the silence the borrower asked for looks
-   * exactly like a borrower who has walked away. Absent on every other turn.
+   * A `wait` carries a window sized to what the borrower asked for, because the agent said nothing
+   * on purpose and that silence must not read as a borrower who has walked away.
    */
   extend_away_ms: Schema.optional(Schema.Number),
   /**

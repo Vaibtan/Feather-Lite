@@ -298,14 +298,14 @@ export const ConversationsLive = HttpApiBuilder.group(FeatherApi, "conversations
       )
       .handle("signal", ({ path, payload }) =>
         orch.processSignal(path.id, toSignal(payload)).pipe(
-          Effect.map((r) => ({ agent_text: r.agentText, new_state: r.newState, call_control_action: r.callControlAction, outcome: r.outcome, end_call: r.endCall })),
+          Effect.map((r) => ({ agent_text: r.agentText, new_state: r.newState, call_control_action: r.callControlAction, outcome: r.outcome, end_call: r.endCall, ...(r.extendAwayMs === undefined ? {} : { extend_away_ms: r.extendAwayMs }) })),
           Effect.catchTags({ NotFound: (e) => Effect.fail(mapNotFound(e)), ConversationCompleted: (e) => Effect.fail(mapConflict(e)) }),
           Effect.orDie,
         ),
       )
       .handle("noInput", ({ path }) =>
         orch.processNoInput(path.id).pipe(
-          Effect.map((r) => ({ agent_text: r.agentText, new_state: r.newState, call_control_action: r.callControlAction, outcome: r.outcome, end_call: r.endCall })),
+          Effect.map((r) => ({ agent_text: r.agentText, new_state: r.newState, call_control_action: r.callControlAction, outcome: r.outcome, end_call: r.endCall, ...(r.extendAwayMs === undefined ? {} : { extend_away_ms: r.extendAwayMs }) })),
           Effect.catchTags({ NotFound: (e) => Effect.fail(mapNotFound(e)), ConversationCompleted: (e) => Effect.fail(mapConflict(e)) }),
           Effect.orDie,
         ),

@@ -27,5 +27,6 @@ export * from "./biasTerms.js";
 export * from "./entityError.js";
 export * from "./holdPolicy.js";
 export * from "./holdRequest.js";
+export * from "./waitPolicy.js";
 export * from "./speechWindows.js";
 export * from "./redact.js";

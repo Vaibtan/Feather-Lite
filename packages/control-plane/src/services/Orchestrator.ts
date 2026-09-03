@@ -3,7 +3,7 @@
  *
  *   held    wait out a non-interruptible segment the worker has not yet reported played
  *   T1 (tx) lock, reject completed / concurrent, CAS active_turn_id, append USER_TURN_FINAL
- *   wait    the borrower asked for a moment: no reply, extend the silence budget, done
+ *   wait    the borrower asked for a moment: no reply, size the silence window, done
  *   decide  no tx; deterministic overrides first, else the TurnDecider streams deltas
  *   T2 (tx) verify still active, validate transition + tool, execute, append, finalize, release
  *   emit    `say` segments and `turn_end`, only after commit
@@ -43,6 +43,9 @@ import {
   triggerFor,
   visibleContext,
   voicemailScript,
+  waitWindowMs,
+  NUDGE_WINDOW_MS,
+  SILENCE_WINDOW_MS,
 } from "@feather-lite/domain";
 import type { TurnFrame } from "@feather-lite/contracts";
 import { AppConfig } from "../config.js";
@@ -60,9 +63,6 @@ import { ToolExecutor, type SaySegment } from "./ToolExecutor.js";
 import { CallFinalizer } from "./CallFinalizer.js";
 import { TurnDecider } from "./TurnDecider.js";
 import type { DeciderInput, TurnDecisionSource, TurnResult } from "./types.js";
-
-/** Bounded and granted once: long enough to find a card, short enough to notice a walk-away. */
-export const WAIT_EXTEND_MS = 15_000;
 
 export interface TurnParams {
   readonly conversationId: string;
@@ -185,6 +185,10 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
               },
               nowDate,
             );
+            // The strikes are consecutive, which is what `POLICY.noInputStrikes` counts: a borrower
+            // who answers has not gone away, and a cumulative count would close the call on the
+            // first pause after any earlier nudge.
+            if (row.noInputCount > 0) yield* conv.updateConversation(row.id, { noInputCount: 0 });
             const ctx = yield* ctxBuilder.forConversation(row, startedAt);
             const events = yield* conv.listEvents(row.id);
             return { replay: null, row, ctx, events, attach: false as const };
@@ -203,7 +207,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
         if (t1.replay) {
           const r = t1.replay;
           yield* emit({ type: "turn_start", turn_id: params.turnId, state: t1.row.currentState });
-          yield* emit({ type: "turn_end", turn_id: params.turnId, new_state: r.newState, agent_text: r.agentText, tool_called: r.toolCalled ? { name: r.toolCalled.name, args: r.toolCalled.args } : null, call_control_action: r.callControlAction, outcome: r.outcome, end_call: r.endCall, degraded: r.degraded, ttft_ms: r.ttftMs });
+          yield* emit({ type: "turn_end", turn_id: params.turnId, new_state: r.newState, agent_text: r.agentText, tool_called: r.toolCalled ? { name: r.toolCalled.name, args: r.toolCalled.args } : null, call_control_action: r.callControlAction, outcome: r.outcome, end_call: r.endCall, degraded: r.degraded, ttft_ms: r.ttftMs, extend_away_ms: r.extendAwayMs ?? SILENCE_WINDOW_MS });
           return r;
         }
         const row = t1.row;
@@ -212,9 +216,11 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
         yield* emit({ type: "turn_start", turn_id: params.turnId, state });
 
         // A second consecutive hold is answered, or a borrower could park the call indefinitely one
-        // "one second" at a time while the away timer kept extending.
-        if (holdRequest(params.userText) && (yield* conv.lastDisposition(row.id, params.turnId)) !== "wait") {
+        // "one second" at a time, each buying a fresh silence window.
+        const hold = holdRequest(params.userText);
+        if (hold !== null && (yield* conv.lastDisposition(row.id, params.turnId)) !== "wait") {
           const at = DateTime.toDateUtc(yield* DateTime.now);
+          const waitMs = waitWindowMs(hold.kind);
           const waited: TurnResult = {
             turnId: params.turnId,
             decider: "none",
@@ -228,7 +234,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
             endCall: false,
             degraded: false,
             ttftMs: null,
-            extendAwayMs: WAIT_EXTEND_MS,
+            extendAwayMs: waitMs,
           };
           yield* conv.finishTurn({ conversationId: row.id, turnId: params.turnId, status: "DONE", result: waited as unknown as Record<string, unknown>, finishedAt: at });
           yield* conv.releaseTurn(row.id, params.turnId);
@@ -243,7 +249,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
             end_call: false,
             degraded: false,
             ttft_ms: null,
-            extend_away_ms: WAIT_EXTEND_MS,
+            extend_away_ms: waitMs,
           });
           return waited;
         }
@@ -557,6 +563,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           end_call: r.endCall,
           degraded: r.degraded,
           ttft_ms: r.ttftMs,
+          extend_away_ms: r.extendAwayMs ?? SILENCE_WINDOW_MS,
           ...(t2.bias === null
             ? {}
             : {
@@ -598,7 +605,9 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
             return { turnId: `no-input-${strike}`, decider: "none", disposition: "respond", resolution: "none", agentText: text, newState: "COMPLETED", toolCalled: null, callControlAction: { action: "NO_INPUT_CLOSE", action_id: logged.action_id }, outcome: "NO_ANSWER", endCall: true, degraded: false, ttftMs: null } satisfies TurnResult;
           }
           yield* append(row.id, { type: "AGENT_TURN", payload: { text, state: row.currentState, speak_mode: "interruptible" } }, at);
-          return { turnId: `no-input-${strike}`, decider: "none", disposition: "respond", resolution: "none", agentText: text, newState: row.currentState, toolCalled: null, callControlAction: null, outcome: null, endCall: false, degraded: false, ttftMs: null } satisfies TurnResult;
+          // The nudge carries the deadline for its own answer: the worker's clock is armed from this
+          // and nothing else, so without it the strike that closes the attempt would never come.
+          return { turnId: `no-input-${strike}`, decider: "none", disposition: "respond", resolution: "none", agentText: text, newState: row.currentState, toolCalled: null, callControlAction: null, outcome: null, endCall: false, degraded: false, ttftMs: null, extendAwayMs: NUDGE_WINDOW_MS } satisfies TurnResult;
         }),
       ).pipe(Effect.tap(finalizeTracingIfEnded(conversationId)), Effect.annotateLogs({ conversation_id: conversationId, path: "no_input" }));
 

@@ -5,10 +5,10 @@
  * functions with table tests, so their lexicons are reviewable and their misses are reproducible.
  *
  * The judgement this makes is narrow on purpose. A `wait` means the control plane says **nothing**
- * and extends the away timer, so a false positive drops whatever the borrower actually said. The
- * near-miss that decides the design is "hold on, I can pay Friday": it opens with a hold phrase and
- * carries a payment offer, and treating it as a hold would swallow the offer. So a hold is a hold
- * phrase **and nothing after it that carries content**.
+ * and the borrower is given a silence window, so a false positive drops whatever the borrower
+ * actually said. The near-miss that decides the design is "hold on, I can pay Friday": it opens
+ * with a hold phrase and carries a payment offer, and treating it as a hold would swallow the
+ * offer. So a hold is a hold phrase **and nothing after it that carries content**.
  */
 
 /** The phrases themselves. Kept as data so the lexicon is the reviewable artefact. */
@@ -41,6 +41,11 @@ const HOLD_PHRASES = [
  *
  * "hold on a second", "wait a moment", "let me go get my card" — the trailing words are about the
  * waiting, not about the account. Anything outside this set is content, and content means respond.
+ *
+ * The discourse markers ("actually", "oh", "hmm", "right", "well", "so") earn their place at the
+ * front: "Actually, wait." is the split-line fragment the fleet gate answered instead of waiting
+ * out. They are safe in the tail too, because anything that makes such a line an objection —
+ * "actually, that's the wrong amount" — still carries a content word that rejects it.
  */
 const FILLER = new Set([
   "a",
@@ -58,6 +63,10 @@ const FILLER = new Set([
   "er",
   "well",
   "so",
+  "actually",
+  "oh",
+  "hmm",
+  "right",
   "and",
   "second",
   "seconds",
@@ -94,6 +103,23 @@ const FILLER = new Set([
   "let",
 ]);
 
+/**
+ * The words that say the borrower is going away to do something, rather than just asking for a
+ * beat. They decide how long the silence lasts, not whether it happens: a borrower walking to a
+ * wallet must not be nudged at five seconds, and a bare "wait" should not buy fifteen.
+ *
+ * "minute" counts: a borrower who asked for a minute asked for longer than a beat.
+ */
+const ERRAND = new Set(["go", "get", "grab", "find", "check", "look", "card", "wallet", "purse", "phone", "glasses", "pen", "paper", "calendar", "minute", "minutes"]);
+
+export type HoldKind = "bare" | "errand";
+
+export interface HoldRequest {
+  /** The hold phrase that matched, with any leading filler removed. */
+  readonly phrase: string;
+  readonly kind: HoldKind;
+}
+
 /** Lower-case, strip punctuation, collapse whitespace. The same normalisation the tests read. */
 const normalise = (text: string): string =>
   text
@@ -102,9 +128,9 @@ const normalise = (text: string): string =>
     .replace(/\s+/g, " ")
     .trim();
 
-export const holdRequest = (text: string): boolean => {
+export const holdRequest = (text: string): HoldRequest | null => {
   const normalised = normalise(text);
-  if (normalised.length === 0) return false;
+  if (normalised.length === 0) return null;
 
   // Leading filler ("um, hold on") is not content and must not stop the phrase from matching.
   const words = normalised.split(" ");
@@ -113,7 +139,7 @@ export const holdRequest = (text: string): boolean => {
   const rest = words.slice(start).join(" ");
 
   const phrase = HOLD_PHRASES.find((p) => rest === p || rest.startsWith(`${p} `));
-  if (phrase === undefined) return false;
+  if (phrase === undefined) return null;
 
   /**
    * Everything after the phrase must be filler. This is the whole guard: "hold on" is a hold,
@@ -121,8 +147,10 @@ export const holdRequest = (text: string): boolean => {
    * reach the decider.
    */
   const tail = rest.slice(phrase.length).trim();
-  if (tail.length === 0) return true;
-  return tail.split(" ").every((w) => FILLER.has(w));
+  if (tail.length > 0 && !tail.split(" ").every((w) => FILLER.has(w))) return null;
+
+  const kind: HoldKind = rest.split(" ").some((w) => ERRAND.has(w)) ? "errand" : "bare";
+  return { phrase, kind };
 };
 
 /** Character offset of the `i`th word in the normalised string. */

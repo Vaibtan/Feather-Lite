@@ -37,6 +37,8 @@ export interface RuntimeResult {
   readonly call_control_action: { action: string; action_id: string } | null;
   readonly outcome: string | null;
   readonly end_call: boolean;
+  /** When to next check for silence, in milliseconds. Absent on a reply that ends the call. */
+  readonly extend_away_ms?: number;
 }
 
 export class ControlPlaneClient {

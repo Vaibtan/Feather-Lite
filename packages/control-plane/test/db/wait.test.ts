@@ -1,7 +1,7 @@
 import { Effect, Layer, Stream } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { decision } from "@feather-lite/domain";
+import { decision, WAIT_WINDOW_BARE_MS, WAIT_WINDOW_ERRAND_MS } from "@feather-lite/domain";
 import { ConversationRepo, IdGen, Orchestrator, StaticTurnDeciderLive, WorkflowService, FROZEN_NOW } from "../../src/index.js";
 import { makeInfraLayer, makeRuntime, truncateAll } from "./harness.js";
 
@@ -59,11 +59,29 @@ describe("a borrower asking for a moment", () => {
     );
     expect(out.result["disposition"]).toBe("wait");
     expect(out.r.agentText).toBe("");
-    expect(out.r.extendAwayMs).toBeGreaterThan(0);
+    expect(out.r.extendAwayMs).toBe(WAIT_WINDOW_ERRAND_MS);
     expect(deciderCalls).toBe(before);
     expect(out.events.some((e) => e.type === "USER_TURN_FINAL")).toBe(true);
     // Scoped to this turn's id because the call's opening line is already in the ledger.
     expect(out.events.some((e) => e.type === "AGENT_TURN" && e.payload.turn_id === "w1")).toBe(false);
+  });
+
+  /**
+   * The fleet gate's failure: the STT split "Actually, wait. I can pay 550 dollars on Friday." and
+   * the fragment landed as a turn of its own, which the decider read as declining the plan.
+   */
+  it("waits out a bare fragment, and only for a beat", async () => {
+    const out = await rt.runPromise(
+      Effect.gen(function* () {
+        const started = yield* startCall;
+        const orch = yield* Orchestrator;
+        const r = yield* orch.processTurn({ conversationId: started.conversationId, turnId: "w1", userText: "Actually, wait." }, () => Effect.void);
+        return { r, result: yield* resultOf(started.conversationId, "w1") };
+      }),
+    );
+    expect(out.result["disposition"]).toBe("wait");
+    expect(out.r.agentText).toBe("");
+    expect(out.r.extendAwayMs).toBe(WAIT_WINDOW_BARE_MS);
   });
 
   it("answers the second consecutive hold, so a borrower cannot park the call indefinitely", async () => {
@@ -102,5 +120,42 @@ describe("a borrower asking for a moment", () => {
       }),
     );
     expect(out["disposition"]).toBe("respond");
+  });
+});
+
+/**
+ * Only reachable now that the worker re-arms its own clock: the SDK's away timer fired once per
+ * call, so a second strike never followed a first and the count was never observed to accumulate.
+ */
+describe("no-input strikes", () => {
+  it("counts consecutively, so a borrower who answers does not carry a strike", async () => {
+    const out = await rt.runPromise(
+      Effect.gen(function* () {
+        const started = yield* startCall;
+        const orch = yield* Orchestrator;
+        const first = yield* orch.processNoInput(started.conversationId);
+        yield* orch.processTurn({ conversationId: started.conversationId, turnId: "n1", userText: "yes this is Jordan" }, () => Effect.void);
+        const afterAnswer = yield* orch.processNoInput(started.conversationId);
+        return { first, afterAnswer };
+      }),
+    );
+    expect(out.first.endCall).toBe(false);
+    expect(out.first.agentText).toMatch(/still there/);
+    // A cumulative count would make this the closing strike.
+    expect(out.afterAnswer.endCall).toBe(false);
+    expect(out.afterAnswer.agentText).toMatch(/still there/);
+  });
+
+  it("closes the attempt when the strikes really are consecutive", async () => {
+    const out = await rt.runPromise(
+      Effect.gen(function* () {
+        const started = yield* startCall;
+        const orch = yield* Orchestrator;
+        yield* orch.processNoInput(started.conversationId);
+        return yield* orch.processNoInput(started.conversationId);
+      }),
+    );
+    expect(out.endCall).toBe(true);
+    expect(out.outcome).toBe("NO_ANSWER");
   });
 });

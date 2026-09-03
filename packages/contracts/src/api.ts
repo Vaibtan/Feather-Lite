@@ -201,6 +201,8 @@ export const RuntimeResult = Schema.Struct({
   call_control_action: Schema.NullOr(Schema.Struct({ action: CallControlAction, action_id: Schema.String })),
   outcome: Schema.NullOr(Outcome),
   end_call: Schema.Boolean,
+  /** When to next check for silence, in milliseconds. The same meaning as on `TurnEndFrame`. */
+  extend_away_ms: Schema.optional(Schema.Number),
 });
 
 export const ScenarioSummary = Schema.Struct({ scenario_id: Schema.String, description: Schema.String });
