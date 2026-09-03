@@ -1,19 +1,14 @@
 /**
- * The conversation orchestrator — "state machine is the enforcer, the model is the
- * conversationalist" (PRD §5.2.3), implemented as the three-phase turn from plan rev.2 R4:
+ * The conversation orchestrator: the state machine enforces, the model converses. A turn is
  *
- *   T1  (tx)  lock conversation, reject completed / concurrent turn, CAS active_turn_id,
- *             append USER_TURN_FINAL (+ AGENT_TURN_PLAYOUT if reported), commit.
- *   decide    NO transaction. Deterministic overrides first; else the TurnDecider streams.
- *             Text deltas are forwarded to the caller immediately (chat mode).
- *   T2  (tx)  lock, verify still the active turn, validate transition + tool against the
- *             state machine, execute tool (idempotent), append TOOL_CALLED / TOOL_RESULT /
- *             STATE_TRANSITION / AGENT_TURN, finalize if terminal (+outbox), release the turn, commit.
- *   emit      deterministic `say` segments (read-backs, confirmations) and `turn_end` —
- *             only after commit (durable-before-claim).
+ *   held    wait out a non-interruptible segment the worker has not yet reported played
+ *   T1 (tx) lock, reject completed / concurrent, CAS active_turn_id, append USER_TURN_FINAL
+ *   wait    the borrower asked for a moment: no reply, extend the silence budget, done
+ *   decide  no tx; deterministic overrides first, else the TurnDecider streams deltas
+ *   T2 (tx) verify still active, validate transition + tool, execute, append, finalize, release
+ *   emit    `say` segments and `turn_end`, only after commit
  *
- * `processSignal` (AMD / hangup / no-answer / barge-in / playout) and `processNoInput`
- * are single-transaction runtime paths on the same event log.
+ * `processSignal` and `processNoInput` are single-transaction paths on the same ledger.
  */
 import { DateTime, Duration, Effect, Either, Option, Stream } from "effect";
 import { PgClient } from "@effect/sql-pg";

@@ -144,14 +144,9 @@ export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/Turn
     const claimed = new Map<string, { conversationId: string; turnId: string; fiber: Fiber.RuntimeFiber<unknown, unknown> | null }>();
 
     /**
-     * On shutdown: give the turns in flight a moment to finish on their own, then release whatever
-     * is left (C10).
-     *
-     * The wait is what makes the release safe. A turn that finishes normally releases its own
-     * `active_turn_id` in T2, so anything still held after the drain is a turn that will not commit
-     * — and leaving that set is worse than clearing it, because on a `simulated` call nothing else
-     * ever will. Three seconds is longer than a turn's ordinary tail and short enough not to hold a
-     * container's SIGTERM window open.
+     * On shutdown, interrupt every claimed turn and release its slot. There is no grace wait: a turn
+     * that was going to commit already released itself in T2, and anything still claimed would
+     * otherwise hold `active_turn_id` forever on a simulated call.
      */
     const releaseClaimedAtShutdown: Effect.Effect<void> = Effect.gen(function* () {
       if (claimed.size === 0) return;

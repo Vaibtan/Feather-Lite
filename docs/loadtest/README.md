@@ -14,7 +14,8 @@ final ledger matches the `happy-path-promise-to-pay` simulation scenario — sam
 tool sequence, same outcome. The reference is produced by running that scenario through the same
 API on the same box, so the assertion tracks the scenario suite instead of a constant in a script.
 
-Since 2026-08-27 the tier-2 run has a **second** gate: word error rate (`--max-wer`, default 0.20).
+Since 2026-08-27 the tier-2 run has a **second** gate: word error rate (`--max-wer`, default 0.20),
+and since 2026-09-02 a third: amount entity errors (`--max-amount-errors`, default 0; see the D3 section).
 Equivalence is correctness and WER is transcription quality, and a run that stayed correct only
 because the scripted borrower's words happened to survive mangling is not a pass. The report also
 carries TTS heuristics — silent playouts, TTS first-byte percentiles, characters-per-second
