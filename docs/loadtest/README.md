@@ -1727,3 +1727,26 @@ no-input strikes closed the attempt, and the ledger says `NO_ANSWER` — which i
 happened. Equivalence with the simulation is lost, but the system failed in the safe direction: a
 degraded call produces no promise rather than an unconfirmed one. A harness that only counted
 "did it finish" would have scored this a pass.
+
+## 2026-09-03 — the cleanup tree's N=5 gate, twice
+
+Run after the cleanup commits (`bc60a75..12ac409`: dead surface deleted, one silent-playout
+predicate, comments cut to a third, orchestrator split into `ToolExecutor` and `CallFinalizer`).
+`stack:quiet` green, Langfuse down, TTS timeouts 0 in both runs, Firefox resident at ~7 GB.
+
+| run | equivalent | silent | WER p50/p95 | failure |
+|---|---:|---:|---:|---|
+| `cleanup-gate` | 4/5 | 0/14 | 0 / 0 | call01: "Actually, wait." arrived as its own late final during the read-back → `USER_DECLINED`, the "yes" landed with no proposal, FAILED |
+| `cleanup-gate-2` | 4/5 | 0/15 | 0 / 0 | call03: the payment half arrived first, a late "Actually, wait." final superseded it 6 ms later → no proposal, NO_ANSWER |
+
+Both are the same defect, already recorded above: Deepgram splits the borrower's two-clause
+barge-in line and the worker logs `transcript arrives after turn has been committed`. It is
+independent of the cleanup (no non-comment line changed in the worker; the new services made the
+proposal, the decline transition and the finalisation correctly). Two things for the next session:
+
+- `holdRequest` does not classify "Actually, wait." as a hold because `actually` is not in its
+  filler list, so the fragment is answered instead of waited out. Adding it would turn the first
+  failure into a D1 `wait` and give the second half a turn to land.
+- The read-back's playout report was booked to the *next* turn in `cleanup-gate` call01 (event 19
+  carries turn `db3d…` with the read-back's text), the attribution race the worker's
+  `reportTurnPlayout` ordering exists to prevent. Worth a look before Phase 2 is called closed.
