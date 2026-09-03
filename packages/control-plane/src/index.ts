@@ -17,6 +17,8 @@ export * from "./services/CallControl.js";
 export * from "./services/Workflow.js";
 export * from "./services/Scheduling.js";
 export * from "./services/Outbox.js";
+export * from "./services/ToolExecutor.js";
+export * from "./services/CallFinalizer.js";
 export * from "./services/Orchestrator.js";
 export * from "./services/Queries.js";
 export * from "./services/Scores.js";

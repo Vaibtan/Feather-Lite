@@ -13,7 +13,6 @@
 import { DateTime, Duration, Effect, Either, Option, Stream } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import type {
-  CallAttemptStatus,
   CallControlAction,
   ConversationState,
   EventRecord,
@@ -22,46 +21,33 @@ import type {
   ToolCall,
   ToolName,
   TurnDecision,
-  WorkflowExecutionStatus,
 } from "@feather-lite/domain";
 import {
   buildTranscript,
-  callbackScheduledConfirmation,
-  closingPath,
   disputeClose,
   forcedTransition,
   hardshipClose,
   holdForTransfer,
   matchOverride,
-  NO_PENDING_PROPOSAL_DETAIL,
   noInputPrompt,
-  optOutConfirmation,
   NEVER_SERVED_REASON,
   ORPHANED_REASON,
   biasTermsFor,
   holdRequest,
   overrideTransition,
   POLICY,
-  promiseReadback,
-  promiseRecordedConfirmation,
-  READBACK_INTERRUPTED_DETAIL,
-  READBACK_UNCONFIRMED_DETAIL,
   replay,
   safeFallback,
-  thirdPartyClose,
   toolsForState,
   transition,
   triggerFor,
-  validateToolCall,
   visibleContext,
   voicemailScript,
-  wrongNumberClose,
 } from "@feather-lite/domain";
 import type { TurnFrame } from "@feather-lite/contracts";
-import { spokenIsoDate, spokenMoney } from "@feather-lite/domain";
 import { AppConfig } from "../config.js";
 import { ConversationCompleted, NotFound, TurnInProgress, TurnSuperseded } from "../errors.js";
-import type { ConversationRow, PendingProposalJson } from "../db/rows.js";
+import type { PendingProposalJson } from "../db/rows.js";
 import { ConversationRepo } from "../repos/conversation.js";
 import { CrmRepo } from "../repos/crm.js";
 import { CallControl } from "./CallControl.js";
@@ -70,6 +56,8 @@ import { IdGen } from "./Ids.js";
 import { OutboxService } from "./Outbox.js";
 import { SchedulingService } from "./Scheduling.js";
 import { Tracing } from "./Tracing.js";
+import { ToolExecutor, type SaySegment } from "./ToolExecutor.js";
+import { CallFinalizer } from "./CallFinalizer.js";
 import { TurnDecider } from "./TurnDecider.js";
 import type { DeciderInput, TurnDecisionSource, TurnResult } from "./types.js";
 
@@ -106,44 +94,14 @@ export type Signal =
 
 export type Emit = (frame: TurnFrame) => Effect.Effect<void>;
 
-interface SaySegment {
-  readonly text: string;
-  readonly allowInterruptions: boolean;
-}
-
-/**
- * On a voice call the guard requires a playout report that positively says the read-back was
- * heard; `simulated` keeps a vacuous pass, having no playout reporter. Residual risk: the report
- * is posted fire-and-forget, so losing that race costs one repeated read-back.
- */
-type ReadBackVerdict = "heard" | "interrupted" | "unconfirmed";
-
-const readBackVerdict = (events: ReadonlyArray<EventRecord>, readBackTurnId: string | null, channel: string): ReadBackVerdict => {
-  const reported = (pred: (p: { readonly interrupted: boolean; readonly heard_text: string }) => boolean) =>
-    readBackTurnId !== null && events.some((e) => e.type === "AGENT_TURN_PLAYOUT" && e.payload.turn_id === readBackTurnId && pred(e.payload));
-  if (reported((p) => p.interrupted)) return "interrupted";
-  if (reported((p) => p.heard_text.trim().length > 0)) return "heard";
-  return channel === "voice" ? "unconfirmed" : "heard";
-};
-
-const unheardDetail = (v: ReadBackVerdict): string => (v === "interrupted" ? READBACK_INTERRUPTED_DETAIL : READBACK_UNCONFIRMED_DETAIL);
-
 /** Ten seconds: longer than any turn measured here, short of leaving a borrower on a silent line. */
 const SAME_TURN_ATTACH_MS = 10_000;
 const SAME_TURN_ATTACH_POLL_MS = 100;
-
-const attemptStatusFor = (o: Outcome): CallAttemptStatus =>
-  o === "NO_ANSWER" ? "NO_ANSWER" : o === "VOICEMAIL_LEFT" ? "VOICEMAIL" : o === "FAILED" ? "FAILED" : "COMPLETED";
-const workflowStatusFor = (o: Outcome): WorkflowExecutionStatus =>
-  o === "CALLBACK_SCHEDULED" || o === "NO_ANSWER" || o === "VOICEMAIL_LEFT" || o === "THIRD_PARTY_CONTACT" || o === "FAILED" ? "RUNNING" : "COMPLETED";
 
 const toDomainProposal = (p: PendingProposalJson | null): PendingProposal | null =>
   p === null
     ? null
     : { kind: "PROMISE_TO_PAY", amount: p.amount as never, date: p.date as never, proposedAtSeq: p.proposed_at_seq, readBackAtSeq: null };
-
-const derivedToolCallId = (turnId: string, call: ToolCall): string =>
-  `${turnId}:${call.name}:${JSON.stringify(call.args)}`.slice(0, 200);
 
 export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/Orchestrator", {
   effect: Effect.gen(function* () {
@@ -158,6 +116,8 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
     const outbox = yield* OutboxService;
     const decider = yield* TurnDecider;
     const tracing = yield* Tracing;
+    const tools = yield* ToolExecutor;
+    const finalizer = yield* CallFinalizer;
 
     const append = (conversationId: string, event: EventRecord extends infer _ ? Parameters<typeof conv.appendEvent>[0]["event"] : never, at: Date) =>
       Effect.gen(function* () {
@@ -168,268 +128,6 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
       conv.lockConversation(conversationId).pipe(
         Effect.flatMap(Option.match({ onNone: () => Effect.fail(new NotFound({ entity: "conversation", id: conversationId })), onSome: Effect.succeed })),
       );
-
-    const applyTransitions = (
-      row: ConversationRow,
-      edges: ReadonlyArray<{ readonly from: ConversationState; readonly to: ConversationState; readonly triggeredBy: Parameters<typeof triggerFor>[2] | "forced" | "outcome" | "ended"; readonly matched?: string }>,
-      at: Date,
-    ) =>
-      Effect.gen(function* () {
-        let current = row.currentState;
-        for (const e of edges) {
-          const triggered_by =
-            e.triggeredBy === "forced"
-              ? "AMD"
-              : e.triggeredBy === "outcome"
-                ? "OUTCOME_COMMITTED"
-                : e.triggeredBy === "ended"
-                  ? "CALL_ENDED"
-                  : triggerFor(e.from, e.to, e.triggeredBy);
-          yield* append(row.id, { type: "STATE_TRANSITION", payload: { from: e.from, to: e.to, triggered_by, ...(e.matched ? { matched: e.matched } : {}) } }, at);
-          current = e.to;
-        }
-        if (current !== row.currentState) yield* conv.updateConversation(row.id, { currentState: current });
-        return current;
-      });
-
-    /** Must run inside the caller's transaction with the row locked. */
-    const finalize = (params: {
-      row: ConversationRow;
-      ctx: ConversationContext;
-      currentState: ConversationState;
-      outcome: Outcome;
-      metadata: Record<string, unknown>;
-      at: Date;
-    }) =>
-      Effect.gen(function* () {
-        const { row, ctx, outcome, at } = params;
-        const path = closingPath(params.currentState);
-        for (const [from, to] of path) {
-          yield* append(row.id, { type: "STATE_TRANSITION", payload: { from, to, triggered_by: to === "COMPLETED" ? "CALL_ENDED" : "OUTCOME_COMMITTED" } }, at);
-        }
-        yield* append(row.id, { type: "CALL_ENDED", payload: { final_outcome: outcome } }, at);
-        yield* conv.updateConversation(row.id, {
-          currentState: "COMPLETED",
-          finalOutcome: outcome,
-          finalOutcomeMetadata: { ...row.finalOutcomeMetadata, ...params.metadata },
-          endedAt: at,
-        });
-        yield* conv.setAttemptStatus(row.callAttemptId, attemptStatusFor(outcome), at);
-        yield* conv.setWorkflowStatus(ctx.workflowExecutionId, workflowStatusFor(outcome));
-
-        // A call that only ever existed as a browser tab has no number to re-dial, so it must not
-        // schedule a RETRY_CALL; a null `origin` is not treated as browser-originated.
-        const noLegToRedial = row.channel === "voice" && row.origin === "browser";
-        if (noLegToRedial && (outcome === "NO_ANSWER" || outcome === "THIRD_PARTY_CONTACT" || outcome === "FAILED")) {
-          yield* Effect.logDebug("no re-dial scheduled: the call was browser-originated and has no outbound leg").pipe(
-            Effect.annotateLogs({ conversation_id: row.id, outcome }),
-          );
-        }
-        if (!noLegToRedial && (outcome === "NO_ANSWER" || outcome === "THIRD_PARTY_CONTACT" || outcome === "FAILED")) {
-          yield* scheduling.createRetry({
-            workflowExecutionId: ctx.workflowExecutionId,
-            borrowerId: row.borrowerId,
-            contactPointId: ctx.contactPointId,
-            channel: row.channel,
-            reason: outcome.toLowerCase(),
-            now: at,
-          });
-        }
-        yield* outbox.enqueuePostCall(row.id, at);
-      });
-
-    const executeTool = (params: {
-      row: ConversationRow;
-      ctx: ConversationContext;
-      events: ReadonlyArray<EventRecord>;
-      state: ConversationState;
-      call: ToolCall;
-      turnId: string;
-      at: Date;
-    }) =>
-      Effect.gen(function* () {
-        const { row, ctx, state, call, at } = params;
-        const snapshot = replay(params.events);
-        const toolCallId = call.toolCallId ?? derivedToolCallId(params.turnId, call);
-        const says: SaySegment[] = [];
-        let nextState: ConversationState = state;
-        let outcome: Outcome | null = null;
-        let metadata: Record<string, unknown> = {};
-        let unlocked = row.protectedContextUnlocked;
-        let pendingProposal: PendingProposalJson | null | undefined = undefined; // undefined = unchanged
-        let rejected: { reason: "NOT_ALLOWED" | "INVALID_ARGS"; detail: string } | null = null;
-        let result: Record<string, unknown> = {};
-
-        if (snapshot.toolCallIds.has(toolCallId)) {
-          const prior = params.events.find((e) => e.type === "TOOL_RESULT" && e.payload.tool_call_id === toolCallId);
-          return { toolCallId, executed: false as const, duplicate: true as const, result: (prior?.type === "TOOL_RESULT" ? prior.payload.result : {}) as Record<string, unknown>, says, nextState, outcome, metadata, unlocked, pendingProposal, rejected };
-        }
-
-        const validated = validateToolCall(call, state);
-        if (Either.isLeft(validated)) {
-          rejected = { reason: validated.left._tag === "ToolNotAllowed" ? "NOT_ALLOWED" : "INVALID_ARGS", detail: validated.left.message };
-          yield* append(row.id, { type: "TOOL_REJECTED", payload: { name: call.name, tool_call_id: toolCallId, state, reason: rejected.reason, detail: rejected.detail } }, at);
-          return { toolCallId, executed: false as const, duplicate: false as const, result, says, nextState, outcome, metadata, unlocked, pendingProposal, rejected };
-        }
-        const args = validated.right as Record<string, unknown>;
-        yield* append(row.id, { type: "TOOL_CALLED", payload: { name: call.name, tool_call_id: toolCallId, args } }, at);
-
-        switch (call.name) {
-          case "lookup_contact_profile": {
-            const cp = yield* crm.findContactPoint(ctx.contactPointId);
-            result = Option.isSome(cp) ? { value: cp.value.value, is_valid: cp.value.isValid, consent_status: cp.value.consentStatus } : { found: false };
-            break;
-          }
-          case "get_account_context": {
-            result = ctx.bundle.protectedContext ? { ...ctx.bundle.protectedContext } : { found: false };
-            break;
-          }
-          case "confirm_right_party": {
-            const confirmed = Boolean(args["confirmed"]);
-            if (confirmed) {
-              unlocked = true;
-              const edges: ConversationState[] = state === "GREETING" ? ["VERIFYING_IDENTITY", "DISCUSSING_PAYMENT"] : ["DISCUSSING_PAYMENT"];
-              let from: ConversationState = state;
-              for (const to of edges) {
-                yield* append(row.id, { type: "STATE_TRANSITION", payload: { from, to, triggered_by: triggerFor(from, to, "llm") } }, at);
-                from = to;
-              }
-              nextState = "DISCUSSING_PAYMENT";
-              yield* conv.updateConversation(row.id, { protectedContextUnlocked: true, currentState: nextState });
-              result = { confirmed: true };
-              // Amounts and dates are read from the ledger, never generated by the model.
-              const pc = ctx.bundle.protectedContext;
-              says.push({
-                text: pc
-                  ? `Thank you, ${ctx.borrowerFirstName}. I'm calling about your account with a balance of ${spokenMoney(pc.balance_due)}, which was due on ${spokenIsoDate(pc.due_date)}. Are you able to make a payment, or would you like me to call you back another time?`
-                  : `Thank you, ${ctx.borrowerFirstName}. Are you able to make a payment, or would you like me to call you back another time?`,
-                allowInterruptions: true,
-              });
-            } else {
-              const edges: ConversationState[] = state === "GREETING" ? ["VERIFYING_IDENTITY", "THIRD_PARTY_OR_WRONG_PARTY"] : ["THIRD_PARTY_OR_WRONG_PARTY"];
-              let from: ConversationState = state;
-              for (const to of edges) {
-                yield* append(row.id, { type: "STATE_TRANSITION", payload: { from, to, triggered_by: "LLM_INTENT" } }, at);
-                from = to;
-              }
-              nextState = "THIRD_PARTY_OR_WRONG_PARTY";
-              yield* conv.updateConversation(row.id, { currentState: nextState });
-              outcome = "THIRD_PARTY_CONTACT";
-              metadata = { notes: String(args["reason"] ?? "not the borrower") };
-              says.push({ text: thirdPartyClose(), allowInterruptions: false });
-              result = { confirmed: false, outcome };
-            }
-            break;
-          }
-          case "propose_promise_to_pay": {
-            const proposal: PendingProposalJson = {
-              kind: "PROMISE_TO_PAY",
-              amount: String(args["amount"]),
-              date: String(args["date"]),
-              proposed_at_seq: snapshot.lastSequenceNo + 1,
-              read_back_turn_id: params.turnId,
-            };
-            pendingProposal = proposal;
-            if (state !== "CONFIRMING_OUTCOME") {
-              yield* append(row.id, { type: "STATE_TRANSITION", payload: { from: state, to: "CONFIRMING_OUTCOME", triggered_by: "PROPOSAL" } }, at);
-              nextState = "CONFIRMING_OUTCOME";
-            }
-            yield* conv.updateConversation(row.id, { currentState: nextState, pendingProposal: proposal });
-            // A "yes" spoken over the read-back commits a turn the fully-heard guard then refuses,
-            // replaying the read-back; the worker still lets those words reach the ledger.
-            says.push({ text: promiseReadback({ amount: proposal.amount, date: proposal.date }), allowInterruptions: false });
-            result = { amount: proposal.amount, date: proposal.date };
-            break;
-          }
-          case "record_promise_to_pay": {
-            const proposal = row.pendingProposal;
-            const verdict = proposal ? readBackVerdict(params.events, proposal.read_back_turn_id, row.channel) : "unconfirmed";
-            if (!proposal || verdict !== "heard") {
-              rejected = { reason: "INVALID_ARGS", detail: proposal ? unheardDetail(verdict) : NO_PENDING_PROPOSAL_DETAIL };
-              yield* append(row.id, { type: "TOOL_REJECTED", payload: { name: call.name, tool_call_id: toolCallId, state, reason: rejected.reason, detail: rejected.detail } }, at);
-              if (proposal) {
-                pendingProposal = { ...proposal, read_back_turn_id: params.turnId };
-                yield* conv.updateConversation(row.id, { pendingProposal });
-                says.push({ text: `Let me repeat that. ${promiseReadback({ amount: proposal.amount, date: proposal.date })}`, allowInterruptions: false });
-              } else {
-                says.push({ text: "I don't have a payment amount and date to record yet. What amount and date work for you?", allowInterruptions: true });
-                if (state === "CONFIRMING_OUTCOME") {
-                  yield* append(row.id, { type: "STATE_TRANSITION", payload: { from: state, to: "DISCUSSING_PAYMENT", triggered_by: "USER_DECLINED" } }, at);
-                  nextState = "DISCUSSING_PAYMENT";
-                  yield* conv.updateConversation(row.id, { currentState: nextState });
-                }
-              }
-              return { toolCallId, executed: false as const, duplicate: false as const, result, says, nextState, outcome, metadata, unlocked, pendingProposal, rejected };
-            }
-            outcome = "PROMISE_TO_PAY";
-            metadata = { promised_amount: proposal.amount, promised_date: proposal.date, notes: "confirmed by borrower after read-back" };
-            if (ctx.loanId) yield* crm.setLoanLastPromiseDate(ctx.loanId, proposal.date);
-            pendingProposal = null;
-            yield* conv.updateConversation(row.id, { pendingProposal: null });
-            says.push({ text: promiseRecordedConfirmation({ amount: proposal.amount, date: proposal.date }), allowInterruptions: false });
-            result = { promised_amount: proposal.amount, promised_date: proposal.date };
-            break;
-          }
-          case "schedule_callback": {
-            const dueAtIso = String(args["datetime"]);
-            yield* scheduling.scheduleCallback({
-              workflowExecutionId: ctx.workflowExecutionId,
-              borrowerId: row.borrowerId,
-              contactPointId: ctx.contactPointId,
-              channel: row.channel,
-              dueAt: new Date(dueAtIso),
-              reason: String(args["reason"] ?? "borrower_requested"),
-            });
-            outcome = "CALLBACK_SCHEDULED";
-            metadata = { callback_at: dueAtIso };
-            says.push({ text: callbackScheduledConfirmation({ datetime: dueAtIso, timeZone: ctx.borrowerTimeZone }), allowInterruptions: false });
-            result = { callback_at: dueAtIso };
-            break;
-          }
-          case "record_opt_out": {
-            const scope = String(args["scope"] ?? "borrower");
-            if (scope === "borrower") yield* crm.setBorrowerStatus(row.borrowerId, "OPT_OUT");
-            else yield* crm.setContactPointConsent(ctx.contactPointId, "OPTED_OUT");
-            yield* scheduling.cancelPending(ctx.workflowExecutionId, "opt_out", null);
-            outcome = "OPT_OUT";
-            metadata = { scope, reason: String(args["reason"] ?? "borrower_request") };
-            says.push({ text: optOutConfirmation(), allowInterruptions: false });
-            result = { scope };
-            break;
-          }
-          case "record_wrong_party_contact": {
-            const outcomeType = String(args["outcome_type"]);
-            if (outcomeType === "WRONG_NUMBER") {
-              yield* crm.setContactPointValidity(ctx.contactPointId, false);
-              yield* scheduling.cancelPending(ctx.workflowExecutionId, "wrong_number", ["CALLBACK", "RETRY_CALL"]);
-              outcome = "WRONG_NUMBER";
-              if (state !== "WRONG_NUMBER") {
-                yield* append(row.id, { type: "STATE_TRANSITION", payload: { from: state, to: "WRONG_NUMBER", triggered_by: "LLM_INTENT" } }, at);
-                nextState = "WRONG_NUMBER";
-              }
-              says.push({ text: wrongNumberClose(), allowInterruptions: false });
-            } else {
-              outcome = "THIRD_PARTY_CONTACT";
-              if (state !== "THIRD_PARTY_OR_WRONG_PARTY") {
-                const edges: ConversationState[] = state === "GREETING" ? ["VERIFYING_IDENTITY", "THIRD_PARTY_OR_WRONG_PARTY"] : ["THIRD_PARTY_OR_WRONG_PARTY"];
-                let from: ConversationState = state;
-                for (const to of edges) {
-                  yield* append(row.id, { type: "STATE_TRANSITION", payload: { from, to, triggered_by: "LLM_INTENT" } }, at);
-                  from = to;
-                }
-                nextState = "THIRD_PARTY_OR_WRONG_PARTY";
-              }
-              says.push({ text: thirdPartyClose(), allowInterruptions: false });
-            }
-            yield* conv.updateConversation(row.id, { currentState: nextState });
-            metadata = { notes: String(args["notes"] ?? "") };
-            result = { outcome, notes: metadata["notes"] };
-            break;
-          }
-        }
-        yield* append(row.id, { type: "TOOL_RESULT", payload: { name: call.name, tool_call_id: toolCallId, result } }, at);
-        return { toolCallId, executed: true as const, duplicate: false as const, result, says, nextState, outcome, metadata, unlocked, pendingProposal, rejected };
-      });
 
     const processTurn = (params: TurnParams, emit: Emit) =>
       Effect.gen(function* () {
@@ -640,7 +338,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
               switch (o.reason) {
                 case "OPT_OUT": {
                   const call: ToolCall = { name: "record_opt_out", args: { scope: "borrower", reason: "borrower_request" } };
-                  const r = yield* executeTool({ row: locked, ctx, events, state: "OPT_OUT", call, turnId: params.turnId, at });
+                  const r = yield* tools.execute({ row: locked, ctx, events, state: "OPT_OUT", call, turnId: params.turnId, at });
                   toolCalled = call;
                   says.push(...r.says);
                   outcome = r.outcome;
@@ -649,7 +347,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
                 }
                 case "WRONG_NUMBER": {
                   const call: ToolCall = { name: "record_wrong_party_contact", args: { outcome_type: "WRONG_NUMBER", notes: "override: wrong number" } };
-                  const r = yield* executeTool({ row: { ...locked, currentState: "WRONG_NUMBER" }, ctx, events, state: "WRONG_NUMBER", call, turnId: params.turnId, at });
+                  const r = yield* tools.execute({ row: { ...locked, currentState: "WRONG_NUMBER" }, ctx, events, state: "WRONG_NUMBER", call, turnId: params.turnId, at });
                   toolCalled = call;
                   says.push(...r.says);
                   outcome = r.outcome;
@@ -690,7 +388,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
                 yield* append(row.id, { type: "TURN_DECISION_REJECTED", payload: { state: locked.currentState, reason: "INVALID_TRANSITION", detail: moved.left.message, suggested_next_state: String(d.suggestedNextState) } }, at);
               }
               if (d.toolCall !== null) {
-                const r = yield* executeTool({ row: locked, ctx, events, state: locked.currentState, call: d.toolCall, turnId: params.turnId, at });
+                const r = yield* tools.execute({ row: locked, ctx, events, state: locked.currentState, call: d.toolCall, turnId: params.turnId, at });
                 toolCalled = d.toolCall;
                 says.push(...r.says);
                 outcome = r.outcome;
@@ -753,7 +451,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
 
             let endCall = false;
             if (outcome !== null) {
-              yield* finalize({ row: locked, ctx, currentState: nextState, outcome, metadata, at });
+              yield* finalizer.finalize({ row: locked, ctx, currentState: nextState, outcome, metadata, at });
               nextState = "COMPLETED";
               endCall = true;
             }
@@ -896,7 +594,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           if (strike >= POLICY.noInputStrikes) {
             const logged = yield* callControl.logAction({ conversationId: row.id, events, action: "NO_INPUT_CLOSE", actionId, payload: { count: strike }, now: at });
             yield* append(row.id, { type: "AGENT_TURN", payload: { text, state: row.currentState, speak_mode: "non_interruptible" } }, at);
-            yield* finalize({ row, ctx, currentState: row.currentState, outcome: "NO_ANSWER", metadata: { reason: "no_input_timeout" }, at });
+            yield* finalizer.finalize({ row, ctx, currentState: row.currentState, outcome: "NO_ANSWER", metadata: { reason: "no_input_timeout" }, at });
             return { turnId: `no-input-${strike}`, decider: "none", disposition: "respond", resolution: "none", agentText: text, newState: "COMPLETED", toolCalled: null, callControlAction: { action: "NO_INPUT_CLOSE", action_id: logged.action_id }, outcome: "NO_ANSWER", endCall: true, degraded: false, ttftMs: null } satisfies TurnResult;
           }
           yield* append(row.id, { type: "AGENT_TURN", payload: { text, state: row.currentState, speak_mode: "interruptible" } }, at);
@@ -999,12 +697,12 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
               const logged = yield* callControl.logAction({ conversationId: row.id, events, action: "VOICEMAIL_DROP", actionId: signal.actionId ?? null, payload: { ...(signal.confidence !== undefined ? { confidence: signal.confidence } : {}) }, now: at });
               const text = voicemailScript(ctx.bundle.publicContext);
               yield* append(row.id, { type: "AGENT_TURN", payload: { text, state: "VOICEMAIL", speak_mode: "non_interruptible" } }, at);
-              yield* finalize({ row, ctx, currentState: "VOICEMAIL", outcome: "VOICEMAIL_LEFT", metadata: { amd: result }, at });
+              yield* finalizer.finalize({ row, ctx, currentState: "VOICEMAIL", outcome: "VOICEMAIL_LEFT", metadata: { amd: result }, at });
               return done({ agentText: text, newState: "COMPLETED", callControlAction: { action: "VOICEMAIL_DROP", action_id: logged.action_id }, outcome: "VOICEMAIL_LEFT", endCall: true });
             }
             if (result === "NO_ANSWER") {
               const logged = yield* callControl.logAction({ conversationId: row.id, events, action: "NO_ANSWER", actionId: signal.actionId ?? null, now: at });
-              yield* finalize({ row, ctx, currentState: row.currentState, outcome: "NO_ANSWER", metadata: { amd: result }, at });
+              yield* finalizer.finalize({ row, ctx, currentState: row.currentState, outcome: "NO_ANSWER", metadata: { amd: result }, at });
               return done({ agentText: "", newState: "COMPLETED", callControlAction: { action: "NO_ANSWER", action_id: logged.action_id }, outcome: "NO_ANSWER", endCall: true });
             }
             yield* conv.setAttemptStatus(row.callAttemptId, "ANSWERED", null);
@@ -1012,7 +710,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           }
           if (signal.kind === "no_answer") {
             const logged = yield* callControl.logAction({ conversationId: row.id, events, action: "NO_ANSWER", actionId: signal.actionId ?? null, now: at });
-            yield* finalize({ row, ctx, currentState: row.currentState, outcome: "NO_ANSWER", metadata: { reason: "no_answer" }, at });
+            yield* finalizer.finalize({ row, ctx, currentState: row.currentState, outcome: "NO_ANSWER", metadata: { reason: "no_answer" }, at });
             return done({ agentText: "", newState: "COMPLETED", callControlAction: { action: "NO_ANSWER", action_id: logged.action_id }, outcome: "NO_ANSWER", endCall: true });
           }
           const logged = yield* callControl.logAction({ conversationId: row.id, events, action: "HANGUP", actionId: signal.actionId ?? null, payload: { reason: signal.reason ?? "participant_disconnected" }, now: at });
@@ -1020,7 +718,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           // mid-call or never claimed it. Calling either NO_ANSWER would schedule a polite retry.
           const sweptByUs = signal.reason === ORPHANED_REASON || signal.reason === NEVER_SERVED_REASON;
           const outcome: Outcome = sweptByUs || row.protectedContextUnlocked ? "FAILED" : "NO_ANSWER";
-          yield* finalize({ row, ctx, currentState: row.currentState, outcome, metadata: { reason: signal.reason ?? "hangup" }, at });
+          yield* finalizer.finalize({ row, ctx, currentState: row.currentState, outcome, metadata: { reason: signal.reason ?? "hangup" }, at });
           return done({ agentText: "", newState: "COMPLETED", callControlAction: { action: "HANGUP", action_id: logged.action_id }, outcome, endCall: true });
         }),
       )).pipe(Effect.tap(finalizeTracingIfEnded(conversationId)), Effect.annotateLogs({ conversation_id: conversationId, path: `signal:${signal.kind}` }));
@@ -1032,5 +730,5 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
 
     return { processTurn, processNoInput, processSignal, unreportedNonInterruptible, releaseStrandedTurn } as const;
   }),
-  dependencies: [ConversationRepo.Default, CrmRepo.Default, IdGen.Default, ContextBuilder.Default, CallControl.Default, SchedulingService.Default, OutboxService.Default],
+  dependencies: [ConversationRepo.Default, CrmRepo.Default, IdGen.Default, ContextBuilder.Default, CallControl.Default, SchedulingService.Default, OutboxService.Default, ToolExecutor.Default, CallFinalizer.Default],
 }) {}
