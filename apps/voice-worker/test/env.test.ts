@@ -1,14 +1,3 @@
-/**
- * The worker's numeric configuration, and the rule that a typo cannot silently remove a limit
- * (review #18).
- *
- * The defect this pins: `Math.max(1, Number("eight"))` is `NaN`, and `inFlight() >= NaN` is always
- * false — so a misspelled `WORKER_MAX_JOBS` did not raise the ceiling, it deleted it. The admission
- * controller Phase 0 built to refuse the ninth call would have accepted every call ever offered,
- * and the heartbeat would have reported `max_jobs: null` to a page nobody reads during a burst.
- *
- * The table is the point. Every row is a value an operator can actually type.
- */
 import { describe, expect, it } from "vitest";
 import { MAX_JOBS, IDLE_PROCESSES, parseCount, parseWorkerLimits, interruptionMode, parseRatio, LOAD_THRESHOLD, VAD_ACTIVATION, VAD_MIN_SILENCE_MS, JOB_MEMORY_WARN_MB, JOB_MEMORY_LIMIT_MB, INTERRUPTION_MIN_DURATION_MS, parseFlag } from "../src/env.js";
 
@@ -20,15 +9,13 @@ describe("parseCount", () => {
   });
 
   it("takes zero where zero is a meaningful setting", () => {
-    // The whole reason the framework patch exists: `WORKER_IDLE_PROCESSES=0` means "no warm pool",
-    // and until the patch it meant "the production default, four". A parser that refused 0 here
-    // would put the lie back in a different place.
+    // `WORKER_IDLE_PROCESSES=0` means "no warm pool", so a parser that refused it would put back
+    // the framework default of four.
     expect(parseCount("0", IDLE_PROCESSES)).toEqual({ ok: true, value: 0 });
   });
 
   it("falls back when the variable is not set at all", () => {
-    // Unset is not misconfiguration — it is the documented default, and the limit still exists.
-    // An empty string is the same statement: it is what an unset variable expands to.
+    // An empty string is the same statement as unset: it is what an unset variable expands to.
     expect(parseCount(undefined, MAX_JOBS)).toEqual({ ok: true, value: MAX_JOBS.fallback });
     expect(parseCount("", MAX_JOBS)).toEqual({ ok: true, value: MAX_JOBS.fallback });
     expect(parseCount("   ", MAX_JOBS)).toEqual({ ok: true, value: MAX_JOBS.fallback });
@@ -37,14 +24,11 @@ describe("parseCount", () => {
   it("refuses a value that is not a number, naming the variable and what was typed", () => {
     const r = parseCount("eight", MAX_JOBS);
     expect(r.ok).toBe(false);
-    // The message has to be readable in a container log with no context around it.
     expect(r.ok === false && r.message).toContain("WORKER_MAX_JOBS");
     expect(r.ok === false && r.message).toContain("eight");
   });
 
   it("refuses a value below the minimum rather than clamping it", () => {
-    // `Math.max(1, ...)` silently turned `-1` into 1. Clamping is how a configuration file and a
-    // running process come to disagree about what the operator asked for.
     expect(parseCount("-1", MAX_JOBS).ok).toBe(false);
     expect(parseCount("0", MAX_JOBS).ok).toBe(false);
     expect(parseCount("-1", IDLE_PROCESSES).ok).toBe(false);
@@ -55,8 +39,7 @@ describe("parseCount", () => {
   });
 
   it("refuses the values that survive Number() but are not counts", () => {
-    // `Number("Infinity")` is a number and `Number("0x10")` is 16 — neither is what the operator
-    // meant to type, and `Infinity` in particular reads as "no ceiling" all over again.
+    // These survive `Number()`, and `Infinity` in particular reads as "no ceiling".
     expect(parseCount("Infinity", MAX_JOBS).ok).toBe(false);
     expect(parseCount("NaN", MAX_JOBS).ok).toBe(false);
     expect(parseCount("1e3", MAX_JOBS).ok).toBe(false);
@@ -73,8 +56,6 @@ describe("parseWorkerLimits", () => {
   });
 
   it("reports every refusal at once, not the first", () => {
-    // An operator fixing a compose file should learn about both typos on one boot rather than
-    // finding the second after the restart the first one caused.
     const r = parseWorkerLimits({ WORKER_MAX_JOBS: "eight", WORKER_IDLE_PROCESSES: "-2" });
     expect(r.ok).toBe(false);
     expect(r.ok === false && r.messages).toHaveLength(2);
@@ -90,16 +71,14 @@ describe("the warm pool's default against the ceiling", () => {
   });
 
   it("leaves an explicit value alone, even above the ceiling", () => {
-    // It costs memory and nothing else, and quietly rewriting what an operator typed is how a
-    // compose file and a running process come to disagree about the configuration.
     expect(parseWorkerLimits({ WORKER_MAX_JOBS: "2", WORKER_IDLE_PROCESSES: "6" })).toEqual({ ok: true, maxJobs: 2, idleProcesses: 6 });
   });
 });
 
-describe("interruptionMode (W1)", () => {
+describe("interruptionMode", () => {
   it("defaults to vad, which is what this deployment actually runs", () => {
     // Not a preference: the self-hosted profile has no credentials for the hosted detector, so
-    // asking for `adaptive` got a 401 and a silent fall back to VAD on every job.
+    // `adaptive` gets a 401 and falls back to VAD anyway.
     expect(interruptionMode(undefined)).toEqual({ ok: true, value: "vad" });
     expect(interruptionMode("")).toEqual({ ok: true, value: "vad" });
     expect(interruptionMode("   ")).toEqual({ ok: true, value: "vad" });
@@ -107,13 +86,10 @@ describe("interruptionMode (W1)", () => {
 
   it("takes either mode when one is named", () => {
     expect(interruptionMode("vad")).toEqual({ ok: true, value: "vad" });
-    // Still selectable: on LiveKit Cloud it runs, and D5's A/B wants to turn it on.
     expect(interruptionMode("adaptive")).toEqual({ ok: true, value: "adaptive" });
   });
 
   it("refuses a typo rather than quietly picking one", () => {
-    // The whole point of W1 is that "I asked for adaptive and silently got VAD" was invisible; a
-    // misspelling must not be another way to reach it.
     for (const bad of ["Adaptive", "VAD", "auto", "true", "1"]) {
       const r = interruptionMode(bad);
       expect(r.ok).toBe(false);
@@ -122,7 +98,7 @@ describe("interruptionMode (W1)", () => {
   });
 });
 
-describe("parseRatio (W5)", () => {
+describe("parseRatio", () => {
   it("takes the fallback when unset, and the value when set", () => {
     expect(parseRatio(undefined, LOAD_THRESHOLD)).toEqual({ ok: true, value: 0.75 });
     expect(parseRatio("", LOAD_THRESHOLD)).toEqual({ ok: true, value: 0.75 });
@@ -133,8 +109,7 @@ describe("parseRatio (W5)", () => {
   });
 
   it("refuses what Number would have accepted and turned into no threshold at all", () => {
-    // `Number("75%")` is NaN, and `load >= NaN` is always false — so this typo did not raise the
-    // shedding threshold, it deleted shedding. That is the failure the parser exists for.
+    // `load >= NaN` is always false, so these typos delete shedding rather than loosening it.
     for (const bad of ["75%", "eighty", "1e-1", "0x1", "Infinity", "-0.1", "1.5", "0.5.1"]) {
       const r = parseRatio(bad, LOAD_THRESHOLD);
       expect(r.ok).toBe(false);
@@ -143,23 +118,21 @@ describe("parseRatio (W5)", () => {
   });
 });
 
-describe("the knobs that used to bypass the parser (W5)", () => {
+describe("the knobs that used to bypass the parser", () => {
   it("gives each one its documented default when unset", () => {
     expect(parseRatio(undefined, VAD_ACTIVATION)).toEqual({ ok: true, value: 0.5 });
     expect(parseCount(undefined, VAD_MIN_SILENCE_MS)).toEqual({ ok: true, value: 550 });
     expect(parseCount(undefined, JOB_MEMORY_WARN_MB)).toEqual({ ok: true, value: 400 });
     expect(parseCount(undefined, JOB_MEMORY_LIMIT_MB)).toEqual({ ok: true, value: 800 });
-    // The framework's own default, not one this repo invented: D5.2 A/Bs against it.
+    // The framework's own default, not one this repo invented.
     expect(parseCount(undefined, INTERRUPTION_MIN_DURATION_MS)).toEqual({ ok: true, value: 500 });
   });
 
   it("refuses a mistyped memory limit rather than removing the limit", () => {
-    // `Number("800mb")` is NaN, and the framework then logs the limit as advisory only — a job with
-    // no ceiling, from a line written to set one.
     const r = parseCount("800mb", JOB_MEMORY_LIMIT_MB);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.message).toContain("WORKER_JOB_MEMORY_LIMIT_MB");
-    // And a zero limit is refused too: it reads as "no limit" and means "kill everything".
+    // Zero is refused too: it reads as "no limit" and means "kill everything".
     expect(parseCount("0", JOB_MEMORY_LIMIT_MB).ok).toBe(false);
   });
 });
@@ -179,8 +152,6 @@ describe("parseFlag", () => {
   });
 
   it("refuses a typo rather than reading it as false", () => {
-    // The whole reason these are parsed rather than coerced: `WORKER_THING=ture` silently off is a
-    // gate you think you passed, which is worse than one you know you skipped.
     const r = parseFlag("ture", spec);
     expect(r.ok).toBe(false);
     expect(!r.ok && r.message).toContain("WORKER_THING");

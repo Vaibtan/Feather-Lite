@@ -1,12 +1,3 @@
-/**
- * Persistence for `conversation_scores` (spec 2026-08-26, D1).
- *
- * `upsert` is the only write. A score's identity is `(conversation_id, turn_id, name, source)`, so
- * re-running the evaluator, re-judging a call or re-running the harness over it corrects the row in
- * place instead of appending a second opinion — the same idempotence Langfuse gives a score with a
- * stable `id`. Nothing here takes the conversation row lock: scores must never be able to delay a
- * live turn.
- */
 import { Effect, Schema } from "effect";
 import { SqlSchema } from "@effect/sql";
 import { PgClient } from "@effect/sql-pg";
@@ -22,10 +13,8 @@ export class ScoresRepo extends Effect.Service<ScoresRepo>()("@feather-lite/Scor
     const sql = yield* PgClient.PgClient;
     const ids = yield* IdGen;
 
-    /**
-     * Insert or correct one score. `created_at` is preserved on update (it is when the call was
-     * first measured); `updated_at` moves, so "the judge changed its mind" is visible in the row.
-     */
+    // `created_at` is deliberately absent from the DO UPDATE list: it records when the call was
+    // first measured, while `updated_at` moves when the judge changes its mind.
     const upsert = (record: ScoreRecord, now: Date) =>
       Effect.gen(function* () {
         const id = yield* ids.next();

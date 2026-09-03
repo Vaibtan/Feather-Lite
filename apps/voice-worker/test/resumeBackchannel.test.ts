@@ -14,8 +14,6 @@ describe("shouldResume", () => {
   });
 
   it("does nothing when the borrower is actually saying something", () => {
-    // The expensive mistake: resuming over a borrower who is genuinely speaking is worse than the
-    // pause this exists to avoid.
     expect(shouldResume("okay but I can't pay that", paused).why).toBe("not-a-backchannel");
   });
 
@@ -24,8 +22,7 @@ describe("shouldResume", () => {
   });
 
   it("reports the missing seam rather than throwing, if the SDK shape ever changes", () => {
-    // The coupling is to `session._activity`, which the SDK documents but does not guarantee. A
-    // worker that crashes on a transcript is worse than one that stops resuming early.
+    // The coupling is to `session._activity`, which the SDK documents but does not guarantee.
     expect(shouldResume("mm-hm", undefined).why).toBe("no-seam");
     expect(shouldResume("mm-hm", { pausedSpeech: {} }).why).toBe("no-seam");
   });

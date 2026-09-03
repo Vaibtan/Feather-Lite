@@ -1,9 +1,3 @@
-/**
- * Scheduled actions (SPEC §14): callbacks, retries, human follow-ups; and the worker
- * that claims due actions and re-enters `startCall`. If a callback/retry hits the TCPA
- * window at its due time it is rescheduled to the next 08:00 local (plan rev.2 R13),
- * up to 3 times, then CANCELED with the reason recorded.
- */
 import { DateTime, Effect, Option } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import type { ScheduledActionType } from "@feather-lite/domain";
@@ -84,7 +78,6 @@ export class SchedulingService extends Effect.Service<SchedulingService>()("@fea
         },
       });
 
-    /** Upsert-style: one PENDING callback per workflow; retries are canceled by a callback. */
     const scheduleCallback = (params: {
       workflowExecutionId: string;
       borrowerId: string;
@@ -109,17 +102,12 @@ export class SchedulingService extends Effect.Service<SchedulingService>()("@fea
     const cancelPending = (workflowExecutionId: string, reason: string, actionTypes: ReadonlyArray<ScheduledActionType> | null) =>
       sched.cancelPending({ workflowExecutionId, reason, actionTypes });
 
-    /**
-     * What the first transaction concluded: either the action is settled, or a room has to be
-     * dispatched to — which is an HTTP call to the media plane and must not happen under a lock.
-     */
     type Prepared =
       | { readonly kind: "settled"; readonly result: ProcessedAction }
       | { readonly kind: "dispatch"; readonly conversationId: string; readonly callAttemptId: string; readonly roomName: string; readonly metadata: string };
 
     const settled = (result: ProcessedAction) => ({ kind: "settled", result }) as const;
 
-    /** Everything about one claimed action that is only Postgres. Commits before anything is dialled. */
     const prepare = (action: ScheduledActionRow, now: DateTime.Utc): Effect.Effect<Prepared, unknown> =>
       sql.withTransaction(
         Effect.gen(function* () {
@@ -133,43 +121,15 @@ export class SchedulingService extends Effect.Service<SchedulingService>()("@fea
           const channel = (String(action.payload["channel"] ?? "simulated") === "voice" ? "voice" : "simulated") as "voice" | "simulated";
           const attempts = Number(action.payload["retry_count"] ?? 0);
 
-          /**
-           * A voice re-dial goes through `VoiceSessions`, not `startCall` (O4).
-           *
-           * `startCall` opens a conversation and nothing else. For `channel: 'voice'` that produced
-           * a call no agent was ever dispatched to: the room was never created, no worker claimed
-           * it, and the sweeper later finalized it as an orphan on the long unconfirmed window.
-           * Measured, unprompted: conversation `ae312a15…` from attempt 4 was swept 5 minutes 9
-           * seconds after it was created, and dragged the fleet's `orphan_detect_ms` p95 from
-           * 38 902 ms to 308 860 ms — a number describing a call that never had a worker to lose.
-           *
-           * So a voice re-dial must both open the conversation *and* dispatch an agent to the room,
-           * which is why this function ends by handing the dispatch back rather than by finishing.
-           *
-           * `sip` because a scheduled re-dial is outbound: there is no browser tab waiting on the
-           * other end of it.
-           */
-          // Checked before anything is written: a voice re-dial on a system with no media plane
-          // must not leave a conversation row behind, because nothing will ever serve it and the
-          // sweeper will later book it as an orphan.
+          // Checked before anything is written, or the row is left for the sweeper to book as an
+          // orphan with nothing to serve it.
           if (channel === "voice" && !hasMediaPlane(cfg)) {
             yield* Effect.logWarning(`scheduled ${action.actionType} for borrower ${borrowerId} cannot place a voice call: no media plane configured`);
             yield* sched.setActionStatus(action.id, "FAILED", { reason: NO_MEDIA_PLANE });
             return settled({ actionId: action.id, actionType: action.actionType, status: "FAILED", detail: { reason: NO_MEDIA_PLANE } });
           }
-          /**
-           * And separately: is there anything to dial *through* (C4)?
-           *
-           * The dispatch below asks for `mode: "sip"`, and SIP needs an outbound trunk that only
-           * LiveKit Cloud provides here. The control plane could not see that — the trunk id was
-           * worker-side env — so it scheduled the call anyway, the worker hung up
-           * `sip_not_configured`, the call finalized `NO_ANSWER`, and `NO_ANSWER` scheduled another
-           * retry. Each lap cost a room, a dispatch and a worker job slot counted against
-           * `WORKER_MAX_JOBS`, which is capacity a fleet run on the same box is measuring.
-           *
-           * Failed here, before `startCall`, for the same reason as the check above: no conversation
-           * row means nothing for the sweeper to book as an orphan later.
-           */
+          // Without an outbound trunk the worker hangs up, the call finalizes NO_ANSWER, and
+          // NO_ANSWER schedules another retry, so this fails before a conversation row exists.
           if (channel === "voice" && !canDialOut(cfg)) {
             yield* Effect.logWarning(`scheduled ${action.actionType} for borrower ${borrowerId} cannot place a voice call: no SIP outbound trunk configured`);
             yield* sched.setActionStatus(action.id, "FAILED", { reason: NO_SIP_TRUNK });
@@ -181,7 +141,6 @@ export class SchedulingService extends Effect.Service<SchedulingService>()("@fea
               borrowerId,
               contactPointId,
               channel,
-              // A scheduled re-dial is outbound; there is no browser tab waiting on it.
               origin: "sip",
               workflowExecutionId: action.workflowExecutionId,
               workflowType: action.actionType === "CALLBACK" ? "CALLBACK_FOLLOWUP" : "PAYMENT_REMINDER",
@@ -192,9 +151,6 @@ export class SchedulingService extends Effect.Service<SchedulingService>()("@fea
           if (started._tag === "Right") {
             const conversationId = started.right.conversationId;
             if (channel === "voice") {
-              // A voice call still needs an agent dispatched to it (O4, above) — but that is an
-              // HTTP call, so it is handed back to `processOne`, which dials with no transaction
-              // open and records the answer in a second, short one.
               return {
                 kind: "dispatch",
                 conversationId,
@@ -206,7 +162,6 @@ export class SchedulingService extends Effect.Service<SchedulingService>()("@fea
                   call_attempt_id: started.right.callAttemptId,
                   borrower_id: borrowerId,
                   contact_point_id: contactPointId,
-                  // Outbound: a scheduled re-dial has no browser tab waiting on the other end.
                   mode: "sip",
                   channel: "voice",
                   opening_text: started.right.openingText,
@@ -231,27 +186,10 @@ export class SchedulingService extends Effect.Service<SchedulingService>()("@fea
       );
 
     /**
-     * Execute one claimed action: prepare, dispatch, record.
-     *
-     * **The dispatch is no longer inside a transaction** (review #11). `dispatchAgent` is an HTTP
-     * call to LiveKit, and it was made after `startCall` had written and row-locked the
-     * conversation - the pattern ADR 0003 forbids, on the loop that also serves callbacks. A slow
-     * media plane held a Postgres transaction and the conversation row for the length of an HTTP
-     * timeout, and twenty such actions serialised behind it.
-     *
-     * The window between the two transactions is a conversation that exists with no agent
-     * dispatched to it, which the sweeper already finalizes as `NEVER_SERVED` - a call that never
-     * had a worker, distinct from one that lost hers (O4). The action row is left `CLAIMED`, which
-     * is not new: `claimDue` commits the claim in its own transaction before this is called, so a
-     * crash here has always left the action claimed.
-     *
-     * **What is new, and bounded:** if the *second* transaction itself fails - not a refused
-     * dispatch, which is caught, but the recording of it - `runOnce` reschedules the action to
-     * `PENDING` with one conversation already committed. The next tick's `startCall` then fails
-     * pre-call with `ACTIVE_CONVERSATION` (that conversation is still open), which is not the TCPA
-     * branch, so the action is `CANCELED` rather than re-dialled until the sweeper clears the
-     * conversation. One leaked conversation per crash, not per retry, and visible as a
-     * `NEVER_SERVED` finalization rather than as silence.
+     * The dispatch runs between the two transactions, never inside one: it is an HTTP call to the
+     * media plane, and holding the row-locked conversation across it serialises the whole loop
+     * behind one slow dispatch. The cost of that gap is a conversation with no agent yet, which the
+     * sweeper finalizes as NEVER_SERVED.
      */
     const processOne = (action: ScheduledActionRow, now: DateTime.Utc): Effect.Effect<ProcessedAction, unknown> =>
       Effect.gen(function* () {
@@ -261,10 +199,8 @@ export class SchedulingService extends Effect.Service<SchedulingService>()("@fea
         return yield* sql.withTransaction(
           Effect.gen(function* () {
             if (dispatched._tag === "Left") {
-              // The media plane exists and did not answer. The conversation is left for the
-              // sweeper, which finalizes a call no worker ever claimed as NEVER_SERVED rather than
-              // timing it as an orphan - closing it from here would mean importing the
-              // orchestrator, and the orchestrator imports this service.
+              // Closing the conversation from here would mean importing the orchestrator, which
+              // imports this service, so it is left for the sweeper to finalize as NEVER_SERVED.
               yield* Effect.logWarning(`scheduled ${action.actionType} could not dispatch an agent: ${dispatched.left.detail}`);
               yield* sched.setActionStatus(action.id, "FAILED", { reason: "DISPATCH_FAILED", detail: dispatched.left.detail });
               return { actionId: action.id, actionType: action.actionType, status: "FAILED", detail: { reason: "DISPATCH_FAILED" } } satisfies ProcessedAction;
@@ -276,7 +212,6 @@ export class SchedulingService extends Effect.Service<SchedulingService>()("@fea
         );
       });
 
-    /** One worker tick: claim due actions and process each. `nowOverride` is for tests/demo. */
     const runOnce = (limit = 20, nowOverride?: DateTime.Utc) =>
       Effect.gen(function* () {
         const now = nowOverride ?? (yield* DateTime.now);

@@ -1,15 +1,3 @@
-/**
- * Virtual clocks for scenario replays and seeded history.
- *
- * Every timestamp the orchestrator writes comes from Effect's `Clock` (via `DateTime.now`), so
- * replacing the clock for a region makes `started_at`, event `created_at`, `ended_at` and scheduled
- * `due_at` mutually consistent for calls that "happened" at another time (SPEC §10: frozen clock).
- *
- *  - `frozen(at)`  — time stands still at `at` (scenarios; fully deterministic).
- *  - `shifted(at)` — time flows normally but starts at `at` (seeded history; realistic durations).
- *
- * `sleep` always delegates to the real clock so retries/timeouts still work.
- */
 import { Clock, DateTime, Duration, Effect } from "effect";
 
 const realClock = Clock.make();
@@ -29,7 +17,6 @@ export const frozenClock = (at: DateTime.Utc): Clock.Clock => {
 };
 
 export interface ShiftedClock extends Clock.Clock {
-  /** Move virtual time forward without waiting (e.g. to space out turns of a seeded historical call). */
   readonly advance: (by: Duration.DurationInput) => Effect.Effect<void>;
 }
 

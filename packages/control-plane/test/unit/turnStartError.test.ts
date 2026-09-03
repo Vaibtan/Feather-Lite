@@ -1,6 +1,3 @@
-/**
- * T1's failure is a type the orchestrator owns, not a shape its caller re-derives (F6).
- */
 import { describe, expect, it } from "vitest";
 import { Cause } from "effect";
 import { ConversationCompleted, NotFound, TURN_START_ERROR_TAGS, TurnInProgress, TurnSuperseded, turnStartErrorOf } from "../../src/errors.js";
@@ -16,8 +13,7 @@ describe("turnStartErrorOf", () => {
     for (const e of errs) expect(turnStartErrorOf(Cause.fail(e))?._tag).toBe(e._tag);
   });
 
-  it("returns null for a failure that is not one of them", () => {
-    // A defect in T1 is not a start error: the caller must report INTERNAL, not a 409.
+  it("returns null for a defect in T1, which the caller must report as INTERNAL rather than a 409", () => {
     expect(turnStartErrorOf(Cause.fail(new Error("pool exhausted")))).toBeNull();
     expect(turnStartErrorOf(Cause.die(new Error("boom")))).toBeNull();
   });

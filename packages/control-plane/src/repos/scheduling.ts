@@ -1,7 +1,3 @@
-/**
- * Scheduled actions (callbacks / retries / human follow-ups), the outbox, and worker heartbeats.
- * Claiming uses `FOR UPDATE SKIP LOCKED` so several workers can poll safely.
- */
 import { Effect, Schema } from "effect";
 import { SqlSchema } from "@effect/sql";
 import { PgClient } from "@effect/sql-pg";
@@ -12,34 +8,14 @@ const SA_COLS = "id, workflow_execution_id, action_type, due_at, status, payload
 const OB_COLS = "id, conversation_id, job_type, status, payload, result, error, available_at, claimed_at, processed_at";
 
 /**
- * How long a claim is good for before another process may take the row (C3).
- *
- * A claim used to be permanent: `CLAIMED` was written by both claim statements and read by nothing,
- * so a process killed between claiming and finishing stranded its rows for good — no SUMMARY, so
- * the borrower's next call loses its `wrap_up`; no EVALUATION and no judge, so the call never
- * reaches the quality page; a callback that simply never happens. Nothing raised, because a stuck
- * row and a row in flight are the same row.
- *
- * Five minutes is chosen from the two clocks either side of it. The floor is the longest a live
- * claim legitimately lasts: a JUDGE job waits on a reasoning model, which is tens of seconds, and
- * `Effect.forEach` runs a batch four at a time — so a minute is plausible and five is not. The
- * ceiling is how long a borrower can be left behind a stranded call, and five minutes is well
- * inside the sweeper's own patience. Between them the value is not delicate: anything from about
- * two to fifteen minutes behaves identically, which is why this is a constant with an argument
- * rather than a knob with a default nobody has tuned.
+ * Five minutes sits between two clocks: the longest a live claim legitimately lasts (a JUDGE job
+ * waiting on a reasoning model is tens of seconds) and how long a borrower may be left behind a
+ * stranded call. Anything from about two to fifteen minutes behaves identically.
  */
 export const CLAIM_LEASE_MS = 5 * 60_000;
 
-/**
- * `retry_count + 1`, but only for a row that was already `CLAIMED` — a reclaim means a process died
- * holding it, and that is worth counting. A row claimed from `PENDING` keeps the count it had, so
- * an ordinary claim costs a job nothing.
- *
- * A job that is reclaimed and *then* fails is charged twice, once here and once by the failure path
- * in `Outbox.runOnce`, and that is the intended reading rather than a leak: the two are different
- * events — a process that died holding the row, and work that ran and raised — and a job that has
- * suffered both has had two bad attempts out of its budget of three. `claimLease.test.ts` pins it.
- */
+// A reclaim means a process died holding the row, so it costs the job an attempt; an ordinary claim
+// from `PENDING` does not. A job reclaimed and then failing is charged twice, which is intended.
 const bumpRetryOnReclaim = (table: string) =>
   `CASE WHEN due.prev_status = 'CLAIMED'
         THEN jsonb_set(${table}.payload, '{retry_count}', to_jsonb(COALESCE((${table}.payload->>'retry_count')::int, 0) + 1))
@@ -48,8 +24,6 @@ const bumpRetryOnReclaim = (table: string) =>
 export class SchedulingRepo extends Effect.Service<SchedulingRepo>()("@feather-lite/SchedulingRepo", {
   effect: Effect.gen(function* () {
     const sql = yield* PgClient.PgClient;
-
-    /* ------------------------- scheduled actions ------------------------- */
 
     const insertScheduledAction = (row: {
       id: string;
@@ -75,11 +49,6 @@ export class SchedulingRepo extends Effect.Service<SchedulingRepo>()("@feather-l
         sql`SELECT ${sql.unsafe(SA_COLS)} FROM scheduled_actions WHERE workflow_execution_id = ${workflowExecutionId} ORDER BY due_at`,
     });
 
-    /**
-     * Pending CALLBACKs across all workflows for a borrower (pre-call conflict check): a borrower who
-     * asked to be called at a specific time must not be dialed earlier. System retries do not block
-     * (a manual start supersedes them, see `cancelPendingRetriesForBorrower`).
-     */
     const countPendingConflicts = SqlSchema.single({
       Request: Schema.String,
       Result: Schema.Struct({ count: Schema.NumberFromString }),
@@ -125,18 +94,13 @@ export class SchedulingRepo extends Effect.Service<SchedulingRepo>()("@feather-l
         RETURNING a.id, a.workflow_execution_id, a.action_type, a.due_at, a.status, a.payload`,
     });
 
-    /**
-     * `claimed_at` is cleared whenever the row goes back to `PENDING`, the same rule `finishJob`
-     * has always applied to the outbox. Without it a rescheduled action would carry the dead
-     * claim's timestamp, and the lease would read it as already expired the moment it came due.
-     */
+    // `claimed_at` must be cleared whenever the row goes back to `PENDING`; otherwise a rescheduled
+    // action carries the dead claim's timestamp and the lease reads it as expired the moment it is due.
     const setActionStatus = (id: string, status: ScheduledActionStatus, payloadPatch: Record<string, unknown> = {}, dueAt?: Date) =>
       (dueAt === undefined
         ? sql`UPDATE scheduled_actions SET status = ${status}, claimed_at = CASE WHEN ${status} = 'PENDING' THEN NULL ELSE claimed_at END, payload = payload || ${sql.json(payloadPatch)} WHERE id = ${id}`
         : sql`UPDATE scheduled_actions SET status = ${status}, due_at = ${dueAt}, claimed_at = CASE WHEN ${status} = 'PENDING' THEN NULL ELSE claimed_at END, payload = payload || ${sql.json(payloadPatch)} WHERE id = ${id}`
       ).pipe(Effect.asVoid);
-
-    /* ------------------------------ outbox ------------------------------ */
 
     const existingJobTypes = SqlSchema.findAll({
       Request: Schema.String,
@@ -182,25 +146,12 @@ export class SchedulingRepo extends Effect.Service<SchedulingRepo>()("@feather-l
             payload = payload || ${sql.json(params.payloadPatch ?? {})}, updated_at = now()
           WHERE id = ${params.id}`.pipe(Effect.asVoid);
 
-    /* ---------------------------- heartbeats ---------------------------- */
-
-    /**
-     * Several processes share one agent name — the main worker and every job process it forks — and
-     * they have different things to say. The main worker reports its mode, its load and how many
-     * calls it is carrying; a job process reports only that its call is still alive, and used to
-     * blank all of that for the duration of the call by beating with its own small meta.
-     *
-     * `||` is jsonb concatenation, right-hand side winning per key: a beat with no meta leaves the
-     * row's fields exactly as they were, and a beat with fields updates those and only those.
-     */
+    // `||` is jsonb concatenation with the right-hand side winning per key, so a beat carrying no
+    // meta leaves the row's existing fields alone rather than blanking them.
     const upsertHeartbeat = (agentName: string, at: Date, meta: Record<string, unknown>) =>
       sql`INSERT INTO agent_heartbeats (agent_name, last_seen_at, meta) VALUES (${agentName}, ${at}, ${sql.json(meta)})
           ON CONFLICT (agent_name) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at, meta = agent_heartbeats.meta || EXCLUDED.meta`.pipe(Effect.asVoid);
 
-    /**
-     * Record that a worker is still serving these conversations, as of `at`. Upsert-only: a row is
-     * never deleted, because staleness is decided by age and a finished call's row is simply old.
-     */
     const touchLiveness = (conversationIds: ReadonlyArray<string>, agentName: string, at: Date) =>
       conversationIds.length === 0
         ? Effect.void
@@ -212,14 +163,8 @@ export class SchedulingRepo extends Effect.Service<SchedulingRepo>()("@feather-l
             { discard: true },
           );
 
-    /**
-     * Voice conversations with no final outcome that no worker has claimed recently.
-     *
-     * `started_at < staleBefore` is the grace period as well as the staleness bound: a call that
-     * began two seconds ago has not had time to be heartbeated, and sweeping it would be a
-     * guaranteed false positive. Simulated conversations are excluded — they have no worker to
-     * lose, and an abandoned console simulation is a different (much longer) rule.
-     */
+    // `started_at < staleBefore` doubles as the grace period: a call that began seconds ago has not
+    // had time to be heartbeated, and sweeping it would be a guaranteed false positive.
     const staleConversations = SqlSchema.findAll({
       Request: Schema.Struct({ staleBefore: Schema.DateFromSelf, limit: Schema.Number }),
       Result: Schema.Struct({
@@ -240,15 +185,6 @@ export class SchedulingRepo extends Effect.Service<SchedulingRepo>()("@feather-l
     const listHeartbeats = SqlSchema.findAll({
       Request: Schema.Void,
       Result: HeartbeatRow,
-      /**
-       * A day, because a worker that has not reported in a day is not a worker (P6).
-       *
-       * A `feather-lite-agent-container` row from 2026-08-28 was still on `/status` five days after
-       * that container last existed. `online` was correctly `false`, and the row was still
-       * misleading: an operator cannot tell a worker that died this minute from one retired last
-       * week, and the list grows a row for every name anyone ever ran. The row stays in the table —
-       * `agent_name` is the conflict key, so a returning worker resumes its own row.
-       */
       execute: () => sql`SELECT agent_name, last_seen_at, meta FROM agent_heartbeats
         WHERE last_seen_at > now() - interval '1 day' ORDER BY agent_name`,
     });

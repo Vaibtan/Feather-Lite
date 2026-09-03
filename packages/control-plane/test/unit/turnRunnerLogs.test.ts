@@ -1,15 +1,3 @@
-/**
- * The one log line an operator needs joined to a call, and the one that was not (review #5).
- *
- * "turn failed after start" is logged from the *handler* — outside `processTurn`, which carries its
- * own annotations — so it is the line that says which of a hundred interleaved calls just broke.
- * `Effect.annotateLogs` was piped **before** `matchCauseEffect`, which put it inside the effect
- * being matched rather than around the match, and the line went out with `annotations: []` while
- * the comment above it claimed the opposite.
- *
- * A stub orchestrator that emits `turn_start` and then fails is the whole fixture: the runner takes
- * the after-start branch and logs.
- */
 import { Effect, Layer, Logger, Stream } from "effect";
 import { describe, expect, it } from "vitest";
 import { ConversationCompleted, NotFound } from "../../src/errors.js";
@@ -22,7 +10,6 @@ interface Captured {
   readonly annotations: Record<string, unknown>;
 }
 
-/** Collects every log record instead of writing it, so the annotations can be asserted. */
 const capturing = (into: Captured[]) =>
   Logger.replace(
     Logger.defaultLogger,
@@ -31,7 +18,6 @@ const capturing = (into: Captured[]) =>
     }),
   );
 
-/** Only `processTurn` differs between the two cases; the signals are not exercised here. */
 const orchestratorThat = (processTurn: (params: TurnParams, emit: Emit) => Effect.Effect<never, ConversationCompleted | NotFound>) =>
   Layer.succeed(Orchestrator, Orchestrator.make({ processTurn, processNoInput: () => Effect.die("not exercised"), processSignal: () => Effect.die("not exercised"), unreportedNonInterruptible: () => Effect.succeed(null), releaseStrandedTurn: () => Effect.void }));
 
@@ -40,7 +26,6 @@ const params = { conversationId: "c-9f2a", turnId: "t-4b71", userText: "yes" } s
 describe("TurnRunner failure logging", () => {
   it("carries the conversation and turn ids on the after-start failure line", async () => {
     const captured: Captured[] = [];
-    // Emits `turn_start`, then fails — the shape of a T2 commit that loses its conversation.
     const failsAfterStart = orchestratorThat((p, emit) =>
       emit({ type: "turn_start", turn_id: p.turnId, state: "CONFIRMING_OUTCOME" }).pipe(Effect.zipRight(Effect.fail(new ConversationCompleted({ conversationId: p.conversationId })))),
     );
@@ -61,8 +46,6 @@ describe("TurnRunner failure logging", () => {
   });
 
   it("does not log the after-start line for a failure that belongs to the caller", async () => {
-    // A T1 error before any frame is a 404/409 with a normal body, not an operational failure —
-    // there is nothing for an operator to correlate, and the runner must not claim otherwise.
     const captured: Captured[] = [];
     const failsAtStart = orchestratorThat(() => Effect.fail(new NotFound({ entity: "conversation", id: params.conversationId })));
 

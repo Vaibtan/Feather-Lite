@@ -1,11 +1,3 @@
-/**
- * Finding a non-interruptible segment that is still playing, from the ledger alone (issue #1 D1, F2).
- *
- * The read the `held` phase does before T1. It takes no lock and joins no transaction, deliberately:
- * the thing being waited for is reported by a *different process* — the voice worker — so the ledger
- * is the only place every replica can observe it, and holding a row lock for the length of a spoken
- * sentence is not a thing a claim transaction may do.
- */
 import { Effect, Layer } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -88,7 +80,6 @@ describe("unreportedNonInterruptible", () => {
   });
 
   it("takes the latest one, not the first", async () => {
-    // An earlier unreported segment is not what the borrower is talking over now.
     const out = await rt.runPromise(
       Effect.gen(function* () {
         const started = yield* startVoiceCall;
@@ -114,12 +105,6 @@ describe("unreportedNonInterruptible", () => {
   });
 
   it("finds the promise read-back, which is the segment this whole mechanism exists for", async () => {
-    /**
-     * The point of D1. The read-back is the one line a borrower must hear in full — the fully-heard
-     * guard refuses to record a promise whose read-back nothing says was heard — so it is the one
-     * line they may not talk over. Until Phase 2 it was written `allowInterruptible: true` and
-     * `held` could never fire on it, which made the mechanism correct and useless.
-     */
     const out = await rt.runPromise(
       Effect.gen(function* () {
         const started = yield* startVoiceCall;
@@ -134,14 +119,6 @@ describe("unreportedNonInterruptible", () => {
   });
 
   it("never holds on the opening, which is reported by a different signal and so never looks finished", async () => {
-    /**
-     * The defect this test exists for, found by running it (2026-09-02). The opening is written with
-     * `speak_mode: "non_interruptible"` and `turn_id: "opening"`, and the worker reports it with the
-     * `opening_played` signal — **not** an `AGENT_TURN_PLAYOUT`. So it is permanently "unreported",
-     * and the first real turn of every voice call was held waiting for evidence that would never
-     * arrive: `heldMs: 4257` on a live call, whose payment offer was then superseded and which ended
-     * `NO_ANSWER` with no promise recorded.
-     */
     const out = await rt.runPromise(
       Effect.gen(function* () {
         const started = yield* startVoiceCall;

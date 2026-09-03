@@ -1,8 +1,6 @@
 /**
- * The sampler's pure parts. Every command line in the classification table below was copied out of
- * `Win32_Process` on the dev box on 2026-08-27 with the server in `start` mode and the worker in
- * `start` mode with one warm job slot — so this is a table of what the machine actually says, not
- * of what the patterns were written against.
+ * Every command line in the classification table below was copied out of `Win32_Process` on a
+ * running tree, so it is what the machine says rather than what the patterns were written against.
  */
 import { describe, expect, it } from "vitest";
 import { busiestCpuWindow, classifyProcess, cumulativeCpuByPid, parseDockerBytes, perCoreBudget, rssSlopeMbPerMin, SERVER_ROLES, validateReport, WORKER_ROLES, type CpuTick, type ResourceReport, type Role } from "../src/resources.js";
@@ -39,19 +37,16 @@ describe("classifyProcess", () => {
     expect(classifyProcess(`"C:\nvm4w\nodejs\node.exe" C:/nvm4w/nodejs/node_modules/corepack/dist/pnpm.js --filter @feather-lite/voice-worker fake-borrower-fleet`, ROOT)).toBe("harness");
   });
 
-  it("names the bundled forms too, so the D6 build does not need a second classifier", () => {
+  it("names the bundled forms too, so a built tree does not need a second classifier", () => {
     expect(classifyProcess("C:/nvm4w/nodejs/node.exe D:/SWE_DEV_NEW/Feather-Lite/apps/server/dist/main.js", ROOT)).toBe("server");
     expect(classifyProcess("C:/nvm4w/nodejs/node.exe D:/SWE_DEV_NEW/Feather-Lite/apps/voice-worker/dist/agent.js start", ROOT)).toBe("worker-main");
   });
 
   it("does not read any pnpm command mentioning a package as that package running", () => {
-    // A `--filter @feather-lite/voice-worker typecheck` during a soak run was named `worker-launcher`
-    // and its 129 MB landed in a report taken with no worker running.
     const pnpm = `"C:\nvm4w\nodejs\node.exe" C:/nvm4w/nodejs/node_modules/corepack/dist/pnpm.js`;
     expect(classifyProcess(`${pnpm} --filter @feather-lite/voice-worker typecheck`, ROOT)).toBeNull();
     expect(classifyProcess(`${pnpm} --filter @feather-lite/server test`, ROOT)).toBeNull();
     expect(classifyProcess(`${pnpm} install`, ROOT)).toBeNull();
-    // ...but the real launchers still are.
     expect(classifyProcess(`${pnpm} --filter @feather-lite/voice-worker start`, ROOT)).toBe("worker-launcher");
     expect(classifyProcess(`${pnpm} dev:server`, ROOT)).toBe("server-launcher");
   });
@@ -129,7 +124,6 @@ const report = (over: Partial<ResourceReport> = {}): ResourceReport => ({
     worker: { peak: 2.0e9, idle: 1.2e9, peak_private: 2.1e9, idle_private: 1.6e9, roles: WORKER_ROLES },
     server: { peak: 0.2e9, idle: 0.15e9, peak_private: 0.22e9, idle_private: 0.17e9, roles: SERVER_ROLES },
   },
-  // The busiest minute: the worker spent 45 of its 60 CPU-seconds in it, the server 10 of 30.
   steady_state: { target_ms: 60_000, full_window: false, worker: { cpu_seconds: 45, wall_ms: 60_000 }, server: { cpu_seconds: 10, wall_ms: 60_000 } },
   rss_slope_mb_per_min: 0.4,
   private_slope_mb_per_min: 0.4,
@@ -147,18 +141,16 @@ describe("perCoreBudget", () => {
     expect(b.cores_used).toBe(0.75);
     expect(b.calls_per_vcpu).toBe(6.67);
     expect(b.cores_over_full_window).toBe(false);
-    // (2.0 GB peak - 1.2 GB idle) / 5 calls = 160 MB per call, from the joint tree, not role maxima.
     expect(b.mb_per_call).toBe(160);
-    // The same call costs 100 MB of private commit. The RSS figure is inflated by the idle working
-    // set having been trimmed and faulted back in, which is not memory the call asked for.
+    // The private figure is lower because the RSS one is inflated by the idle working set having
+    // been trimmed and faulted back in, which is not memory the call asked for.
     expect(b.mb_per_call_private).toBe(100);
     expect(b.vcpus).toBe(12);
   });
 
   it("does not let a run's idle ramp flatter its core count", () => {
-    // Whole window: 60 CPU-s over 60 s = 1.0 core, and 5 calls / 1.0 = 5 calls per vCPU, which
-    // reads as *cheaper* than the steady-state answer above. That is the direction the ramp always
-    // errs in, and why D1 asks for the minute rather than the run.
+    // The whole window reads as *cheaper* than the steady-state answer above, which is the
+    // direction the idle ramp always errs in.
     const wholeWindow = perCoreBudget(report({ steady_state: { target_ms: 60_000, full_window: true, worker: { cpu_seconds: 60, wall_ms: 60_000 }, server: { cpu_seconds: 30, wall_ms: 60_000 } } }), {
       roles: WORKER_ROLES,
       calls: 5,
@@ -169,15 +161,13 @@ describe("perCoreBudget", () => {
   });
 
   it("computes turns/s/core from the server subset", () => {
-    // 10 CPU-seconds in the busiest minute = 0.167 cores.
     const b = perCoreBudget(report(), { roles: SERVER_ROLES, turnsPerSecond: 78 });
     expect(b.cores_used).toBe(0.167);
     expect(b.turns_per_s_per_core).toBe(467.07);
   });
 
   it("divides the per-unit-of-work figures by the whole run, not the steady-state window", () => {
-    // CPU per turn and per call-minute answer "what did one unit of work cost", so windowing the
-    // numerator while the denominator counts every unit would understate both.
+    // Windowing the numerator while the denominator counts every unit would understate both.
     expect(perCoreBudget(report(), { roles: SERVER_ROLES, turns: 300 }).cpu_seconds_per_turn).toBe(0.1);
     expect(perCoreBudget(report(), { roles: WORKER_ROLES, calls: 5, callMinutes: 5 }).cpu_seconds_per_call_minute).toBe(12);
   });
@@ -199,8 +189,6 @@ describe("perCoreBudget", () => {
 
 describe("classifyProcess and the tier-3 borrower", () => {
   it("counts sim-borrower as a harness borrower, like borrower-proc", () => {
-    // Issue #1 Phase 1's borrower costs what the tier-2 one costs and belongs in the same role, so a
-    // tier-3 run's own cost is reported beside the worker's rather than landing unclassified.
     expect(classifyProcess("node /repo/apps/voice-worker/src/tracer/sim-borrower.ts")).toBe("harness-borrower");
     expect(classifyProcess("node /repo/apps/voice-worker/src/tracer/borrower-proc.ts")).toBe("harness-borrower");
   });
@@ -225,11 +213,7 @@ describe("validateReport", () => {
     expect(problems).toContain("resources.steady_state is missing");
   });
 
-  it("refuses a container basis with no container row behind it (Phase D)", () => {
-    // `per_core.basis` was written from the *request*, not from what came back — so a run whose
-    // sampler could not reach the docker socket produced a report claiming
-    // `containers: feather-lite-worker` with no worker row, and the per-core budget, which is the
-    // whole of D1, was silently absent from exactly the runs it is defined on.
+  it("refuses a container basis with no container row behind it", () => {
     const problems = validateReport({
       resources: report({ containers: [] }),
       per_core: { basis: "containers: feather-lite-worker" },
@@ -256,18 +240,14 @@ describe("validateReport", () => {
 });
 
 /**
- * The window arithmetic, against the case that broke it: a job process that finishes its call
- * before the window closes. `cpuByPid` is rebuilt from `Get-Process` each tick, so such a process
- * is simply absent from every later tick — and reading the closing tick directly credited it with
- * nothing. In a fleet run that is the ordinary case, not an edge one, and the error runs in the
- * flattering direction: less CPU counted, so fewer cores, so more calls per vCPU.
+ * `cpuByPid` is rebuilt from `Get-Process` each tick, so a job process that exits mid-window is
+ * absent from every later tick and reading the closing tick alone would credit it with nothing.
  */
 const ticks = (rows: ReadonlyArray<readonly [number, ReadonlyArray<readonly [number, number]>]>): CpuTick[] =>
   rows.map(([t, pairs]) => ({ t, cpuByPid: new Map(pairs.map(([pid, cpu]) => [pid, cpu])) }));
 
 describe("cumulativeCpuByPid", () => {
   it("holds a process's CPU after it exits instead of dropping it", () => {
-    // pid 2 is born at tick 1, spends 4 CPU-seconds, and is gone by tick 3.
     const series = ticks([
       [0, [[1, 100]]],
       [1_000, [[1, 100.5], [2, 1]]],
@@ -287,7 +267,6 @@ describe("cumulativeCpuByPid", () => {
 });
 
 describe("busiestCpuWindow", () => {
-  // Five ticks a second apart; pid 2 works hard early and exits, pid 1 ticks over throughout.
   const series = ticks([
     [0, [[1, 0]]],
     [1_000, [[1, 0.1], [2, 0]]],
@@ -298,8 +277,6 @@ describe("busiestCpuWindow", () => {
   const spent = cumulativeCpuByPid(series);
 
   it("credits a window with the CPU of a process that exited inside it", () => {
-    // 0 -> 4 s: pid 1 spent 0.4, pid 2 spent 2.0 before exiting. Reading the closing tick alone
-    // would have seen pid 2 absent and reported 0.4.
     const w = busiestCpuWindow(series, spent, [1, 2], 4_000);
     expect(w.cpu_seconds).toBe(2.4);
     expect(w.wall_ms).toBe(4_000);
@@ -307,8 +284,7 @@ describe("busiestCpuWindow", () => {
   });
 
   it("picks the busiest window, not the first or the longest", () => {
-    // Two-second windows: [0,2] has 1.2, [1,3] has 2.2 (0.2 from pid 1, all 2.0 of pid 2's work),
-    // [2,4] has 1.2. The middle one wins.
+    // Two-second windows hold 1.2, 2.2 and 1.2, so the middle one wins.
     expect(busiestCpuWindow(series, spent, [1, 2], 2_000).cpu_seconds).toBe(2.2);
   });
 

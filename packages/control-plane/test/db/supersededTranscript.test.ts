@@ -1,11 +1,3 @@
-/**
- * A barge-in leaves an orphan borrower line in the ledger: USER_TURN_FINAL is appended in T1,
- * supersession is only detected in T2, and the superseded turn never gets a matching AGENT_TURN.
- * Those lines are true (the borrower said them) so they stay in the console transcript, but the
- * decider must not see them -- several borrower lines in a row is misleading input exactly when the
- * call is most chaotic. This asserts the split: absent from DeciderInput.recentTranscript, present
- * in the ledger.
- */
 import { Deferred, Effect, Fiber, Layer, Ref, Stream } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -23,7 +15,6 @@ import {
 import type { TurnFrame } from "@feather-lite/contracts";
 import { makeInfraLayer, makeRuntime, truncateAll } from "./harness.js";
 
-/** Every input the decider was handed, so the test can assert on what the prompt would have said. */
 const seen: DeciderInput[] = [];
 /** Held so t1 is still in flight when t2 barges in. */
 const gate = await Effect.runPromise(Deferred.make<void>());
@@ -62,13 +53,8 @@ describe("superseded turns and the decider's transcript", () => {
         const wf = yield* WorkflowService;
         const orch = yield* Orchestrator;
         const started = yield* wf.startCall({ borrowerId, contactPointId: cpId, channel: "simulated", now: FROZEN_NOW });
-
-        /**
-         * The text matters: it must reach the decider. A pure hold request ("hold on a second",
-         * which this fixture used to say) is answered by D1's `wait` without consulting the decider
-         * at all, so it can never be in flight to be superseded.
-         */
-        // t1 goes in flight and blocks in the decider.
+        // The text matters: a pure hold request is answered without consulting the decider, so it
+        // could never be in flight to be superseded.
         const frames1 = yield* Ref.make<TurnFrame[]>([]);
         const fiber1 = yield* Effect.fork(
           orch.processTurn({ conversationId: started.conversationId, turnId: "t1", userText: "I need to check my account balance first" }, (f) => Ref.update(frames1, (xs) => [...xs, f])),
@@ -78,7 +64,6 @@ describe("superseded turns and the decider's transcript", () => {
           tries++;
           yield* Effect.sleep("20 millis");
         }
-        // t2 barges in: T1 writes TURN_SUPERSEDED for t1, then builds t2's decider input.
         yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t2", userText: "yes this is Jordan", supersede: true }, () => Effect.void);
         yield* Deferred.succeed(gate, void 0);
         yield* Fiber.join(fiber1).pipe(Effect.either);
@@ -92,11 +77,8 @@ describe("superseded turns and the decider's transcript", () => {
     expect(t2Input).toBeDefined();
     const texts = t2Input!.recentTranscript.map((e) => e.text);
     expect(texts).not.toContain("I need to check my account balance first");
-    // ...and no two borrower lines end up adjacent.
     const speakers = t2Input!.recentTranscript.map((e) => e.speaker);
     expect(speakers.some((s, i) => i > 0 && s === "BORROWER" && speakers[i - 1] === "BORROWER")).toBe(false);
-
-    // The ledger still has it: the borrower did say those words.
     expect(out.events.some((e) => e.type === "USER_TURN_FINAL" && e.payload.text === "I need to check my account balance first")).toBe(true);
     expect(out.transcript.some((e) => e.text === "I need to check my account balance first")).toBe(true);
     expect(out.events.some((e) => e.type === "TURN_SUPERSEDED" && e.payload.turn_id === "t1")).toBe(true);

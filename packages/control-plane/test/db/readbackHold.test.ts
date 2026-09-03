@@ -1,13 +1,3 @@
-/**
- * The promise read-back is a line the borrower may not talk over (issue #1, D1 — Phase 2).
- *
- * The whole chain in one assertion: the read-back is written `non_interruptible`, so
- * `unreportedNonInterruptible` finds it while it is playing, so `held` parks a turn that arrives
- * during it — and the borrower's "yes" is answered once instead of triggering a second read-back.
- *
- * Until Phase 2 the read-back was `allowInterruptions: true`, which made F2's mechanism correct and
- * unreachable: tier 3's `yes-during-read-back` counted two read-backs on every green run.
- */
 import { Effect, Layer, Stream } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -58,7 +48,6 @@ describe("the promise read-back", () => {
         yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t2", userText: "I can pay 550 on Friday" }, () => Effect.void);
         const events = yield* (yield* ConversationRepo).listEvents(started.conversationId);
         const readback = events.find((e) => e.type === "AGENT_TURN" && /say yes to confirm/i.test(String(e.payload.text ?? "")));
-        // And the mechanism can see it: this is the join D1 depends on.
         const segment = yield* (yield* ConversationRepo).unreportedNonInterruptible(started.conversationId);
         return { mode: readback?.type === "AGENT_TURN" ? readback.payload.speak_mode : null, segment };
       }),

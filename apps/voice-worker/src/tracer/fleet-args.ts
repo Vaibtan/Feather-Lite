@@ -1,28 +1,11 @@
 /**
- * The fleet harness's command line (issue #4, H6).
- *
- * Pure and separate from `fake-borrower-fleet.ts` because that module places calls at import time;
- * this is the part a test can hold still.
- *
- * Two defects, and they are the same defect twice. The report was written to
- * `${date}-tier2-n${CALLS}.json`, so a second run on the same day at the same N **silently
- * overwrote the first** — which happened during the 2026-09-02 review, to a tracked report that had
- * to be restored from git, and five more times in the session that wrote this. And `--label` was
- * accepted and ignored, along with every other flag nobody had implemented: a run invoked with a
- * misspelled gate ran without that gate and said nothing.
- *
- * So the label is required and lands in the filename, and an unknown flag is a refusal. Both are
- * about the same thing: a measurement you cannot identify afterwards is not evidence, and a gate
- * you think you passed is worse than one you know you skipped.
- *
- * The scanner itself lives in `harness-args.ts` — tier 3 needed the same two rules, and the lesson
- * is not fleet-specific. What stays here is the fleet's own flags and their bounds.
+ * Separate from `fake-borrower-fleet.ts` because that module places calls at import time; this is
+ * the part a test can hold still. The scanner is shared, in `harness-args.ts`.
  */
 import { labelOrRefusal, normaliseLabel, refusalOf, scanFlags, type FlagSpec } from "./harness-args.js";
 
 export { normaliseLabel };
 
-/** A flag that takes a value, and what it means when a refusal has to name it. */
 const VALUE_FLAGS = {
   calls: "how many concurrent calls to place",
   "max-wer": "the word-error rate above which the run fails",
@@ -30,7 +13,6 @@ const VALUE_FLAGS = {
   label: "what this run is called, which is also what its report is named",
 } as const;
 
-/** A flag that is present or absent. */
 const BOOLEAN_FLAGS = {
   "in-proc": "run the borrowers in this process instead of a forked child",
   "allow-dev": "measure a dev-mode worker on purpose",
@@ -42,9 +24,8 @@ export interface FleetArgs {
   readonly calls: number;
   readonly maxWer: number;
   /**
-   * D3's entity gate. Zero by default and deliberately: a wrong amount is a wrong promise, so it is
-   * not the kind of thing that gets a tolerance. Dates and names are reported, not gated, until the
-   * accent personas say what their floor should be.
+   * Zero by default and deliberately: a wrong amount is a wrong promise, so it is not the kind of
+   * thing that gets a tolerance. Dates and names are reported rather than gated.
    */
   readonly maxAmountErrors: number;
   /** Filesystem-safe, and never empty: the report is named after it. */
@@ -52,7 +33,7 @@ export interface FleetArgs {
   readonly inProc: boolean;
   readonly allowDev: boolean;
   readonly allowNoShedding: boolean;
-  /** Deliberately running past the worker's admitted concurrency (H4). */
+  /** Deliberately running past the worker's admitted concurrency. */
   readonly allowShed: boolean;
 }
 
@@ -101,5 +82,5 @@ export const parseFleetArgs = (argv: ReadonlyArray<string>): ParsedFleetArgs => 
   };
 };
 
-/** Where this run's report goes. The label is in the name so two runs a day cannot collide. */
+/** The label is in the name so two runs on one day cannot collide. */
 export const reportFileName = (date: string, calls: number, label: string): string => `${date}-tier2-n${String(calls)}-${label}.json`;

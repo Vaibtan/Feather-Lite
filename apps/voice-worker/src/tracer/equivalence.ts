@@ -1,12 +1,8 @@
 /**
- * SPEC §10.5 equivalence: a real voice call and the equivalent JSON simulation must produce the
- * same conversation, not merely a working one.
- *
- * The reference is not hard-coded here — it is produced by running the corresponding scenario
- * (`happy-path-promise-to-pay`) through the same control plane, so the assertion tracks the
- * scenario suite instead of drifting from it. What must match is the deterministic spine of the
- * ledger: the state path, the tool sequence, and the final outcome. Wording, timing, playout and
- * barge-in events legitimately differ between a typed simulation and spoken audio.
+ * The reference is produced by running the scenario through the same control plane rather than
+ * hard-coded, so the assertion cannot drift from the suite. Only the deterministic spine is
+ * compared — state path, tool sequence, final outcome — because wording, timing and barge-in events
+ * legitimately differ between a typed simulation and spoken audio.
  */
 import { harnessHeaders } from "@feather-lite/load-test/harness-http";
 export interface ScenarioReference {
@@ -15,7 +11,7 @@ export interface ScenarioReference {
   readonly tools: ReadonlyArray<string>;
   readonly callControlActions: ReadonlyArray<string>;
   readonly finalOutcome: string | null;
-  /** The scenario itself passed its own assertions (otherwise the reference is worthless). */
+  /** The scenario itself passed its own assertions; otherwise the reference is worthless. */
   readonly scenarioPassed: boolean;
 }
 
@@ -28,7 +24,6 @@ export interface EquivalenceResult {
   readonly finalOutcome: string | null;
 }
 
-/** Run the reference simulation scenario and capture what it actually produced. */
 export const loadScenarioReference = async (controlPlaneUrl: string, scenarioId = "happy-path-promise-to-pay"): Promise<ScenarioReference> => {
   const res = await fetch(`${controlPlaneUrl}/api/testing/scenarios/${scenarioId}/run`, { method: "POST", headers: harnessHeaders() });
   if (!res.ok) throw new Error(`scenario ${scenarioId} run failed: ${res.status} ${await res.text()}`);
@@ -49,7 +44,6 @@ export const loadScenarioReference = async (controlPlaneUrl: string, scenarioId 
   };
 };
 
-/** Compare a finished voice conversation's ledger against the simulation reference. */
 export const checkEquivalence = async (controlPlaneUrl: string, conversationId: string, reference: ScenarioReference): Promise<EquivalenceResult> => {
   const res = await fetch(`${controlPlaneUrl}/api/conversations/${conversationId}`, { headers: harnessHeaders() });
   if (!res.ok) throw new Error(`conversation ${conversationId} fetch failed: ${res.status} ${await res.text()}`);
@@ -57,8 +51,7 @@ export const checkEquivalence = async (controlPlaneUrl: string, conversationId: 
     conversation?: { final_outcome: string | null; current_state: string };
     event_timeline?: Array<{ type: string; payload: Record<string, unknown> }>;
   };
-  // This comparison is the whole point of the harness, so a response that is not the shape we think
-  // it is must be an error, not two empty arrays quietly comparing equal.
+  // An unexpected shape must throw, not leave two empty arrays quietly comparing equal.
   if (!detail.conversation || !Array.isArray(detail.event_timeline)) {
     throw new Error(`conversation ${conversationId}: unexpected detail shape (keys: ${Object.keys(detail).join(", ")})`);
   }

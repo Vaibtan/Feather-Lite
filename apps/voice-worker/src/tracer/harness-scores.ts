@@ -1,16 +1,6 @@
-/**
- * The voice harnesses post what they measured back to the conversation as scores
- * (spec 2026-08-26, D4: "harness runs and production calls share one score model").
- *
- * WER only exists here — a production call has no ground truth — so without this the number would
- * live in a terminal scrollback and nowhere else. Posting it through the same
- * `POST /api/conversations/:id/scores` a human label uses means the Quality page, Langfuse and the
- * fleet report all read one store rather than three.
- */
 import { entityErrors } from "@feather-lite/domain";
 import { harnessHeaders, harnessJsonHeaders } from "@feather-lite/load-test/harness-http";
 
-/** One turn as the ledger knows it: its id, and when the control plane claimed it. */
 export interface LedgerTurn {
   readonly turn_id: string;
   readonly startedAtMs: number;
@@ -39,8 +29,7 @@ export const postHarnessScores = async (
       body: JSON.stringify({ scores }),
     });
     if (!res.ok) {
-      // Logged, never thrown: a harness run that measured everything correctly must not be failed
-      // by the reporting of it, and the numbers are already on stdout.
+      // Logged, never thrown: a run that measured correctly must not be failed by the reporting.
       log?.(`posting scores failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
       return;
     }
@@ -50,36 +39,19 @@ export const postHarnessScores = async (
   }
 };
 
-/**
- * Everything one harness call measured, as scores (D4 and user story 22: WER, response latency and
- * the equivalence verdict). Built once and shared by the single-call and fleet harnesses, which
- * were assembling the same list independently and had already begun to drift.
- *
- * Per-turn rows as well as the call-level summary: D4 asks for `stt.wer` "per turn and the call
- * mean + worst line", and a mean alone cannot tell a call where every line was slightly wrong from
- * one where a single line was badly wrong.
- */
+/** Per-turn rows as well as the mean: a mean cannot tell many slightly-wrong lines from one bad one. */
 export const buildHarnessScores = (params: {
   readonly equivalent: boolean;
   readonly equivalenceComment: string;
   readonly werLines: ReadonlyArray<{ readonly turn: string; readonly atMs: number; readonly reference: string; readonly hypothesis: string; readonly wer: number | null }>;
   readonly turnLatencies: ReadonlyArray<{ readonly turn: string; readonly atMs: number; readonly ms: number }>;
   /**
-   * The conversation's turns from the ledger, in `started_at` order (O8).
-   *
-   * The harness names its measurements after the line it spoke — `"BARGE-IN: I can pay 550 on
-   * Friday"` — and those were posted as `turn_id`. They matched no row in `conversation_turns`, so
-   * every per-turn harness score joined nothing and silently took the session-level fallback in
-   * `Tracing.score`. The ledger's ids are the only real ones, and the harness already reads the
-   * ledger for its TTS numbers.
+   * In `started_at` order. The ledger's ids are the only real ones — a harness names its
+   * measurements after the line it spoke, and those join no row in `conversation_turns`.
    */
   readonly ledgerTurns: ReadonlyArray<LedgerTurn>;
-  /**
-   * When the call ended, closing the last measurement's join window (H3). Without it the final line
-   * reaches forward forever and can claim a post-call turn.
-   */
+  /** Closes the last measurement's join window; without it the final line reaches forward forever. */
   readonly callEndedAtMs?: number;
-  /** Told what could not be joined, and how many rows that is. Never fails the run. */
   readonly log?: (message: string) => void;
 }): ReadonlyArray<HarnessScore> => {
   const wer = summariseWer(params.werLines);
@@ -87,15 +59,9 @@ export const buildHarnessScores = (params: {
   const werTurnIds = matchLedgerTurns(measuredLines, params.ledgerTurns, params.callEndedAtMs);
   const latencyTurnIds = matchLedgerTurns(params.turnLatencies, params.ledgerTurns, params.callEndedAtMs);
   /**
-   * A measurement that could not be joined is **dropped**, not posted with a null turn id
-   * (review #10).
-   *
-   * The score key is `(conversation_id, turn_id, name, source)` with `NULLS NOT DISTINCT` and an
-   * upsert behind it (`migrations/0002_scores.ts:44`), so N per-line `stt.wer` rows at
-   * `turn_id: null` were never N rows: they collapsed onto each other *and* onto the call-level
-   * mean posted under the same name, last write winning, while the harness reported writing N+1.
-   * The call-level mean and worst line survive, carry the same information in aggregate, and are
-   * honest about being about the call.
+   * A measurement that could not be joined is dropped, not posted with a null turn id: the score
+   * key is `(conversation_id, turn_id, name, source)` with `NULLS NOT DISTINCT` behind an upsert,
+   * so N per-line rows at `turn_id: null` collapse onto each other and onto the call-level mean.
    */
   const unjoined = werTurnIds.filter((id) => id === null).length + latencyTurnIds.filter((id) => id === null).length;
   if (unjoined > 0) {
@@ -119,9 +85,6 @@ export const buildHarnessScores = (params: {
           { name: "stt.wer", value: wer.mean, source: "HARNESS", comment: `mean over ${wer.n} borrower line(s)` } as HarnessScore,
           { name: "stt.wer_worst_line", value: wer.worst.wer, source: "HARNESS", comment: wer.worst.turn, evidence: { reference: wer.worst.reference, hypothesis: wer.worst.hypothesis } } as HarnessScore,
         ]),
-    // The composite metric the latency work of ADR 0007/0008 is measured against: borrower falls
-    // silent -> agent starts replying. Per turn, because a mean hides the one slow turn, and with
-    // the ledger's own id so it joins `conversation_turns`; the label stays as the comment.
     ...params.turnLatencies.flatMap((t, i): ReadonlyArray<HarnessScore> => {
       const turnId = latencyTurnIds[i];
       if (turnId === null || turnId === undefined) return [];
@@ -131,44 +94,20 @@ export const buildHarnessScores = (params: {
 };
 
 /**
- * Join harness measurements to ledger turns **by time**, not by position (review #10).
- *
- * Position held only while the two lists described the same turns. A barge-in adds a turn row the
- * harness never measured, and from that row on every measurement was one place out — which is why
- * the old code refused to join at all in that case and posted null keys instead.
- *
- * A measurement is anchored to the instant the borrower fell silent; the ledger's turn is created
- * afterwards, when the worker posts the committed turn. So a measurement's turn is one that started
- * after it — **and before the next line was spoken**. That upper bound is what makes the join safe
- * rather than merely plausible: without it, a line the agent never answered would reach forward and
- * claim the *next* line's turn, and every score after it would be posted under someone else's turn
- * id. A wrong join is worse than an absent one, and it is worse silently, because only the absences
- * are counted.
- *
- * `null` where the window holds no unclaimed turn — an unanswered line, or a run whose measurements
- * outnumber the turns that were recorded.
+ * Joined by time, not by position: a barge-in adds a turn row the harness never measured, and from
+ * there on every positional join is one place out. A measurement's turn is one that started after
+ * it and before the next line was spoken — that upper bound is what keeps an unanswered line from
+ * reaching forward and claiming the next line's turn, which is worse than not joining at all.
  */
 /**
- * How far a turn may appear to precede the line it belongs to.
- *
- * Only clock skew: the harness reads `Date.now()` and the control plane stamps `started_at`, and
- * both are on one box for every run this harness produces. It is not a "how long may a turn take to
- * be claimed" budget — that direction is bounded by the next line instead, which is a fact rather
- * than a guess. 250 ms is an order of magnitude above any same-box skew and an order of magnitude
- * below the gap between two scripted lines.
+ * Clock skew only, not a budget for how long a turn may take to be claimed — that direction is
+ * bounded by the next line. 250 ms is an order of magnitude above any same-box skew and an order
+ * of magnitude below the gap between two scripted lines.
  */
 const CLOCK_GRACE_MS = 250;
 /**
- * D4's six turn-taking numbers, as scores (issue #1, D4; the names are H8's).
- *
- * Separate from `buildHarnessScores` because it is measured differently: those come from what the
- * harness spoke and heard, these from the join of the borrower's own events with the agent's speech
- * stretches and the ledger's playout truth. Only tier 3 has that join today.
- *
- * **A null is not posted.** `null` here means "no denominator" — no interruption happened, so there
- * is no yield rate — and a score row of 0 would read as "it never yielded", which is a different and
- * worse claim than silence. H11's `unknown_truncation` count travels with them as evidence so a
- * reader can see how thin the denominator was.
+ * A null is not posted: it means there was no denominator, and a 0 would read as "it never
+ * yielded", which is a different and worse claim than silence.
  */
 export const turnTakingScores = (
   metrics: {
@@ -204,30 +143,15 @@ export const turnTakingScores = (
 export const matchLedgerTurns = (
   measurements: ReadonlyArray<{ readonly atMs: number }>,
   ledgerTurns: ReadonlyArray<LedgerTurn>,
-  /**
-   * When the call ended, closing the last measurement's window (H3).
-   *
-   * Without it the final line's window runs to infinity and claims whatever turn the ledger opened
-   * next — a post-call turn, or the sweeper's close, joined to a line the borrower spoke a minute
-   * earlier. Optional so a caller that genuinely does not know keeps the old behaviour rather than
-   * being handed a wrong bound.
-   */
+  /** Optional, so a caller that does not know keeps the old behaviour rather than a wrong bound. */
   callEndedAtMs?: number,
 ): ReadonlyArray<string | null> => {
   const turns = [...ledgerTurns].sort((a, b) => a.startedAtMs - b.startedAtMs);
   const claimed = new Set<string>();
   /**
-   * Only measurements that can be ordered (H3).
-   *
-   * An abandoned line carries `atMs: NaN`, and `(a, b) => a.atMs - b.atMs` returns `NaN` for every
-   * comparison involving it — an inconsistent comparator, which `Array.prototype.sort` is entitled
-   * to answer by permuting the array however it likes. Measured on the case below: one `NaN` among
-   * four measurements moved a *finite* line off its own turn, so a score was posted under another
-   * turn's id. Only the nulls are counted as unjoined, so nothing would have said so — and this
-   * file's own note is that a wrong join is worse than an absent one, silently.
-   *
-   * A non-finite instant can never join anything anyway, so it is dropped before the sort and left
-   * `null`, which is what "this measurement has no turn" already means everywhere else here.
+   * Only measurements that can be ordered: an abandoned line carries `atMs: NaN`, which makes the
+   * comparator inconsistent and lets `sort` permute the array — measured, one `NaN` moved a finite
+   * line onto another turn's id. A non-finite instant can never join anything, so it is dropped.
    */
   const byTime = measurements
     .map((m, index) => ({ index, atMs: m.atMs }))
@@ -235,8 +159,7 @@ export const matchLedgerTurns = (
     .sort((a, b) => a.atMs - b.atMs);
   const out: Array<string | null> = measurements.map(() => null);
   byTime.forEach((m, i) => {
-    // The next line's instant closes this line's window: a turn that started after the borrower had
-    // already moved on belongs to that later line. For the last line it is the end of the call.
+    // The next line's instant closes this line's window; for the last line it is the end of the call.
     const until = byTime[i + 1]?.atMs ?? callEndedAtMs ?? Number.POSITIVE_INFINITY;
     const hit = turns.find((t) => !claimed.has(t.turn_id) && t.startedAtMs >= m.atMs - CLOCK_GRACE_MS && t.startedAtMs < until);
     if (!hit) return;
@@ -246,14 +169,10 @@ export const matchLedgerTurns = (
   return out;
 };
 
-/** Call-level WER summary from the per-line measurements, ignoring lines with no reference. */
+/** Lines with no reference are ignored. */
 /**
- * The entity gate, summarised over a call (issue #1, D3).
- *
- * Reported beside `stt.wer` rather than folded into it, because the two answer different questions:
- * WER asks how much of the transcript was wrong, this asks whether the parts that decide the call
- * survived. An amount error is a wrong promise, not a degraded transcript, which is why D3 gates it
- * at zero and only reports dates and names.
+ * Beside `stt.wer`, not folded into it: WER asks how much of the transcript was wrong, this asks
+ * whether the parts that decide the call survived. An amount error is a wrong promise.
  */
 export const summariseEntities = <L extends { readonly reference: string; readonly hypothesis: string }>(
   lines: ReadonlyArray<L>,
@@ -297,14 +216,7 @@ export const summariseWer = <L extends { readonly turn: string; readonly wer: nu
   return { mean: Math.round(mean * 10000) / 10000, worst, n: measured.length };
 };
 
-/**
- * The conversation's turns from the ledger, with the instant each was claimed (O8, review #10).
- *
- * A harness measures per turn and names the line it spoke; only the ledger knows what the turn is
- * actually called, and only `started_at` says which turn a measurement belongs to. Failing to read
- * them is not fatal — the per-turn scores are then dropped and the call-level summary stands, which
- * is what existed before any of this — so this never throws.
- */
+/** Never throws: failing to read them drops the per-turn scores and leaves the call-level summary. */
 export const ledgerTurns = async (controlPlaneUrl: string, conversationId: string): Promise<ReadonlyArray<LedgerTurn>> => {
   try {
     const res = await fetch(`${controlPlaneUrl}/api/conversations/${conversationId}/latency`, { headers: harnessHeaders() });

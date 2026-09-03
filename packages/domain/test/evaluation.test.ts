@@ -1,10 +1,3 @@
-/**
- * The deterministic post-call evaluator (spec 2026-08-26, D2).
- *
- * Everything it reports is already in the ledger, so these are event fixtures in and facts out —
- * no database, no LLM. The fixtures follow `replay.test.ts`: build the events in the exact JSON
- * shape the orchestrator writes, then assert on the derived facts.
- */
 import { Either } from "effect";
 import { describe, expect, it } from "vitest";
 import { decodeEventRecord, disclosesProtectedDetail, evaluateCall, openingScript, PROTECTED_DISCLOSURE_PATTERNS, thirdPartyClose, wrongNumberClose, type EventRecord } from "../src/index.js";
@@ -15,7 +8,6 @@ const rec = (sequence_no: number, type: string, payload: Record<string, unknown>
   return decoded.right;
 };
 
-/** A compliant happy path: disclosure first, verified, promise read back in full and heard. */
 const happyPath: ReadonlyArray<EventRecord> = [
   rec(1, "CALL_STARTED", { workflow_execution_id: "w", call_attempt_id: "a", contact_point_id: "c", channel: "voice", attempt_no: 1 }, 0),
   rec(2, "STATE_TRANSITION", { from: null, to: "GREETING", triggered_by: "SYSTEM_START" }, 0),
@@ -58,7 +50,6 @@ describe("evaluateCall — compliance", () => {
   });
 
   it("catches account detail spoken before right-party confirmation", () => {
-    // The balance line moves ahead of the RIGHT_PARTY_CONFIRMED transition.
     const events = [
       ...happyPath.slice(0, 3),
       rec(4, "AGENT_TURN", { text: "Your balance due is 550 dollars and you are 15 days delinquent.", state: "GREETING" }, 2),
@@ -70,14 +61,12 @@ describe("evaluateCall — compliance", () => {
   });
 
   it("does not treat the promise read-back's own amount as a protected-data leak", () => {
-    // The read-back is spoken after verification; the check must be positional, not textual.
+    /** The read-back is spoken after verification, so the check must be positional, not textual. */
     const e = evaluateCall(happyPath);
     expect(e.noProtectedBeforeRpc).toBe(true);
   });
 
   it("fails the read-back check when the promise was recorded after an interrupted read-back", () => {
-    // Same events, but the borrower talked over the read-back — the ledger says it was not heard in
-    // full, so a promise recorded anyway means the fully-heard guard did not hold.
     const events = happyPath.map((ev) =>
       ev.sequence_no === 15 ? rec(15, "AGENT_TURN_PLAYOUT", { turn_id: "t2", heard_text: "To confirm: you will pay", interrupted: true }, 18) : ev,
     );
@@ -88,11 +77,7 @@ describe("evaluateCall — compliance", () => {
   });
 
   it("checks the read-back, not whatever the agent said last, when a side-question intervenes", () => {
-    // The borrower asks something in CONFIRMING_OUTCOME and the agent answers: a plain AGENT_TURN
-    // with no tool call, whose own playout the borrower legitimately talked over. The read-back
-    // before it was heard in full, so the promise is compliant. Identifying the read-back as "the
-    // last agent line before the record" would fail this call, so the sequence numbers here put the
-    // side-question strictly between the read-back and the record.
+    /** The sequence numbers put the side-question strictly between the read-back and the record, so a check that took "the last agent line" would fail this call. */
     const events: ReadonlyArray<EventRecord> = [
       ...happyPath.slice(0, 15), // ... up to and including the read-back's playout (seq 15)
       rec(16, "USER_TURN_FINAL", { text: "wait, will this show on my credit report?", turn_id: "t2b" }, 19),
@@ -110,8 +95,6 @@ describe("evaluateCall — compliance", () => {
   });
 
   it("checks the repeated read-back after a rejection, not the first one", () => {
-    // The first read-back was talked over, the guard rejected the record, the agent repeated it,
-    // and the repeat was heard in full. The promise that follows is compliant.
     const events: ReadonlyArray<EventRecord> = [
       ...happyPath.slice(0, 14),
       rec(140, "AGENT_TURN", { text: "To confirm: you will pay 550 dollars by Friday, August 21, 2026.", state: "CONFIRMING_OUTCOME", turn_id: "t2" }, 13),
@@ -141,17 +124,14 @@ describe("evaluateCall — compliance", () => {
   });
 
   it("does not fault a simulated call that has no playout events at all", () => {
-    // A JSON simulation records no audio, so "was it heard in full" has no evidence either way.
     const events = happyPath.filter((ev) => ev.type !== "AGENT_TURN_PLAYOUT");
     const e = evaluateCall(events);
     expect(e.noPromiseWithoutReadback).toBeNull();
     expect(e.complianceOk).toBe(true);
   });
 
-  it("carries its own denominator, so a short n can be told from a failure (O12)", () => {
-    // The Quality page showed this check at n=2 beside a promise count of 5 with no way to tell a
-    // check that failed from one that had nothing to look at. Only a voice call emits
-    // AGENT_TURN_PLAYOUT, so on a simulated call the promise is unmeasurable rather than clean.
+  it("carries its own denominator, so a short n can be told from a failure", () => {
+    /** Only a voice call emits a playout event, so on a simulated call the promise is unmeasurable rather than clean. */
     const voice = evaluateCall(happyPath);
     expect(voice.noPromiseWithoutReadback).toBe(true);
     expect(voice.promisesChecked).toBe(1);
@@ -160,7 +140,6 @@ describe("evaluateCall — compliance", () => {
     const simulated = evaluateCall(happyPath.filter((ev) => ev.type !== "AGENT_TURN_PLAYOUT"));
     expect(simulated.noPromiseWithoutReadback).toBeNull();
     expect(simulated.promisesChecked).toBe(0);
-    // The promise is still there; it is the evidence about it that is missing.
     expect(simulated.promisesWithoutPlayout).toBe(1);
   });
 });
@@ -176,7 +155,6 @@ describe("evaluateCall — call facts", () => {
     expect(e.noInputCount).toBe(0);
     expect(e.degradedTurns).toBe(0);
     expect(e.toolRejectionCount).toBe(0);
-    // CALL_STARTED at :00 to CALL_ENDED at :25.
     expect(e.durationMs).toBe(25_000);
   });
 
@@ -210,8 +188,6 @@ describe("evaluateCall — call facts", () => {
     const e = evaluateCall(events);
     expect(e.voicemail).toBe(true);
     expect(e.rightPartyVerified).toBe(false);
-    // A voicemail is FDCPA-safe precisely by NOT reciting the Mini-Miranda, so the check must not
-    // fire on one — it is scored as not applicable rather than as a failure.
     expect(e.miniMirandaFirst).toBeNull();
     expect(e.issues).toEqual([]);
   });
@@ -233,11 +209,7 @@ describe("protected-disclosure patterns", () => {
     borrower_first_name: "Jordan",
   };
 
-  /**
-   * Everything the agent is allowed to say *before* right-party confirmation. A pattern that fires
-   * on any of these would fail every compliant call, and an alert that cries wolf gets ignored —
-   * which is worse than not having it.
-   */
+  /** Every line here is one the agent may speak before confirmation; a pattern that fired on any of them would fail every compliant call. */
   it("does not fire on any line the agent may speak before verification", () => {
     for (const line of [openingScript(ctx), thirdPartyClose(), wrongNumberClose(), "May I please speak with Jordan?", "I can hold if now is a bad time."]) {
       expect(disclosesProtectedDetail(line)).toBe(false);
@@ -253,11 +225,7 @@ describe("protected-disclosure patterns", () => {
     expect(disclosesProtectedDetail("You previously promised to pay on the tenth.")).toBe(true);
   });
 
-  /**
-   * The map is keyed by protected field so the two halves of "protected" cannot drift. A new field
-   * on `ProtectedContext` fails to compile here until someone decides how it sounds; this asserts
-   * the deliberate `null` is a decision rather than an oversight.
-   */
+  /** Keyed by protected field so a new field on `ProtectedContext` fails to compile here until someone decides how it sounds. */
   it("has an entry for every protected field, with the name deliberately structural", () => {
     expect(Object.keys(PROTECTED_DISCLOSURE_PATTERNS).sort()).toEqual([
       "balance_due",

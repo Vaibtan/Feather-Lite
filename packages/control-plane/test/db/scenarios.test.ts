@@ -14,12 +14,11 @@ afterAll(async () => {
   await rt.dispose();
 });
 
-describe("deterministic scenario suite (SPEC §18) against the real orchestrator + Postgres", () => {
+describe("deterministic scenario suite against the real orchestrator + Postgres", () => {
   for (const def of SCENARIOS) {
     it(def.id, async () => {
       const result = await rt.runPromise(Effect.flatMap(ScenarioRunner, (r) => r.run(def.id)));
       if (!result.passed) {
-        // Print the timeline to make failures diagnosable from the test output alone.
         console.log(`\n--- ${def.id} ---\n${result.assertion_failures.join("\n")}\nstate path: ${result.actual_state_path.join(" > ")}\nframes:\n${result.frames.map((f) => JSON.stringify(f)).join("\n")}`);
       }
       expect(result.assertion_failures).toEqual([]);
@@ -28,15 +27,12 @@ describe("deterministic scenario suite (SPEC §18) against the real orchestrator
   }
 
   it("records the suite's pass rate as a score, against a fresh synthetic id each run", async () => {
-    // D9. The suite is a test run, not a call, so it is scored against an id that has no
-    // `conversations` row -- which is why `conversation_scores` carries no foreign key. A fresh id
-    // per run is deliberate: per-call scores upsert by identity, but a run's history is a series.
+    // The suite is a test run, not a call, so it is scored against an id that has no `conversations` row.
     const out = await rt.runPromise(
       Effect.gen(function* () {
         const sql = yield* PgClient.PgClient;
         const runner = yield* ScenarioRunner;
-        // Counted as a delta over rows this test created, not as the table's whole contents: the
-        // DB suite shares one database and another file also writes a `scenario.pass_rate` fixture.
+        // Counted as a delta, because the DB suite shares one database with another file that writes this score.
         const before = yield* sql<{ n: string }>`SELECT count(*)::text AS n FROM conversation_scores WHERE name = 'scenario.pass_rate'`;
         const first = yield* runner.runAll();
         const second = yield* runner.runAll();
@@ -53,7 +49,6 @@ describe("deterministic scenario suite (SPEC §18) against the real orchestrator
     expect(out.rows[0]!.source).toBe("SCENARIO");
     expect(out.rows[0]!.comment).toBe(`${SCENARIOS.length}/${SCENARIOS.length} scenarios passed`);
     expect(out.rows[0]!.evidence).toMatchObject({ failed: [], total: SCENARIOS.length });
-    // Two runs, two rows: a second run must not overwrite the first the way a re-judge does.
     expect(out.rows[0]!.conversationId).not.toBe(out.rows[1]!.conversationId);
   });
 });

@@ -1,11 +1,3 @@
-/**
- * Deterministic scenario suite (SPEC §18) — the executable acceptance criteria.
- *
- * Every scenario runs the SAME orchestrator the API and voice worker use, against a real
- * Postgres, with a deterministic decider (scripted by default; some pin a failing/static one).
- * Assertions cover: state path, tool sequence, call-control actions, required event types,
- * final outcome, replay-from-events, and scenario-specific validators.
- */
 import { DateTime, Effect, Layer, Option, Ref, Stream } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import type { ConversationState, EventRecord, TurnChunk } from "@feather-lite/domain";
@@ -24,10 +16,6 @@ import { Scores } from "./Scores.js";
 import { TurnDecider, type TurnDeciderShape, scriptedTurnDecider } from "./TurnDecider.js";
 import type { DeciderInput, TurnResult } from "./types.js";
 import { WorkflowService } from "./Workflow.js";
-
-/* ------------------------------------------------------------------ */
-/* Definitions                                                          */
-/* ------------------------------------------------------------------ */
 
 export type ScenarioStep =
   | { readonly kind: "turn"; readonly text: string; readonly turnId?: string; readonly playout?: { turnId: string; heardText: string; interrupted: boolean } }
@@ -53,13 +41,9 @@ export interface ScenarioDefinition {
   readonly expectedCallControlActions: ReadonlyArray<string>;
   readonly requiredEventTypes: ReadonlyArray<string>;
   readonly expectedFinalOutcome: string | null;
-  /** Override the decider for this scenario (default: scripted). */
   readonly decider?: "scripted" | "failing" | ((input: DeciderInput) => TurnChunk[]);
-  /** Channel of the fixture call. AMD/no-answer scenarios are voice: the opening is not spoken until the runtime reports it. */
   readonly channel?: "simulated" | "voice";
-  /** Steps that are expected to fail (e.g. a turn after completion). */
   readonly expectErrors?: boolean;
-  /** Extra checks; return failure messages. Runs with DB access. */
   readonly validate?: (ctx: ScenarioRunContext) => Effect.Effect<ReadonlyArray<string>, unknown, CrmRepo | SchedulingRepo | ConversationRepo | WorkflowService>;
 }
 
@@ -115,9 +99,7 @@ export const SCENARIOS: ReadonlyArray<ScenarioDefinition> = [
         else if (!(recorded.sequence_no < confirmation.sequence_no)) f.push("confirmation was spoken before the promise was durably recorded");
         const meta = ctx.detail.conversation.final_outcome_metadata;
         if (meta["promised_amount"] !== "550.00") f.push(`promised_amount was ${String(meta["promised_amount"])}`);
-        // The read-back must have carried the exact amount before confirmation.
         if (!ev.some((e) => e.type === "AGENT_TURN" && /550 dollars/.test(e.payload.text) && /Please say yes/.test(e.payload.text))) f.push("read-back not spoken");
-        // Confirmation is a non-interruptible `say` frame emitted after turn_end ordering.
         const sayIdx = ctx.frames.findIndex((fr) => fr.type === "say" && /recorded your promise/.test(fr.text));
         const endIdx = ctx.frames.findIndex((fr, i) => fr.type === "turn_end" && i > sayIdx);
         if (sayIdx < 0 || endIdx < 0) f.push("confirmation say frame missing or not followed by turn_end");
@@ -147,7 +129,6 @@ export const SCENARIOS: ReadonlyArray<ScenarioDefinition> = [
         const cb = actions.find((a) => a.actionType === "CALLBACK");
         if (!cb || cb.status !== "PENDING") f.push("no PENDING CALLBACK scheduled action");
         else {
-          // 3pm America/New_York (EDT, UTC-4) == 19:00Z
           const hourUtc = cb.dueAt.getUTCHours();
           if (hourUtc !== 19) f.push(`callback due at ${cb.dueAt.toISOString()}, expected 19:00Z (15:00 EDT)`);
         }
@@ -515,11 +496,6 @@ export const SCENARIOS: ReadonlyArray<ScenarioDefinition> = [
   },
 ];
 
-/* ------------------------------------------------------------------ */
-/* Runner                                                               */
-/* ------------------------------------------------------------------ */
-
-/** 14:00 America/New_York on a Sunday in August: inside the TCPA window regardless of wall clock. */
 export const FROZEN_NOW = DateTime.unsafeMake("2026-08-16T18:00:00Z");
 
 const deciderFor = (def: ScenarioDefinition, captured: Ref.Ref<ReadonlyArray<DeciderInput>>): TurnDeciderShape => {
@@ -529,7 +505,6 @@ const deciderFor = (def: ScenarioDefinition, captured: Ref.Ref<ReadonlyArray<Dec
       : typeof def.decider === "function"
         ? { name: "static", decide: ((fn) => (input: DeciderInput) => Stream.fromIterable(fn(input)))(def.decider) }
         : scriptedTurnDecider;
-  // Capture every DeciderInput for the leak assertions, then delegate.
   return {
     name: inner.name,
     decide: (input) => Stream.unwrap(Ref.update(captured, (xs) => [...xs, input]).pipe(Effect.as(inner.decide(input)))),
@@ -587,7 +562,6 @@ export class ScenarioRunner extends Effect.Service<ScenarioRunner>()("@feather-l
                 .processTurn({ conversationId: started.conversationId, turnId: step.turnId ?? `t${stepNo}`, userText: step.text, playout: step.playout }, emit)
                 .pipe(Effect.either);
               if (r._tag === "Right") turnResults.push(r.right);
-              // The turn failed outright, so no arm decided it and it has no disposition of its own (F3).
               else turnResults.push({ turnId: step.turnId ?? `t${stepNo}`, decider: "none", disposition: "respond", resolution: "degraded", agentText: `ERROR ${String(r.left)}`, newState: "GREETING", toolCalled: null, callControlAction: null, outcome: null, endCall: false, degraded: true, ttftMs: null });
             } else if (step.kind === "no_input") {
               turnResults.push(yield* orch.processNoInput(started.conversationId));
@@ -623,7 +597,6 @@ export class ScenarioRunner extends Effect.Service<ScenarioRunner>()("@feather-l
         if (detail.conversation.final_outcome !== def.expectedFinalOutcome) failures.push(`outcome ${String(detail.conversation.final_outcome)} != ${String(def.expectedFinalOutcome)}`);
         if (snap.finalOutcome !== def.expectedFinalOutcome) failures.push(`replay outcome ${String(snap.finalOutcome)} != ${String(def.expectedFinalOutcome)}`);
         if (snap.currentState !== detail.conversation.current_state) failures.push(`replay state ${snap.currentState} != row state ${detail.conversation.current_state}`);
-        // Every finalized conversation must have a released turn slot and a stored turn result per turn.
         const row = yield* conv.findConversation(started.conversationId);
         if (Option.isSome(row) && row.value.activeTurnId !== null) failures.push("active_turn_id not released");
         const errored = turnResults.filter((r) => r.agentText.startsWith("ERROR "));
@@ -652,19 +625,8 @@ export class ScenarioRunner extends Effect.Service<ScenarioRunner>()("@feather-l
         return result;
       }).pipe(Effect.provideService(SchedulingRepo, sched), Effect.provideService(CrmRepo, crm), Effect.provideService(ConversationRepo, conv), Effect.provideService(WorkflowService, workflow));
 
-    /**
-     * Run the suite, and record what share of it passed as a score (spec 2026-08-26, D9).
-     *
-     * The suite is scored against a **synthetic conversation id, minted per run**: it is a test
-     * run, not a call, and there is nothing in `conversations` to hang it on. `conversation_scores`
-     * carries no foreign key for exactly this reason. A fresh id per run means the history is a
-     * series of runs rather than one row overwritten each time — the opposite of the upsert
-     * behaviour every per-call score wants, and the right one here.
-     *
-     * Langfuse datasets and experiments were considered and not adopted: the suite already *is* the
-     * dataset, it lives in this repo beside the code it tests, and it runs in CI. Pushing a score is
-     * all that was missing to put CI correctness on the same page as call quality.
-     */
+    // Scored against a synthetic conversation id minted per run: there is no row in `conversations`
+    // to hang it on, and a fresh id per run keeps a history of runs rather than one upserted row.
     const runAll = () =>
       Effect.gen(function* () {
         const results = yield* Effect.forEach(SCENARIOS, (s) => run(s.id), { concurrency: 1 });
@@ -677,8 +639,6 @@ export class ScenarioRunner extends Effect.Service<ScenarioRunner>()("@feather-l
               evidence: { failed, total: results.length, suite_run_id: suiteId },
             }),
           )
-          // A scenario run must not fail because its score could not be written; the run's own
-          // result is the thing under test and it is already in hand.
           .pipe(Effect.catchAllCause((cause) => Effect.logWarning("scenario pass-rate score not written").pipe(Effect.annotateLogs({ cause: String(cause) }))));
         return results;
       });

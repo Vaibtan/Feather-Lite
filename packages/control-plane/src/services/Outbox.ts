@@ -1,7 +1,3 @@
-/**
- * Outbox (SPEC §15.2): post-call jobs enqueued in the SAME transaction as the outcome
- * (summary, evaluation, vector-index stub), processed by a worker with retry/backoff.
- */
 import { DateTime, Effect, Either, Option } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import type { EventRecord, JudgeVerdict, OutboxJobType, ScoreRecord } from "@feather-lite/domain";
@@ -33,22 +29,12 @@ import { Tracing } from "./Tracing.js";
 
 const JOB_TYPES: ReadonlyArray<OutboxJobType> = ["SUMMARY", "EVALUATION", "VECTOR_INDEX"];
 
-/**
- * Retry budgets, per job type. The judge gets a longer one than the deterministic jobs: those fail
- * only if the database or this code is broken, in which case retrying five times is five ways of
- * finding out the same thing, while the judge fails when someone else's API is having an hour.
- */
 const MAX_RETRIES = 3;
 const JUDGE_MAX_RETRIES = 5;
 const retriesFor = (jobType: OutboxJobType): number => (jobType === "JUDGE" ? JUDGE_MAX_RETRIES : MAX_RETRIES);
 
-/** Why a job was failed without being run: every attempt so far ended with a dead process (C3). */
 export const RECLAIM_BUDGET_EXHAUSTED = "reclaimed past the retry budget; every attempt lost its process";
 
-/**
- * What the judge came back with. `verdict` and `invalid` are exclusive: a verdict, or the reason
- * there isn't one after the retry D3 allows.
- */
 interface JudgeOutcome {
   readonly verdict: JudgeVerdict | null;
   readonly attempts: number;
@@ -66,14 +52,10 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
     const llm = yield* LlmClient;
     const tracing = yield* Tracing;
 
-    /** Enqueue post-call jobs (idempotent per job type) and log OUTBOX_ENQUEUED. Caller holds the tx. */
     const enqueuePostCall = (conversationId: string, now: Date) =>
       Effect.gen(function* () {
         const existing = new Set((yield* sched.existingJobTypes(conversationId)).map((r) => r.jobType));
         const created: OutboxJobType[] = [];
-        // The judge is enqueued only when it is switched on. Enqueuing it regardless and skipping
-        // it at processing time would leave every CI run and every load run with a trail of jobs
-        // that look pending forever, which is indistinguishable on the console from a stuck worker.
         const jobTypes = cfg.judge.enabled ? [...JOB_TYPES, "JUDGE" as const] : JOB_TYPES;
         for (const jobType of jobTypes) {
           if (existing.has(jobType)) continue;
@@ -92,16 +74,9 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
       });
 
     /**
-     * Ask the judge about one call (spec 2026-08-26, D3).
-     *
-     * Deliberately **outside** the job's transaction, and called before it opens: a reasoning model
-     * at medium effort takes tens of seconds, and holding a Postgres connection open across that
-     * would let a slow judge exhaust the pool for the live call path.
-     *
-     * One retry on an unparseable verdict, as D3 says. A second failure is recorded as
-     * `judge.invalid_output` and the job completes: a broken judge should be visible *as* a broken
-     * judge, not as a call nobody has looked at, and it should not consume the retry budget meant
-     * for the judge being unreachable — that is a different problem with a different fix.
+     * Called before the job's transaction opens, never inside it: a reasoning model takes tens of
+     * seconds, and holding a Postgres connection across that lets a slow judge exhaust the pool for
+     * the live call path.
      */
     const runJudge = (conversationId: string, events: ReadonlyArray<EventRecord>): Effect.Effect<JudgeOutcome, LlmCallFailed> =>
       Effect.gen(function* () {
@@ -137,25 +112,12 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
 
     const processJob = (job: OutboxJobRow, now: Date) =>
       Effect.gen(function* () {
-        /**
-         * The ledger is read **once per job**, here, and handed to both the judge and the
-         * transaction. A JUDGE job used to read the whole conversation twice — once to give the
-         * model something to read, once again inside the transaction — and a judged call's ledger
-         * is the largest single read this system makes.
-         *
-         * Safe because every outbox job is post-call: `enqueuePostCall` is the only thing that
-         * writes one, and it runs at finalize. The conversation is finished and its event log is
-         * append-only, so a read taken a few milliseconds before the transaction opens sees exactly
-         * what a read inside it would.
-         */
+        // Read once and handed to both the judge and the transaction. Safe because every outbox job
+        // is post-call: the conversation is finished and its event log is append-only.
         const events = yield* conv.listEvents(job.conversationId);
-        // Everything that talks to another system happens before the transaction opens. Today that
-        // is only the judge; the rule is the point.
         const judged = job.jobType === "JUDGE" ? yield* runJudge(job.conversationId, events) : null;
         return yield* processJobTx(job, now, judged, events);
       }).pipe(
-        // Post-call work is per-conversation and runs minutes after the call, on a shared loop, so
-        // its log lines are the least attributable in the system without this (D3).
         Effect.annotateLogs({ conversation_id: job.conversationId, outbox_job: job.jobType }),
       );
 
@@ -177,10 +139,6 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
                 agent_last: (agentLines.at(-1) ?? "").slice(0, 220),
                 tools: snapshot.executedTools,
               };
-              // Persist the cross-call wrap-up (research 2026-08-22 §3.3) onto the conversation row,
-              // where `priorConversations` -> `buildMemoryBlock` reads it on the borrower's NEXT
-              // call. Same jsonb the outcome tools already write, so nothing new to migrate or gate:
-              // memory stays behind the right-party unlock like the rest of the metadata.
               const row = yield* conv.lockConversation(job.conversationId);
               if (Option.isSome(row)) {
                 yield* conv.updateConversation(job.conversationId, {
@@ -196,24 +154,9 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
               break;
             }
             case "EVALUATION": {
-              // The compliance checks and call facts are all ledger-derived, so the work is a pure
-              // function in the domain package (`evaluateCall`) and this job only persists it. The
-              // values go to `conversation_scores`, where they aggregate and can be re-derived; the
-              // job result keeps its long-standing `issues` / `compliance_ok` shape so the console's
-              // outbox panel and anything reading old rows are unaffected.
               const evaluation = evaluateCall(events);
-              // TTS facts live in the turn rows rather than the ledger, so they are read back here
-              // and scored alongside the ledger-derived ones — one job, one set of post-call scores.
               const ttsRows = yield* conv.turnTtsFacts(job.conversationId);
               const silentTurns = silentPlayoutTurnIds(events);
-              /**
-               * The per-call SLO verdict (O6). `latency.slo_pass` has been in the closed score
-               * vocabulary since it was written, typed BOOLEAN, with no producer anywhere — while
-               * `scores.ts` says "an entry here is never a metric nobody emits". It is written here
-               * because this job runs post-call, when every turn row exists and its worker-side
-               * components have landed, and because "was this call within SLO" should be a
-               * historical query rather than something recomputed on a page refresh.
-               */
               const latencyRows = yield* conv.turnLatencyFacts(job.conversationId);
               const verdict = callSloVerdict(
                 latencyRows.map((r) => ({
@@ -226,8 +169,6 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
               );
               const written = yield* scores.recordMany([
                 ...evaluationScores(job.conversationId, evaluation),
-                // Null stays unwritten: a call that measured nothing has not passed the SLO, and a
-                // green tick on it would be the flattering reading of an absence.
                 ...(verdict.pass === null
                   ? []
                   : [
@@ -261,8 +202,6 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
               break;
             }
             case "JUDGE": {
-              // `judged` is always present here: `processJob` runs the model before opening the
-              // transaction. The guard is for the type, and for anyone who calls this directly.
               if (judged === null) return yield* Effect.dieMessage("JUDGE job reached the transaction without a verdict");
               const written = yield* scores.recordMany(
                 judged.verdict === null
@@ -276,9 +215,6 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
                       model: cfg.judge.model,
                       overall_pass: judged.verdict.overall_pass,
                       confidence: judged.verdict.confidence,
-                      // Named from the closed dimension list rather than reflected out of the
-                      // object, so a new dimension is a compile error here instead of a key that
-                      // quietly stops being reported.
                       failed_dimensions: JUDGE_DIMENSIONS.filter((d) => judged.verdict !== null && !judged.verdict[d].pass),
                       attempts: judged.attempts,
                       scores_written: written,
@@ -301,48 +237,19 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
         }),
       );
 
-    /**
-     * How many claimed jobs are processed at once (C2).
-     *
-     * The loop claimed up to 20 and then processed them **one at a time**, so a batch was as slow
-     * as the sum of its jobs. Measured: a C=100 tier-1 run leaves 300 jobs and took **~70 seconds**
-     * to drain them — long enough that the next load run started inside the backlog and reported a
-     * throughput that was really the drain (the tier-1 harness now waits for exactly this reason).
-     *
-     * Four, against a pool of ten: each job opens one transaction, so four is comfortably inside the
-     * pool with room for the turn path, which must never wait behind post-call work. Higher is an
-     * env change, not a code change, because the right number depends on the pool and on whether
-     * the judge is on — a JUDGE job spends most of its time waiting on a model, not on Postgres.
-     */
+    /** Four against a pool of ten: each job opens one transaction, leaving room for the turn path. */
     const OUTBOX_CONCURRENCY = Math.max(1, Number(process.env["OUTBOX_CONCURRENCY"] ?? 4));
 
     const runOnce = (limit = 20, nowOverride?: DateTime.Utc) =>
       Effect.gen(function* () {
         const now = DateTime.toDateUtc(nowOverride ?? (yield* DateTime.now));
         const jobs = yield* sql.withTransaction(sched.claimDueJobs({ now, limit }));
-        /**
-         * Order is not a property of this batch. Jobs are claimed with `SKIP LOCKED` from whatever
-         * is due, they belong to different conversations, and each is idempotent by construction —
-         * so processing them concurrently changes how long the batch takes and nothing else. The
-         * results are still returned in claim order, because callers (and the DB tests) read them
-         * positionally.
-         */
         return yield* Effect.forEach(
           jobs,
           (job) =>
-            /**
-             * A job that has burned its whole budget on *reclaims* is a job that has taken a
-             * process down every time it was tried, and it is stopped here rather than tried again
-             * (C3).
-             *
-             * The lease is what makes this reachable at all. Before it a stranded claim was inert;
-             * after it, a job whose work reliably kills its process would come back every lease
-             * period forever — a slow crash loop introduced by the fix for the opposite problem.
-             * The failure path below cannot catch that case, because a process that dies never
-             * reaches a `catchAll`. So the count the claim keeps is read here, once, before any
-             * work is done: at budget the job is `FAILED` with the reason, which is a state an
-             * operator can see, rather than a loop nobody is told about.
-             */
+            // A job whose work kills its process never reaches the `catchAll` below, so without
+            // this check the lease would hand it back every period forever. The count is read
+            // before any work is done.
             Number(job.payload["retry_count"] ?? 0) >= retriesFor(job.jobType)
               ? sched
                   .finishJob({ id: job.id, status: "FAILED", result: {}, error: RECLAIM_BUDGET_EXHAUSTED, processedAt: now })
@@ -350,21 +257,10 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
               : processJob(job, now).pipe(
                   Effect.catchAll((err) =>
                     Effect.gen(function* () {
-                      /**
-                       * The clock is read **here**, not reused from the claim (C12).
-                       *
-                       * `now` above is stamped when the batch is claimed, and a job can fail a long
-                       * way after that — a JUDGE job waits on a reasoning model, and the batch runs
-                       * four at a time. Backing off "five minutes from when the batch started" is
-                       * five minutes minus however long the job took, and on a slow enough job the
-                       * next attempt is available before this one finished failing.
-                       *
-                       * Deliberately the *same* clock the claim reads, not `Date.now()`. That is
-                       * issue #3's lesson one layer down: `available_at` is compared against
-                       * whatever clock `claimDueJobs` is given, so a wall-clock stamp under a frozen
-                       * test clock would put the retry permanently out of reach — which is exactly
-                       * the bug that skipped `workers.test.ts` for two weeks.
-                       */
+                      // Read here rather than reused from the claim, because a job can fail long
+                      // after the batch was stamped. Deliberately the same clock the claim reads,
+                      // not `Date.now()`: a wall-clock stamp under a frozen test clock puts the
+                      // retry permanently out of reach.
                       const failedAt = DateTime.toDateUtc(yield* DateTime.now);
                       const retry = Number(job.payload["retry_count"] ?? 0) + 1;
                       if (retry < retriesFor(job.jobType)) {
@@ -388,33 +284,8 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
         );
       });
 
-    /**
-     * Keep claiming while the batch comes back full, so a backlog drains at the rate the work can
-     * be done rather than at the rate the loop happens to poll (C2).
-     *
-     * **This is the half that actually mattered, and only measurement showed it.** Processing the
-     * batch concurrently made a batch of 20 take ~1.3 s instead of ~5, and a 283-job backlog still
-     * took **74 seconds** to clear — because the loop claims at most 20 every 5 seconds, so the
-     * ceiling was 4 jobs/s no matter how fast each one was. The concurrency was necessary and not
-     * sufficient; the pacing was the constraint.
-     *
-     * A short batch means the queue is empty, and the loop goes back to sleep for its interval. The
-     * cap exists so one tick cannot monopolise the process: at 20 a batch that is 200 jobs, after
-     * which the turn path gets the interval back whether or not the queue is clear.
-     */
+    /** The cap stops one tick monopolising the process, so the turn path gets the interval back. */
     const MAX_BATCHES_PER_TICK = 10;
-    /**
-     * `onBatch` exists so liveness is reported at the rate work is actually done (review #9).
-     *
-     * A full drain is up to 10 batches of 20, and with the judge on a single batch can wait tens of
-     * seconds on a model — longer than the 15 s staleness window `/readyz` allows. So the busier
-     * the outbox was, the more likely it was to be reported dead: the signal fired hardest when the
-     * fiber was healthiest. Stamping per batch means the loop says "still working" while it works,
-     * and the only thing that can go stale is a loop that has genuinely stopped.
-     *
-     * A callback rather than a `ProcessMetrics` dependency: this service knows when a batch is
-     * done, and nothing else about who is watching.
-     */
     const drain = (limit = 20, onBatch?: Effect.Effect<void>) =>
       Effect.gen(function* () {
         let processed = 0;
@@ -423,7 +294,6 @@ export class OutboxService extends Effect.Service<OutboxService>()("@feather-lit
           processed += batch.length;
           if (onBatch) yield* onBatch;
           if (batch.length < limit) break;
-          // Cooperative: a full batch means there is more, and the turn path is on this event loop.
           yield* Effect.yieldNow();
         }
         return processed;

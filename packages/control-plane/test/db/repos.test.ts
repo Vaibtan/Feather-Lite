@@ -74,7 +74,6 @@ describe("persistence layer against real Postgres", () => {
         yield* conv.insertAttempt({ id: attemptId, workflowExecutionId: wfId, contactPointId: cpId, direction: "OUTBOUND", startedAt: now });
         yield* conv.insertConversation({ id: convId, callAttemptId: attemptId, borrowerId, agentVersionId: version.id, startedAt: now, channel: "simulated", origin: "simulated", harness: null, decider: "scripted" });
 
-        // 20 concurrent appends, each in its own transaction holding the row lock -> 1..20 with no gaps.
         yield* Effect.all(
           Array.from({ length: 20 }, (_, i) =>
             sql.withTransaction(

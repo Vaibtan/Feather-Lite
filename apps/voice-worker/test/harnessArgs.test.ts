@@ -15,15 +15,13 @@ describe("scanFlags", () => {
   });
 
   it("refuses a flag the harness does not have, rather than ignoring it", () => {
-    // H6's second half: a misspelled gate used to run without the gate and say nothing.
     const r = scanFlags(["--label", "a", "--max-wer", "0.2"], SPEC);
     expect(r.ok).toBe(false);
     expect(!r.ok && r.message).toContain("--max-wer is not a flag");
   });
 
   it("skips a bare `--`, because that is a separator and pnpm forwards it", () => {
-    // `pnpm run x -- --label a` reaches the script as ["--", "--label", "a"]. Refusing it made the
-    // documented invocation in the module's own header fail with exit 2.
+    // `pnpm run x -- --label a` reaches the script as ["--", "--label", "a"].
     const r = scanFlags(["--", "--label", "a"], SPEC);
     expect(r.ok && r.values.get("label")).toBe("a");
   });

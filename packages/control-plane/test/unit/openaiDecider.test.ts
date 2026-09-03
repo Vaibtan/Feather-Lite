@@ -131,13 +131,11 @@ describe("prompt construction — the request the model actually sees", () => {
         allowedTools: ["get_account_context", "propose_promise_to_pay", "schedule_callback"],
       }),
     );
-    // Account and memory are volatile, so they live in the trailing block, not the cached prefix.
     const text = msgs.at(-2)!.content;
     expect(text).toContain("balance due 550.00");
     expect(text).toContain("HISTORY: 1 prior call(s).");
     expect(text).toContain("- 2026-08-10: no answer");
     expect(toolSpecsFor("DISCUSSING_PAYMENT", ["propose_promise_to_pay"]).map((t) => t.name)).toEqual(["propose_promise_to_pay", "end_call", "request_human"]);
-    // Tool JSON schema is derived from the domain schema.
     const spec = toolSpecsFor("DISCUSSING_PAYMENT", ["propose_promise_to_pay"])[0]!;
     expect(JSON.stringify(spec.parameters)).toMatch(/amount/);
     expect(JSON.stringify(spec.parameters)).toMatch(/date/);
@@ -149,7 +147,7 @@ describe("prompt construction — the request the model actually sees", () => {
   });
 });
 
-describe("prompt layout is cache-aligned (research §3.1c)", () => {
+describe("prompt layout is cache-aligned", () => {
   const transcript = [
     { speaker: "AGENT" as const, text: "May I please speak with Jordan?" },
     { speaker: "BORROWER" as const, text: "yes this is Jordan" },
@@ -161,18 +159,15 @@ describe("prompt layout is cache-aligned (research §3.1c)", () => {
     const msgs = buildMessages(input({ recentTranscript: transcript, userText: "I can pay on Friday" }));
     const first = msgs[0]!;
     expect(first.role).toBe("system");
-    // The cached prefix must not carry anything that changes turn to turn.
     expect(first.content).toContain("RULES:");
     expect(first.content).not.toContain("CURRENT STATE");
     expect(first.content).not.toContain("Borrower local time");
     expect(first.content).not.toContain("ACCOUNT");
-    // ...and all of it must still reach the model, in the trailing block.
     const volatileBlock = msgs.at(-2)!;
     expect(volatileBlock.role).toBe("system");
     expect(volatileBlock.content).toContain("CURRENT STATE: GREETING");
     expect(volatileBlock.content).toContain("Borrower local time: Sunday 2:00 PM EDT");
     expect(volatileBlock.content).toContain("ACCOUNT: not available in this state");
-    // The borrower's current line is spoken once, at the very end.
     expect(msgs.at(-1)).toEqual({ role: "user", content: "I can pay on Friday" });
   });
 
@@ -180,7 +175,6 @@ describe("prompt layout is cache-aligned (research §3.1c)", () => {
     const prefixOf = (msgs: ReadonlyArray<{ role: string; content: string }>) => msgs.slice(0, -2);
     const turn1 = prefixOf(buildMessages(input({ recentTranscript: transcript.slice(0, 2), userText: "yes this is Jordan" })));
     const turn2 = prefixOf(buildMessages(input({ recentTranscript: transcript, userText: "I can pay on Friday" })));
-    // Turn 2's prefix starts with turn 1's, byte for byte -- which is what a prefix cache needs.
     expect(turn2.slice(0, turn1.length)).toEqual(turn1);
     expect(turn2.length).toBeGreaterThan(turn1.length);
   });

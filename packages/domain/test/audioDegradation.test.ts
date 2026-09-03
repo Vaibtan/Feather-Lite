@@ -1,16 +1,7 @@
-/**
- * Telephony degradation, as pure functions over PCM (issue #1, D4 — Phase 4).
- *
- * The simulator's borrower has always sounded like a studio microphone. A real one arrives through
- * G.711 at 8 kHz with noise behind them and frames missing, and every number the harness reports is
- * measured on the studio version. These are the transforms that close that gap, and they are pure so
- * the chain is reproducible from a seed rather than from a recording.
- */
 import { describe, expect, it } from "vitest";
 import { makeRng } from "../src/random.js";
 import { addNoiseAtSnr, dropFrames, muLawRoundTrip, rmsOf, snrOf } from "../src/audioDegradation.js";
 
-/** A second of a loud-ish tone at 16 kHz — the shape the line cache produces. */
 const tone = (samples = 16000, amplitude = 8000): Int16Array => {
   const out = new Int16Array(samples);
   for (let i = 0; i < samples; i++) out[i] = Math.round(amplitude * Math.sin((2 * Math.PI * 440 * i) / 16000));
@@ -22,9 +13,7 @@ describe("muLawRoundTrip", () => {
     const src = tone();
     const out = muLawRoundTrip(src);
     expect(out.length).toBe(src.length);
-    // Still the same waveform in energy terms...
     expect(Math.abs(rmsOf(out) - rmsOf(src)) / rmsOf(src)).toBeLessThan(0.1);
-    // ...but quantised, so it is not the same array. A no-op transform would measure nothing.
     expect(Array.from(out)).not.toEqual(Array.from(src));
   });
 
@@ -43,7 +32,6 @@ describe("addNoiseAtSnr", () => {
   it("hits the signal-to-noise ratio it was asked for", () => {
     const src = tone();
     const out = addNoiseAtSnr(src, 20, makeRng(1));
-    // Within a dB: the noise is generated to a measured target, not a nominal one.
     expect(Math.abs(snrOf(src, out) - 20)).toBeLessThan(1);
   });
 
@@ -76,11 +64,6 @@ describe("dropFrames", () => {
   });
 
   it("loses frames in bursts, not evenly — which is what a real network does", () => {
-    /**
-     * The reason this is a two-state model rather than a coin flip per frame. Ten isolated lost
-     * frames are inaudible; ten consecutive ones are a dropped syllable, and only the second is
-     * worth measuring a recogniser against.
-     */
     const bursty = dropFrames(frames(), { lossRate: 0.1, burstiness: 8, rng: makeRng(2) });
     const longestRun = (fs: ReadonlyArray<Int16Array | null>) => {
       let best = 0;
@@ -106,9 +89,8 @@ describe("dropFrames", () => {
 });
 
 describe("noise shaping", () => {
-  /** Energy above ~2 kHz, as a share of the total. A crude but sufficient brightness measure. */
+  /** A first difference is a crude high-pass, so this approximates the share of energy above ~2 kHz. */
   const highBandShare = (samples: Int16Array): number => {
-    // First difference is a high-pass: it keeps what changes fast between samples.
     let high = 0;
     let total = 0;
     for (let i = 1; i < samples.length; i++) {
@@ -121,14 +103,9 @@ describe("noise shaping", () => {
 
   it("puts its energy low, the way traffic and rooms do", () => {
     /**
-     * The calibration finding this closes. White noise at 15 dB SNR took the harness's WER from
-     * 0.000 to 1.000 on the same line, which a real street does not do — because real background
-     * noise is mostly low-frequency and white noise sits right on top of the consonants a recogniser
-     * needs. Shaped noise at the same *stated* SNR is a far better model of the same *described*
-     * environment.
+     * Measured: unshaped noise at 15 dB SNR takes WER from 0.000 to 1.000, because white noise sits
+     * on top of the consonants a recogniser needs. Real background noise is mostly low-frequency.
      */
-    // The noise is the difference between the degraded line and the clean one; a silent input gets
-    // no noise at all, because there is no signal to set a ratio against.
     const src = tone();
     const noiseOf = (out: Int16Array) => Int16Array.from(out, (v, i) => v - (src[i] ?? 0));
     const white = noiseOf(addNoiseAtSnr(src, 10, makeRng(1), { shaped: false }));

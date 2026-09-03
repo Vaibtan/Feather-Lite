@@ -1,7 +1,3 @@
-/**
- * What may not leave for the observability vendor, and — just as important — what must survive so
- * a redacted trace is still worth reading (D3).
- */
 import { describe, expect, it } from "vitest";
 import { redactAccountData, redactAccountDataDeep } from "../src/redact.js";
 
@@ -32,13 +28,11 @@ describe("redactAccountData", () => {
   });
 
   it("does not redact the borrower's name, which is a decision and not an oversight", () => {
-    // A name has no shape to match, `visibleContext` is the control that keeps it out of a prompt
-    // before verification, and the agent says it aloud after. See the module comment.
+    /** A name has no shape to match; `visibleContext` is the control that keeps it out of a prompt before verification. */
     expect(redactAccountData("Am I speaking with Jordan Reyes?")).toBe("Am I speaking with Jordan Reyes?");
   });
 
   it("leaves a borrower's own scheduling alone", () => {
-    // "in three days" is when to call back, not how far behind the account is.
     expect(redactAccountData("Call me back in 3 days.")).toBe("Call me back in 3 days.");
   });
 
@@ -52,7 +46,7 @@ describe("redactAccountData", () => {
   });
 });
 
-describe("redactAccountData: the phrasing the fleet actually uses (review #13)", () => {
+describe("redactAccountData: the phrasing the fleet actually uses", () => {
   const masked: ReadonlyArray<readonly [string, string, string]> = [
     ["a bare amount after a payment verb", "I can pay 550 on Friday.", "I can pay [amount] on Friday."],
     ["with a hedge in between", "I could probably do about 300 next week.", "I could probably do about [amount] next week."],
@@ -69,8 +63,7 @@ describe("redactAccountData: the phrasing the fleet actually uses (review #13)",
   }
 
   const survives: ReadonlyArray<readonly [string, string]> = [
-    // The counter-cases are the point. A redactor that ate these would be the instrument-that-lies
-    // problem in a different place: a masked measurement is worse than an unmasked one.
+    /** A redactor that ate these would leave a masked measurement, which is worse than an unmasked one. */
     ["a turn count", "This is attempt 2 of 5."],
     ["the borrower's own scheduling", "I can pay in 3 days."],
     ["a duration", "Give me 5 minutes to find the card."],
@@ -113,18 +106,14 @@ describe("redactAccountDataDeep", () => {
     });
   });
 
-
-  it("masks an account fact that arrives as a number under its own key (review #13)", () => {
-    // A tool result is a structure, not a sentence: `{"balance_due": 1250}` carries the balance
-    // with none of the shape the text rules match on. The key is the evidence, so the allowlist is
-    // of keys — and it is an allowlist, not a pattern, so widening it is a decision someone makes.
+  it("masks an account fact that arrives as a number under its own key", () => {
+    /** A tool result carries the balance with none of the shape the text rules match on, so the key is the evidence — and it is an allowlist, not a pattern. */
     expect(
       redactAccountDataDeep({
         balance_due: 1250,
         minimum_payment: 75,
         days_past_due: 45,
         account_number: 4485939201,
-        // Not account facts. These are the measurements, and they must come through untouched.
         ttft_ms: 1234,
         cached_tokens: 1792,
         turn_index: 3,

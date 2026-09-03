@@ -1,8 +1,3 @@
-/**
- * Idempotent demo seed (plan rev.2 R23). Borrowers across time zones, one opted out, one
- * with an invalid contact point, and REAL history produced by running the orchestrator
- * (so transcripts/timelines/memory blocks are genuine, not hand-written rows).
- */
 import { DateTime, Effect, Option } from "effect";
 import { isWithinContactWindow } from "@feather-lite/domain";
 import { withShiftedClock, type ShiftedClock } from "./VirtualClock.js";
@@ -21,7 +16,6 @@ export interface SeedBorrower {
   readonly contactValid?: boolean;
   readonly consent?: "ALLOWED" | "OPTED_OUT" | "UNKNOWN";
   readonly loan: { principal: string; balanceDue: string; dueDate: string; status: "CURRENT" | "DELINQUENT"; delinquencyDays: number };
-  /** Scripted history to run through the orchestrator (simulated channel). */
   readonly history?: ReadonlyArray<{ readonly at: string; readonly turns: ReadonlyArray<string> | "no_answer" }>;
 }
 
@@ -69,38 +63,20 @@ export const DEMO_BORROWERS: ReadonlyArray<SeedBorrower> = [
 ];
 
 /**
- * A syntactically plausible NANP number for a load fixture, allocated from a sequence.
- *
- * This used to hash 48 bits of the fixture's UUID into the seven subscriber digits, which is a
- * random draw from ten million values — and `contact_points.value` is UNIQUE. That is the birthday
- * problem: at 3 000 fixtures a collision is ~20 % likely, at 4 000 already better than even, and a
- * collision fails the whole all-or-nothing batch with `Failed to execute statement`. It duly did,
- * on the first attempt at a 3 000-borrower soak run, against a dev database that had accumulated
- * 4 109 fixtures from earlier runs.
- *
- * The batch now takes the lowest free numbers in the exchange instead. Not `MAX(value) + 1`: the
- * numbers already in a dev database were drawn at random, so the highest of four thousand of them
- * sits within a few thousand of the ceiling, and counting up from there would wrap into the low
- * range and collide again after a couple of thousand rows. Reading the occupied set costs one
- * small query, is exact, and leaves the UNIQUE index as the guard rather than the discovery
- * mechanism. An exhausted exchange fails by name instead of by SQL error.
+ * Numbers are allocated as the lowest free ones in the exchange, not `MAX(value) + 1`: a database
+ * seeded with randomly drawn numbers has a maximum near the ceiling, and counting up from there
+ * wraps into the low range and collides against the UNIQUE index on `contact_points.value`.
  */
 const FIXTURE_PHONE_PREFIX = "+1555";
 const FIXTURE_PHONE_CAPACITY = 10_000_000;
 const fixturePhone = (subscriber: number): string => `${FIXTURE_PHONE_PREFIX}${subscriber.toString().padStart(7, "0")}`;
 
-/**
- * The lowest `count` subscriber numbers not already issued, never more than the exchange holds.
- * `capacity` is a parameter only so the exhaustion boundary can be tested without building a
- * ten-million-entry set.
- */
 export const freeFixtureSubscribers = (taken: ReadonlySet<number>, count: number, capacity: number = FIXTURE_PHONE_CAPACITY): number[] => {
   const out: number[] = [];
   for (let n = 0; n < capacity && out.length < count; n += 1) if (!taken.has(n)) out.push(n);
   return out;
 };
 
-/** Spread across the globe so at least one is inside 08:00-21:00 local at any UTC hour. */
 const CONTACT_WINDOW_CANDIDATES = [
   "America/New_York",
   "America/Los_Angeles",
@@ -132,9 +108,7 @@ export class SeedService extends Effect.Service<SeedService>()("@feather-lite/Se
         yield* sql`INSERT INTO borrower_contact_points ${sql.insert({ borrowerId, contactPointId: cpId, priority: 1, relationship: "PRIMARY" })}`;
         yield* sql`INSERT INTO loans ${sql.insert({ id: yield* ids.next(), borrowerId, principal: b.loan.principal, balanceDue: b.loan.balanceDue, dueDate: b.loan.dueDate, status: b.loan.status, delinquencyDays: b.loan.delinquencyDays })}`;
 
-        // History through the real orchestrator (states/events/outbox exactly as production writes them).
         for (const h of b.history ?? []) {
-          // Shifted clock: the whole historical call (start, turns, end, scheduled actions) is stamped as of `h.at`.
           const historical = (clock: ShiftedClock) => Effect.gen(function* () {
             const started = yield* workflow.startCall({ borrowerId, contactPointId: cpId, channel: "simulated" }).pipe(Effect.either);
             if (started._tag === "Left") return;
@@ -149,12 +123,10 @@ export class SeedService extends Effect.Service<SeedService>()("@feather-lite/Se
                 if (r._tag === "Left" || r.right.endCall) break;
               }
             }
-            // History must not block today's demo: clear pending retries/callbacks it created.
             yield* sched.cancelPending({ workflowExecutionId: started.right.workflowExecutionId, reason: "seed_history", actionTypes: ["RETRY_CALL", "CALLBACK"] });
           });
           yield* withShiftedClock(DateTime.unsafeMake(h.at))(historical);
         }
-        // Final flags after history (so an opted-out borrower's history still shows the real opt-out call).
         if (b.status === "OPT_OUT") yield* crm.setBorrowerStatus(borrowerId, "OPT_OUT");
         if (b.consent) yield* crm.setContactPointConsent(cpId, b.consent);
         if (b.contactValid === false) yield* crm.setContactPointValidity(cpId, false);
@@ -169,16 +141,8 @@ export class SeedService extends Effect.Service<SeedService>()("@feather-lite/Se
         return results;
       });
 
-    /**
-     * Throwaway borrowers for a load run. Two pre-call rules force one borrower per concurrent
-     * conversation: ACTIVE_CONVERSATION (one live call per borrower) and the 7-in-7 frequency cap.
-     * The timezone is picked so the run is inside the TCPA window whatever the wall clock says —
-     * otherwise every start would 422 at the wrong hour of the day.
-     *
-     * One transaction for the whole batch: a fixture set is all-or-nothing, so a failure partway
-     * (a phone collision, a lost connection) leaves no half-built borrowers behind for the next run
-     * to trip over.
-     */
+    // One borrower per concurrent conversation is forced by two pre-call rules: one live call per
+    // borrower, and the 7-in-7 frequency cap. The timezone keeps the run inside the TCPA window.
     const loadFixtures = (input: { readonly count: number; readonly prefix?: string | undefined }) =>
       sql.withTransaction(
         Effect.gen(function* () {
@@ -188,8 +152,6 @@ export class SeedService extends Effect.Service<SeedService>()("@feather-lite/Se
           const prefix = input.prefix ?? `load-${Date.now().toString(36)}`;
           yield* crm.ensureActiveAgentVersion(yield* ids.next(), "collections-v2", "v2-bootstrap");
 
-          // Read inside the transaction; two concurrent batches would still be caught by the UNIQUE
-          // index, which is why it stays.
           const issued = yield* sql<{ readonly value: string }>`
             SELECT value FROM contact_points WHERE value LIKE ${`${FIXTURE_PHONE_PREFIX}%`}`;
           const taken = new Set(issued.map((r) => Number(r.value.slice(FIXTURE_PHONE_PREFIX.length))));
@@ -213,7 +175,6 @@ export class SeedService extends Effect.Service<SeedService>()("@feather-lite/Se
         }),
       );
 
-    /** Demo reset: wipe conversations/attempts/actions/jobs, keep borrowers; then re-run history. */
     const reset = () =>
       Effect.gen(function* () {
         yield* sql`TRUNCATE TABLE conversation_scores, conversation_liveness, conversation_turns, conversation_events, outbox_jobs, scheduled_actions, conversations, call_attempts, workflow_executions, loans, borrower_contact_points, contact_points, borrowers RESTART IDENTITY CASCADE`;

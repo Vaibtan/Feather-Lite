@@ -1,33 +1,15 @@
 /**
- * Does the worker actually refuse the call past its ceiling? (ADR 0010 D2, review #1.)
+ * Does the worker refuse the call past its ceiling? N sessions are created in one batch
+ * (`Promise.all`, no awaits between them), because the window being measured is the ~1.8 s between
+ * the accept and `launchJob` and a loop with an await in it is never inside that window for more
+ * than one request. The surplus is expected to end `NEVER_SERVED`.
  *
- * **The previous probe could not tell.** It created its rooms over separate HTTP calls, so the
- * first job had already reached `activeJobs` before the second request arrived — and "one served,
- * two refused" follows from the stale `activeJobs` count alone, with the admission window deleted.
- * The window this probe exists to measure is the ~1.8 s between the accept and `launchJob`, and the
- * only way to be inside it for all three requests is to make all three requests at once.
+ * `WORKER_MAX_JOBS` must be set when the container is created; `.env` is read once at boot.
  *
- * So: N sessions created in **one batch** (`Promise.all`, no awaits between them) against a worker
- * started with `WORKER_MAX_JOBS=1`. Expected: one call served, the rest never claimed by any worker
- * and finalized `NEVER_SERVED` by the sweeper about 38 seconds later — the O4 distinction (a call
- * that never had a worker, as against one that lost hers) firing on real shed load.
- *
- * A refused call is not a lost call and not a bug: it is the honest record of a worker saying no.
- *
- * Run it against the **containerised** worker, which is the stack that ships and is measured. The
- * ceiling has to be set when the container is created, because `.env` is read once at boot and does
- * not reach a container the way it reaches a native process:
- *
- *   $env:LIVEKIT_NODE_IP='<host LAN IP>'; $env:WORKER_MAX_JOBS='1'
- *   docker compose --profile livekit --profile app up -d
  *   pnpm --filter @feather-lite/voice-worker shed-probe -- --calls 3
  *
- * Against a native worker instead: `WORKER_MAX_JOBS=1 pnpm start:worker`, then the same probe.
- *
- * One caveat either way: `WORKER_MAX_JOBS` is the **denominator of the load** the worker reports,
- * and the SFU stops assigning at `WORKER_LOAD_THRESHOLD` — so the concurrency actually served is
- * lower than the ceiling, and at `--calls 3` against a ceiling of 1 that difference does not matter
- * but at ten calls it decides the run (docs/loadtest/README.md, 2026-09-01).
+ * `WORKER_MAX_JOBS` is the denominator of the reported load and the SFU stops assigning at
+ * `WORKER_LOAD_THRESHOLD`, so the concurrency actually served is lower than the ceiling.
  */
 import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
@@ -70,9 +52,8 @@ const fixtures = (await fixturesRes.json()) as Array<{ borrower_id: string; cont
 log(`minted ${String(fixtures.length)} fixture(s)`);
 
 /**
- * One batch. No `await` between the requests, which is the entire point: the requests have to
- * reach the worker inside one another's admission window, and a loop with an await in it cannot
- * produce that however fast the loop is.
+ * One batch, with no `await` between the requests: they have to reach the worker inside one
+ * another's admission window, which a loop cannot produce however fast it is.
  */
 const started = await Promise.all(
   fixtures.map(async (f) => {
@@ -110,17 +91,8 @@ const outcomes = await Promise.all(
 );
 
 /**
- * Three outcomes, not two (issue #4, H13).
- *
- * `served` was "not NEVER_SERVED and not NOT_STARTED", which counted a conversation whose detail
- * fetch came back `HTTP_500` as **served** — a call nobody can say anything about, added to the
- * number the probe's verdict is computed from. And a session that never started at all was in
- * neither count, so the three did not have to add up and a probe that half failed still printed a
- * clean-looking pair.
- *
- * The distinction is the whole point of this probe: it exists because the previous one could not
- * tell a refusal from a call the SFU simply never offered (ADR 0010 D2). A number that quietly
- * absorbs "I could not tell" is the same defect one level up.
+ * Three outcomes, not two: a conversation whose detail fetch failed is indeterminate, and counting
+ * it as served is the same defect this probe exists to remove one level up.
  */
 const neverServed = outcomes.filter((o) => o.reason === "NEVER_SERVED").length;
 const served = outcomes.filter((o) => o.reason !== "NEVER_SERVED" && o.outcome !== "NOT_STARTED" && !o.outcome.startsWith("HTTP_")).length;
@@ -132,14 +104,7 @@ if (indeterminate > 0) {
 }
 
 /**
- * The probe discriminates when the surplus is refused. It does not assert *which* number is right —
- * that is `WORKER_MAX_JOBS` and the operator's — only that a ceiling of one did not serve three.
- */
-/**
- * The verdict is over the calls the probe can speak for, and an indeterminate one fails it (H13).
- *
- * `neverServed === CALLS - served` used to hold trivially whenever an indeterminate call made both
- * sides wrong by the same amount. The probe now says how many it could not read and refuses to pass
- * with any: a shedding measurement with a hole in it is not a measurement.
+ * The probe asserts only that a ceiling of one did not serve three, not which ceiling is right.
+ * An indeterminate call fails it: a shedding measurement with a hole in it is not a measurement.
  */
 process.exit(indeterminate === 0 && served <= Number(worker["max_jobs"] ?? 1) && neverServed === CALLS - served ? 0 : 1);

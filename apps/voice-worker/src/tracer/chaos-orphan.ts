@@ -1,36 +1,11 @@
 /**
- * The chaos test the README has owed since Phase 7: kill the voice worker mid-call and prove the
- * ledger recovers by itself.
+ * Kill the voice worker mid-call and assert the ledger recovers by itself: the sweeper finalizes
+ * the call as FAILED / ORPHANED and the borrower is callable again.
  *
- * The 2026-08-23 probe did this by hand and found the failure it was looking for — a killed worker
- * left the conversation open forever, and the "one live conversation per borrower" pre-call rule
- * then blocked that borrower permanently. This script automates the probe and asserts the fix
- * (spec 2026-08-26, D6): the sweeper notices, finalizes the call as FAILED / ORPHANED, and the
- * borrower can be called again.
+ * Semi-automated on purpose — killing the job processes is a machine-specific act; everything
+ * after it is asserted. The target is autodetected; `--host` and `--container` force it.
  *
- * Semi-automated on purpose. It starts a real call and then kills the worker's *job* processes,
- * which is a machine-specific act; everything after that is asserted.
- *
- * **Against the containerised stack**, which is what ships and what every number since 2026-09-01
- * is measured on — the job processes are killed inside the worker container's own PID namespace,
- * and the target is autodetected from whether that container is up:
- *
- *   $env:LIVEKIT_NODE_IP='<host LAN IP>'
- *   docker compose --profile livekit --profile app up -d --build
  *   pnpm --filter @feather-lite/voice-worker chaos-orphan
- *
- * Against a native worker (`pnpm db:up`, `pnpm lk:up`, `pnpm start:server`, `pnpm start:worker`),
- * pass `--host`; `--container` forces the other way, and `CHAOS_WORKER_CONTAINER` renames it.
- *
- *   pnpm --filter @feather-lite/voice-worker chaos-orphan -- --host
- *
- * What it prints, and what a pass looks like:
- *   - the call reaches the agent (the opening is spoken), so there is something real to orphan;
- *   - the worker's job processes are killed with no chance to send a hangup;
- *   - the conversation is finalized within ORPHAN_STALENESS + one sweep interval (~40 s);
- *   - `final_outcome` is FAILED with a CALL_CONTROL / HANGUP carrying reason ORPHANED;
- *   - a `system.orphan_detect_ms` score records how long detection actually took;
- *   - a fresh call to the same borrower is accepted, i.e. they are no longer blocked.
  */
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -57,16 +32,9 @@ const getJson = async <T>(path: string): Promise<T> => {
 };
 
 /**
- * Which worker is being chaos-tested (2026-09-01).
- *
- * The probe used to enumerate **host** PIDs, which since the Docker migration is the wrong process
- * table: the deployed worker lives in its own PID namespace, so a probe run against the stack that
- * actually ships found nothing, killed nothing, and then asserted a recovery that had nothing to
- * recover from. The architecture that ships has to be the one that is chaos-tested, or the test is
- * about a configuration nobody runs.
- *
- * Autodetected, because getting this wrong is silent: if the worker container is up, that is the
- * worker serving the call. `--host` / `--container` force it either way.
+ * Autodetected, because the deployed worker lives in its own PID namespace: a probe that
+ * enumerates host PIDs against the containerised stack finds nothing, kills nothing, and then
+ * asserts a recovery from an orphaning that never happened.
  */
 const WORKER_CONTAINER = process.env["CHAOS_WORKER_CONTAINER"] ?? "feather-lite-worker";
 const containerIsUp = (): boolean => {
@@ -79,16 +47,9 @@ const containerIsUp = (): boolean => {
 const target: "host" | "container" = process.argv.includes("--host") ? "host" : process.argv.includes("--container") || containerIsUp() ? "container" : "host";
 
 /**
- * Kill the containerised worker's job processes from inside its own PID namespace.
- *
- * `node -e` rather than `pkill`: the runtime image is `node:22-bookworm-slim` with only
- * `ca-certificates` added, so there is no `procps` in it — and adding a package to the image that
- * ships so a test can kill things in it would be the test changing the thing it measures. `/proc`
- * is always there, and node is the one interpreter the image is guaranteed to have.
- *
- * `job_proc_lazy_main` is the framework's own fork entry (`ipc/job_proc_executor.js:48`), and it
- * survives the esbuild bundle because `@livekit/agents` stays external — so the job process's argv
- * carries that name in the container exactly as it does on the host.
+ * `node -e` rather than `pkill`: the runtime image has no `procps`, and adding a package so a test
+ * can kill things in it would be the test changing what it measures. `job_proc_lazy_main` is the
+ * framework's own fork entry, and it survives the bundle because `@livekit/agents` stays external.
  */
 const killContainerJobs = (): number => {
   const script = [
@@ -107,13 +68,8 @@ const killContainerJobs = (): number => {
   try {
     const out = execFileSync("docker", ["exec", WORKER_CONTAINER, "node", "--input-type=commonjs", "-e", script], { encoding: "utf8" });
     /**
-     * The **last** line, not the whole of stdout (H12).
-     *
-     * `Number(out.trim())` is `NaN` — and therefore `0` — the moment anything else reaches stdout
-     * before the count: a Node warning, a dotenv banner, an experimental-feature notice. The probe
-     * would then report "killed 0 job processes" and go on to assert that the sweeper detected
-     * orphans it had never created, which fails for a reason that has nothing to do with the
-     * sweeper.
+     * The last line, not the whole of stdout: any banner or warning printed before the count makes
+     * `Number(out.trim())` `NaN`, so the probe reports killing nothing and then asserts a recovery.
      */
     const lastLine = out.trim().split(/\r?\n/).at(-1) ?? "";
     const killed = Number(lastLine.trim());
@@ -129,10 +85,8 @@ const killContainerJobs = (): number => {
 };
 
 /**
- * Kill the worker's job processes — the ones actually serving calls — and leave the main worker
- * alone, which is what a crashed job looks like. On Windows the job processes are `node` children
- * of the worker; matching on the agent entry file is what distinguishes them from this script,
- * from the control-plane server, and from any other node on the box.
+ * Only the job processes — the ones serving calls — which is what a crashed job looks like.
+ * Matching on the agent entry file is what distinguishes them from this script and every other node.
  */
 const killWorkerJobs = (): number => {
   if (target === "container") return killContainerJobs();
@@ -144,11 +98,8 @@ const killWorkerJobs = (): number => {
         [
           "-NoProfile",
           "-Command",
-          // `job_proc_lazy_main`, the same thing the container branch looks for (H12). It used to
-          // match `src/agent.ts`, which is the **dev-mode** entry point: under `start` — the mode
-          // every measured run uses, and the only one the fleet accepts — the worker runs
-          // `dist/agent.js` and its job children are re-executions of the framework's fork entry, so
-          // the host branch found nothing and the probe silently chaos-tested an empty set.
+          // `job_proc_lazy_main`, not `src/agent.ts`: that is the dev-mode entry, and under `start`
+          // the worker runs `dist/agent.js` with job children re-executing the framework's fork entry.
           "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object { $_.CommandLine -like '*job_proc_lazy_main*' } | Select-Object -ExpandProperty ProcessId",
         ],
         { encoding: "utf8" },
@@ -163,7 +114,6 @@ const killWorkerJobs = (): number => {
       }
       return pids.length;
     }
-    // Same rule as the Windows branch above and the container branch below (H12).
     const out = execFileSync("bash", ["-lc", "pgrep -f 'job_proc_lazy_main' || true"], { encoding: "utf8" });
     const pids = out.split(/\n/).map((l) => Number(l.trim())).filter((n) => Number.isInteger(n) && n > 0);
     for (const pid of pids) {
@@ -186,16 +136,11 @@ interface Detail {
 }
 
 log(`control plane=${CONTROL_PLANE_URL} livekit=${process.env["LIVEKIT_URL"] ?? "(unset)"}`);
-// Said out loud, because a probe that kills nothing still runs to the end and reports a verdict.
 log(`chaos target=${target}${target === "container" ? ` (${WORKER_CONTAINER})` : " (host processes)"}`);
 const lines = await loadScriptedLines();
 log(`borrower lines ready (${lines.cached ? "WAV cache" : "synthesised"})`);
 
-/**
- * Start a real call and abandon it. `runScriptedCall` is given a killer to invoke once the agent
- * has actually spoken — killing before that would prove nothing, because there would be no live
- * call to orphan.
- */
+// The killer runs only once the agent has spoken: killing before that orphans nothing.
 let killed = 0;
 let conversationId: string | null = null;
 const call = await runScriptedCall({
@@ -205,8 +150,6 @@ const call = await runScriptedCall({
   participantIdentity: "borrower-chaos",
   label: "chaos",
   log,
-  // The borrower who stops mid-call and never says goodbye, as its own script rather than a callback
-  // threaded into the middle of the promise-to-pay one (H9).
   script: abandonAfterFirstReplyScript(() => {
     killed = killWorkerJobs();
     log(`killed ${killed} worker process(es) mid-call`);
@@ -219,9 +162,6 @@ if (!conversationId) {
   process.exit(1);
 }
 if (killed === 0) {
-  // The failure this guard exists for is now mostly the *wrong target*: a host-mode probe against a
-  // containerised worker enumerates a process table the worker is not in, finds nothing, and would
-  // otherwise go on to assert a recovery from an orphaning that never happened.
   log(
     target === "container"
       ? `no job process was killed inside ${WORKER_CONTAINER} — is the worker container serving this call? FAIL`
@@ -258,7 +198,6 @@ if (detail.conversation.final_outcome !== "FAILED") failures.push(`expected FAIL
 if (hangup?.payload["reason"] !== "ORPHANED") failures.push(`expected hangup reason ORPHANED, got ${String(hangup?.payload["reason"])}`);
 if (!detect) failures.push("no system.orphan_detect_ms score was written");
 
-// The point of the whole exercise: the borrower is not blocked any more.
 const retry = await fetch(`${CONTROL_PLANE_URL}/api/calls/start`, {
   method: "POST",
   headers: harnessJsonHeaders(),

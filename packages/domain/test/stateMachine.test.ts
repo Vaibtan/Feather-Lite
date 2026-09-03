@@ -15,7 +15,7 @@ import {
 } from "../src/index.js";
 
 describe("state machine — exhaustive adjacency table", () => {
-  it("every (from, to) pair is classified exactly as the SPEC §8.1 graph says", () => {
+  it("every (from, to) pair is classified exactly as the transition graph says", () => {
     for (const from of CONVERSATION_STATES) {
       for (const to of CONVERSATION_STATES) {
         const result = transition(from, to);
@@ -39,7 +39,7 @@ describe("state machine — exhaustive adjacency table", () => {
     expect(transition("GREETING", undefined)).toEqual(Either.right("GREETING"));
   });
 
-  it("the LLM can never jump GREETING -> CONFIRMING_OUTCOME (PRD §11 risk table)", () => {
+  it("the LLM can never jump GREETING -> CONFIRMING_OUTCOME", () => {
     const r = transition("GREETING", "CONFIRMING_OUTCOME");
     expect(Either.isLeft(r)).toBe(true);
   });
@@ -51,7 +51,7 @@ describe("state machine — exhaustive adjacency table", () => {
     }
   });
 
-  it("DISCUSSING_PAYMENT -> OPT_OUT / WRONG_NUMBER are ordinary edges (SPEC §8.1)", () => {
+  it("DISCUSSING_PAYMENT -> OPT_OUT / WRONG_NUMBER are ordinary edges", () => {
     expect(Either.isRight(transition("DISCUSSING_PAYMENT", "OPT_OUT"))).toBe(true);
     expect(Either.isRight(transition("DISCUSSING_PAYMENT", "WRONG_NUMBER"))).toBe(true);
   });

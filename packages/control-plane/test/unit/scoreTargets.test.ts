@@ -1,11 +1,3 @@
-/**
- * `POST /scores` must not accept a turn id that names no turn of the conversation (O8).
- *
- * The defect this pins: the handler validated the conversation and not the turn, so the voice
- * harness posted the line it had spoken — `"BARGE-IN: I can pay 550 dollars on Friday"` — as a
- * `turn_id` for weeks. Every row landed, joined nothing, and took the session-level fallback in
- * `Tracing.score`. Nothing was lost and nothing complained.
- */
 import { describe, expect, it } from "vitest";
 import { unknownTurnIdMessage, unknownTurnIds } from "../../src/http/scoreTargets.js";
 
@@ -17,7 +9,6 @@ describe("unknownTurnIds", () => {
   });
 
   it("accepts a call-level score, which names no turn", () => {
-    // `harness.equivalence_pass` and the WER summary are about the call, not a turn.
     expect(unknownTurnIds(known, [null, undefined, "t2"])).toEqual([]);
   });
 
@@ -27,14 +18,11 @@ describe("unknownTurnIds", () => {
   });
 
   it("names each bad id once, however many scores carried it", () => {
-    // Ten scores against one bad turn is one mistake. A caller reading ten copies of the same id
-    // learns nothing it did not know from the first.
     expect(unknownTurnIds(known, ["nope", "nope", "nope", "t1"])).toEqual(["nope"]);
   });
 
-  it("rejects everything when the conversation has no turns at all", () => {
+  it("rejects everything when the conversation has no turns at all, bar a call-level score", () => {
     expect(unknownTurnIds([], ["t1"])).toEqual(["t1"]);
-    // ...but a call-level score against a turnless conversation is still fine.
     expect(unknownTurnIds([], [null])).toEqual([]);
   });
 

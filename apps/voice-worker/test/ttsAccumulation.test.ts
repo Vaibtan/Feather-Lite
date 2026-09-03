@@ -1,15 +1,7 @@
 /**
- * A turn's TTS numbers are the turn's, not its last sentence's (issue #4, W2).
- *
- * `tts/tts.js` in the installed 1.6.4 emits `metrics_collected` when a chunk arrives with
- * `audio.final` — once per synthesised segment — and resets `ttfb`, `audioDurationMs` and
- * `#startedHrTime` between them. The worker posted one `turn_metrics` signal per event and the
- * control plane merges each into the same turn row, so the last segment overwrote the rest:
- * `tts_ttfb_ms` was the time to the *last* sentence's first byte and `tts_chars` was that
- * sentence's length, which made the chars-per-second heuristic a measure of sentence length.
- *
- * The accumulation is exercised through the agent's own two entry points against a recording
- * client, because that is the seam the signal actually leaves by.
+ * The framework emits `metrics_collected` once per synthesised segment and resets `ttfb`,
+ * `audioDurationMs` and its start time between them, so a per-event signal reports the last
+ * sentence rather than the turn.
  */
 import { describe, expect, it, vi } from "vitest";
 import { FeatherAgent } from "../src/feather-agent.js";
@@ -47,27 +39,23 @@ describe("turn_metrics across a multi-segment turn", () => {
     agent.onEouMetrics({ eouDelayMs: 578, transcriptionDelayMs: 461 });
     threeSegments(agent);
 
-    // Nothing is posted per segment any more.
     expect(signals.filter((s) => s["kind"] === "turn_metrics")).toHaveLength(0);
 
     agent.reportPlayout({ id: "item-1", interrupted: false, textContent: "the whole reply" } as never);
-    // Still nothing: the turn reports when it is over, not when an item lands (W4).
+    // The turn reports when it is over, not when an item lands.
     expect(signals.filter((s) => s["kind"] === "turn_metrics")).toHaveLength(0);
     await (agent as unknown as { reportTurnPlayout: (t: string) => Promise<void> }).reportTurnPlayout("t1");
     const metrics = signals.filter((s) => s["kind"] === "turn_metrics");
     expect(metrics).toHaveLength(1);
-    // The first segment's TTFB: when the borrower first heard anything. Not 85, the last sentence's.
+    // The first segment's TTFB, not 85, the last sentence's.
     expect(metrics[0]?.["tts_ttfb_ms"]).toBe(380);
-    // Summed, not last: 1200 + 900 + 1500, and 40 + 30 + 55.
     expect(metrics[0]?.["tts_audio_ms"]).toBe(3600);
     expect(metrics[0]?.["tts_chars"]).toBe(125);
-    // The EOU numbers still ride the same signal.
     expect(metrics[0]?.["eou_delay_ms"]).toBe(578);
     expect(metrics[0]?.["transcription_delay_ms"]).toBe(461);
   });
 
   it("still reports a turn whose synthesis produced nothing", async () => {
-    // The turn whose latency an operator most wants to see is the one that failed to speak.
     const { agent, signals } = makeAgent();
     (agent as unknown as { currentTurnId: string | null }).currentTurnId = "t2";
     agent.onEouMetrics({ eouDelayMs: 600 });

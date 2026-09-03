@@ -1,10 +1,3 @@
-/**
- * Initial schema — SPEC §6 tables, indexes and constraints, plus the v2 additions:
- *   conversations.current_state / active_turn_id / pending_proposal / no_input_count (hot state,
- *   always derivable from events; kept for CAS + fast reads), conversation_turns (turn idempotency),
- *   agent_heartbeats (worker liveness).
- * Byte-compatible with the Python reference where the tables overlap.
- */
 import { Effect } from "effect";
 import { SqlClient } from "@effect/sql";
 

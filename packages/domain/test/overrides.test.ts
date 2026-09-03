@@ -71,7 +71,7 @@ describe("matchOverride — negatives (must reach the LLM, not an override)", ()
   });
 });
 
-describe("matchOverride — precedence (SPEC §8.4)", () => {
+describe("matchOverride — precedence", () => {
   it("OPT_OUT beats DISPUTE beats HARDSHIP beats WRONG_NUMBER", () => {
     expect(OVERRIDE_PRECEDENCE).toEqual(["OPT_OUT", "DISPUTE", "HARDSHIP", "WRONG_NUMBER"]);
     expect(reasonOf("I dispute this and stop calling me")).toBe("OPT_OUT");

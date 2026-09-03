@@ -1,16 +1,3 @@
-/**
- * The agent heartbeat is a mutating endpoint and is authenticated like one (C2).
- *
- * `POST /api/agents/heartbeat` upserts `conversation_liveness` for whatever conversation ids the
- * caller names, and that column is exactly what the orphaned-call sweeper filters on: a call whose
- * liveness is fresh is a call somebody is serving, so it is not swept. While the path sat in the
- * middleware's `open` list, anyone who could reach the port could keep any conversation alive
- * forever — pinning the borrower behind an active call that no worker was actually running — and
- * could do it without a token on a server that had one configured for every other write.
- *
- * Driven through the real handler with the real middleware, like `rateLimit.test.ts`, because the
- * wiring is the thing being asserted.
- */
 import { Effect, Exit, Layer, Redacted, Scope } from "effect";
 import { HttpApiBuilder, HttpServer } from "@effect/platform";
 import { afterAll, describe, expect, it } from "vitest";
@@ -32,7 +19,6 @@ const web = HttpApiBuilder.toWebHandler(
   { middleware: (app) => securityMiddleware(app).pipe(Effect.provide(middlewareContext)) },
 );
 
-/** The body a worker beats with. It never gets as far as the handler in the unauthorised cases. */
 const heartbeat = (headers: Record<string, string> = {}) =>
   web.handler(
     new Request("http://localhost/api/agents/heartbeat", {
@@ -47,15 +33,6 @@ afterAll(async () => {
   await Effect.runPromise(Scope.close(scope, Exit.void));
 });
 
-/**
- * `API_BEARER_TOKEN=` — written to turn authentication *off* — must not turn it on (issue #4).
- *
- * Found by running the stack rather than by reading it: compose started passing the variable so the
- * server and worker could agree about it (C2), the empty default reached the server, `Some("")` is
- * not `None`, and authentication switched on with an empty secret. Every worker heartbeat 401'd —
- * silently, because `client.heartbeat` is fire-and-forget — and a fleet run refused to start because
- * no worker was reporting its mode, three layers from the cause.
- */
 const blankScope = Effect.runSync(Scope.make());
 const blankTokenConfig = { apiBearerToken: Redacted.make("") };
 const blankMiddlewareContext = Effect.runSync(Scope.extend(Layer.build(Layer.mergeAll(AppConfigTest(blankTokenConfig), Metrics.Default)), blankScope));
@@ -90,7 +67,6 @@ describe("the agent heartbeat's bearer", () => {
 
   it("refuses a heartbeat presenting the wrong token", async () => {
     expect((await heartbeat({ authorization: "Bearer not-the-secret" })).status).toBe(401);
-    // A bare token is not a bearer, and an empty one is not a token.
     expect((await heartbeat({ authorization: TOKEN })).status).toBe(401);
     expect((await heartbeat({ authorization: "Bearer " })).status).toBe(401);
   });

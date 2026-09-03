@@ -1,8 +1,5 @@
-/**
- * Call-control operations (SPEC §10.3): runtime/telephony actions, never LLM tools.
- * Every action carries an idempotency key (`action_id`) because providers retry webhooks.
- * All functions expect to run inside the caller's transaction with the conversation locked.
- */
+/** Actions carry an `action_id` because providers retry webhooks, and every function here expects
+ * to run inside the caller's transaction with the conversation locked. */
 import { Effect } from "effect";
 import type { CallControlAction, EventRecord } from "@feather-lite/domain";
 import { replay } from "@feather-lite/domain";
@@ -20,7 +17,6 @@ export class CallControl extends Effect.Service<CallControl>()("@feather-lite/Ca
     const conv = yield* ConversationRepo;
     const ids = yield* IdGen;
 
-    /** Append CALL_CONTROL unless an event with the same action_id already exists. */
     const logAction = (params: {
       conversationId: string;
       events: ReadonlyArray<EventRecord>;
@@ -44,10 +40,6 @@ export class CallControl extends Effect.Service<CallControl>()("@feather-lite/Ca
         return { action: params.action, action_id: actionId, duplicate: false } satisfies LoggedAction;
       });
 
-    /**
-     * Warm-transfer stub (SPEC §13.3): logs WARM_TRANSFER + TRANSFER_REQUESTED + TRANSFER_COMPLETED
-     * with a `handoff_stubbed` status. A SIP bridge transfer plugs in here later.
-     */
     const warmTransfer = (params: {
       conversationId: string;
       events: ReadonlyArray<EventRecord>;

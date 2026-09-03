@@ -1,11 +1,3 @@
-/**
- * The worker's ceiling, tested where the live shed probe could not discriminate.
- *
- * The 2026-08-28 probe (three calls against `WORKER_MAX_JOBS=1` → one served) created its rooms
- * over separate HTTP calls, so the first job had already reached `activeJobs` before the second
- * request arrived — the same result follows with the admission window deleted. What that probe
- * cannot construct, and this file can, is three requests inside the assignment window.
- */
 import { describe, expect, it } from "vitest";
 import { createAdmissionController } from "../src/admission.js";
 
@@ -41,8 +33,8 @@ const fakeClock = () => {
 describe("admission control", () => {
   it("refuses the third simultaneous request against a ceiling of two", async () => {
     const clock = fakeClock();
-    // Never populated: this is the window between the accept and `launchJob`, which is exactly
-    // where the burst arrives and where the old code's `admitting` was already back to zero.
+    // Never populated: this is the window between the accept and `launchJob`, where the burst
+    // arrives.
     const active: string[] = [];
     const admission = createAdmissionController({
       maxJobs: 2,
@@ -57,7 +49,6 @@ describe("admission control", () => {
 
     const p1 = admission.requestFunc(one.req);
     const p2 = admission.requestFunc(two.req);
-    // Synchronously after the first two: `admitting` is 2, `activeJobIds()` is still empty.
     expect(admission.admitting()).toBe(2);
     expect(admission.inFlight()).toBe(2);
 
@@ -91,7 +82,6 @@ describe("admission control", () => {
     await admitted;
 
     expect(admission.admitting()).toBe(0);
-    // ...and the ceiling now counts it as running rather than admitting.
     expect(admission.inFlight()).toBe(1);
 
     const two = fakeRequest("job-2");
@@ -119,7 +109,6 @@ describe("admission control", () => {
     expect(clock.now()).toBeGreaterThanOrEqual(8_000);
     expect(logged.some((m) => m.includes("never reached activeJobs"))).toBe(true);
 
-    // The slot is free again, so the next call is served rather than refused for ever.
     const two = fakeRequest("job-2");
     const next = admission.requestFunc(two.req);
     expect(two.calls.rejected).toBe(false);
@@ -143,15 +132,10 @@ describe("admission control", () => {
     await waiting;
 
     expect(admission.admitting()).toBe(0);
-    // The whole point: it gave up long before the assignment timeout would have expired.
     expect(clock.now()).toBeLessThan(8_000);
   });
 
   it("counts a job once when it is both admitting and already running", async () => {
-    // Measured live on 2026-09-01: a warm slot put a job into `activeJobs` 26 ms after the accept,
-    // one millisecond before the 25 ms poll observed it, so a counter read `running: 1,
-    // admitting: 1` for a single job. Over-counting refuses early rather than late, which was never
-    // dangerous — but the ceiling is claimed to be exact, so it is exact.
     const clock = fakeClock();
     const active: string[] = [];
     const admission = createAdmissionController({ maxJobs: 2, activeJobIds: () => active, now: clock.now, sleep: clock.sleep });
@@ -163,7 +147,6 @@ describe("admission control", () => {
     expect(admission.admitting()).toBe(1);
     expect(admission.inFlight()).toBe(1);
 
-    // ...so the second slot is genuinely free, and a request for it is served.
     const two = fakeRequest("job-2");
     const second = admission.requestFunc(two.req);
     expect(two.calls.rejected).toBe(false);
@@ -203,7 +186,7 @@ describe("admission control", () => {
   });
 });
 
-describe("a worker that is shutting down (W9)", () => {
+describe("a worker that is shutting down", () => {
   it("refuses a job offered during the drain instead of accepting it into a pool being torn down", async () => {
     const controller = createAdmissionController({
       maxJobs: 8,
@@ -217,8 +200,6 @@ describe("a worker that is shutting down (W9)", () => {
     const late = fakeRequest("job-late");
     await controller.requestFunc(late.req);
     expect(late.calls.rejected).toBe(true);
-    // The distinction that matters: accepting it would promise a worker to a call that is about to
-    // die with the process, and the borrower's conversation would reach the sweeper as an orphan.
     expect(late.calls.accepted).toBe(false);
   });
 });

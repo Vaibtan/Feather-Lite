@@ -1,21 +1,10 @@
 /**
- * The command line every tracer harness shares (issue #4, H6, generalised for tier 3).
- *
- * H6 was written for the fleet and its lesson is not fleet-specific: **a measurement you cannot
- * identify afterwards is not evidence, and a gate you think you passed is worse than one you know
- * you skipped.** So a label is required and lands in the filename, and an unknown flag is a refusal
- * rather than a silent no-op — a run invoked with a misspelled gate used to run without that gate
- * and say nothing.
- *
- * Tier 3 had neither. Its first cut carried the ad hoc `flag()` helper that `shed-probe.ts` still
- * has and that `fleet-args.ts` was written to replace: an optional label defaulting to the scenario
- * id, so a second run of one scenario in a day overwrote the first — the exact collision that cost a
- * tracked report on 2026-09-02. Rather than teach the same lesson a third time, the scanner moves
- * here and each harness declares only its own flags.
+ * A label is required and lands in the filename, and an unknown flag is a refusal rather than a
+ * silent no-op: a measurement you cannot identify afterwards is not evidence, and a gate you think
+ * you passed is worse than one you know you skipped.
  */
 import { seedFrom } from "@feather-lite/domain";
 
-/** What flags a harness has, and what each means when a refusal has to name it. */
 export interface FlagSpec {
   readonly value: Readonly<Record<string, string>>;
   readonly boolean: Readonly<Record<string, string>>;
@@ -26,7 +15,6 @@ export type Scanned =
   | { readonly ok: true; readonly values: ReadonlyMap<string, string>; readonly booleans: ReadonlySet<string> }
   | { readonly ok: false; readonly message: string };
 
-/** Every refusal carries the usage, because the reader of a refusal is someone mid-run. */
 export const refusalOf = (spec: FlagSpec, why: string): { readonly ok: false; readonly message: string } => {
   const lines = [
     ...Object.entries(spec.value).map(([k, w]) => `  --${k} <value>   ${w}`),
@@ -41,8 +29,7 @@ export const scanFlags = (argv: ReadonlyArray<string>, spec: FlagSpec): Scanned 
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
     if (!token.startsWith("--")) continue;
-    // A bare `--` is the separator, not a flag: `pnpm run x -- --label a` forwards it verbatim, and
-    // refusing it made the invocation documented in each harness's own header exit 2.
+    // A bare `--` is the separator, not a flag: `pnpm run x -- --label a` forwards it verbatim.
     if (token === "--") continue;
     const name = token.slice(2);
     if (name in spec.value) {
@@ -61,11 +48,7 @@ export const scanFlags = (argv: ReadonlyArray<string>, spec: FlagSpec): Scanned 
   return { ok: true, values, booleans };
 };
 
-/**
- * Lower-case, digits and dashes. Not a general slug: the label becomes a filename in a directory
- * read by humans and globbed by scripts, and a run called `N=10 (retry?)` is a filename nobody can
- * type.
- */
+/** Not a general slug: the label becomes a filename that humans type and scripts glob. */
 export const normaliseLabel = (raw: string): string =>
   raw
     .trim()
@@ -73,7 +56,6 @@ export const normaliseLabel = (raw: string): string =>
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
 
-/** The refusal that exists because a tracked report was lost to it. Shared, since the reason is. */
 export const labelOrRefusal = (spec: FlagSpec, raw: string | undefined): string | { readonly ok: false; readonly message: string } => {
   const label = normaliseLabel(raw ?? "");
   return label.length > 0

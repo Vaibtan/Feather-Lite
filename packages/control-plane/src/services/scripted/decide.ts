@@ -1,12 +1,3 @@
-/**
- * Deterministic stand-in for the LLM. It behaves the way a well-prompted model should
- * given the state-scoped tools: it never confirms outcomes itself (the orchestrator does,
- * from the committed record), it proposes rather than records promises, and it uses
- * `confirm_right_party` instead of guessing.
- *
- * Only reachable via the `scripted` decider (scenarios, CI, offline demo). It is NOT the
- * production conversationalist — see `OpenAITurnDecider`.
- */
 import type { ToolCall, TurnDecision } from "@feather-lite/domain";
 import type { DeciderInput } from "../types.js";
 import { localToUtcIso, parseAmount, parseCallbackTime, parseRelativeDate } from "./parse.js";

@@ -1,6 +1,3 @@
-/**
- * The process's gauges are a service with a zero default, not module-level `let`s (F5).
- */
 import { describe, expect, it } from "vitest";
 import { Effect } from "effect";
 import { Gauges } from "../../src/services/Gauges.js";
@@ -9,12 +6,10 @@ const run = <A>(e: Effect.Effect<A, never, Gauges>) => Effect.runPromise(e.pipe(
 
 describe("Gauges", () => {
   it("reads zero for a gauge nothing has registered", async () => {
-    // The property the module-level `let` was there to provide: a process that never built a
-    // TurnRunner answers /status with zero rather than failing to answer at all.
     expect(await run(Effect.gen(function* () { return (yield* Gauges).read("live_turns"); }))).toBe(0);
   });
 
-  it("reads what the owner registered", async () => {
+  it("reads the supplier's current value, not a snapshot taken when it was registered", async () => {
     const out = await run(
       Effect.gen(function* () {
         const g = yield* Gauges;
@@ -24,7 +19,6 @@ describe("Gauges", () => {
         return g.read("live_turns");
       }),
     );
-    // A supplier, not a snapshot: the owner keeps the state and the gauge asks for it.
     expect(out).toBe(3);
   });
 
@@ -42,8 +36,6 @@ describe("Gauges", () => {
   });
 
   it("gives each instance its own registry, so one build cannot clobber another", async () => {
-    // The defect in `export let`: two TurnRunners in one process shared one slot, and the second
-    // silently replaced the first's closure — which is every test file that builds one.
     const out = await Effect.runPromise(
       Effect.gen(function* () {
         const a = yield* Effect.provide(Effect.gen(function* () {

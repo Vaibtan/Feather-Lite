@@ -1,15 +1,8 @@
-/**
- * The simulator's borrowers, fixed per seed (issue #1, D4 — Phase 4).
- *
- * D4 asks for at least five voices, and for the choice to be a function of the seed so a run can be
- * repeated. The persona also carries its own degradation profile, because an accent and a bad line
- * are the same question asked twice: can the recogniser still hear the amount?
- */
 import { describe, expect, it } from "vitest";
 import { PERSONAS, personaForSeed } from "../src/personas.js";
 
 describe("PERSONAS", () => {
-  it("has at least the five D4 asks for", () => {
+  it("has at least five personas", () => {
     expect(PERSONAS.length).toBeGreaterThanOrEqual(5);
   });
 
@@ -18,10 +11,7 @@ describe("PERSONAS", () => {
   });
 
   it("keeps one persona clean, so the baseline is still measurable", () => {
-    /**
-     * Without it every number moves at once and nothing is attributable: a WER change could be the
-     * accent, the noise or the codec. The clean persona is the control.
-     */
+    /** Without a control, a WER change could be the accent, the noise or the codec, and nothing is attributable. */
     const clean = PERSONAS.filter((p) => p.degradation === null);
     expect(clean).toHaveLength(1);
     expect(clean[0]?.id).toBe("clean");

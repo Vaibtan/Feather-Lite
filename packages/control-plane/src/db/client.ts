@@ -1,8 +1,3 @@
-/**
- * Postgres client + migrations. `@effect/sql-pg` wraps node-postgres.
- * Column names are camelCased on the way out and snake_cased on the way in;
- * JSONB payload keys are untouched (they stay snake_case — the wire format).
- */
 import { Effect, Layer, Redacted, String as Str } from "effect";
 import Pg from "pg";
 import { NodeContext } from "@effect/platform-node";
@@ -19,32 +14,18 @@ import { migration0007 } from "./migrations/0007_claim_lease.js";
 import { migration0008 } from "./migrations/0008_conversation_origin.js";
 import { migration0009 } from "./migrations/0009_conversation_harness.js";
 
-/**
- * The connection pool, held so its depth can be reported (D3).
- *
- * `PgClient` does not expose the pool it builds, and "is the app waiting for a connection?" is one
- * of the two questions an operator asks when turns go slow — the 2026-08-21 experiment that raised
- * the pool from 10 to 40 and got *less* throughput was diagnosed exactly this way, from
- * `pg_stat_activity` showing 22 backends idle in transaction. That was a harness scraping the
- * database; this is the process saying it about itself.
- *
- * Null until the layer is built, and null again in any process that never touches Postgres, so the
- * gauge reports "not measured" rather than a zero-depth pool that does not exist.
- */
+// `PgClient` does not expose the pool it builds, so this module owns one to report its depth. Null
+// in any process that never touches Postgres, so the gauge reports "not measured" rather than zero.
 let livePool: Pg.Pool | null = null;
 
-/** `{size, idle, waiting}` from node-postgres, or null when there is no pool. */
 export const pgPoolGauge = (): { size: number; idle: number; waiting: number } | null =>
   livePool === null ? null : { size: livePool.totalCount, idle: livePool.idleCount, waiting: livePool.waitingCount };
 
 export const PgLive: Layer.Layer<SqlClient.SqlClient | PgClient.PgClient, unknown, AppConfig> = Layer.unwrapEffect(
   Effect.gen(function* () {
     const cfg = yield* AppConfig;
-    /**
-     * The same client as before, built on a pool this module owns. Every transform is carried over
-     * verbatim — the codebase's queries are written in camelCase and the schema is snake_case, so a
-     * dropped transform would not fail to compile, it would fail at runtime on every query.
-     */
+    // The name transforms are load-bearing: queries are written camelCase against a snake_case
+    // schema, so dropping one still compiles and fails at runtime on every query.
     return PgClient.layerFromPool({
       acquire: Effect.acquireRelease(
         Effect.sync(() => {
@@ -85,5 +66,4 @@ export const MigrationsLive = PgMigrator.layer({
   }),
 }).pipe(Layer.provide(NodeContext.layer));
 
-/** Runs migrations, then exposes the client. */
 export const DatabaseLive = Layer.provideMerge(MigrationsLive, PgLive).pipe(Layer.provideMerge(PgLive));

@@ -1,10 +1,3 @@
-/**
- * `wait`: the borrower asks for a moment and the agent says nothing (issue #1, D1 — Phase 2).
- *
- * The decider is not consulted. The borrower's line is still appended, because the ledger is the
- * truth about what was said (Q4); the control plane simply declines to answer and asks the worker
- * for more away time. A second consecutive hold is answered, so a borrower cannot park the call.
- */
 import { Effect, Layer, Stream } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -66,14 +59,10 @@ describe("a borrower asking for a moment", () => {
     );
     expect(out.result["disposition"]).toBe("wait");
     expect(out.r.agentText).toBe("");
-    // The worker is told to wait longer rather than firing a no-input strike into the silence.
     expect(out.r.extendAwayMs).toBeGreaterThan(0);
-    // Not consulted: a hold is a lexicon decision, not a model one (Q3).
     expect(deciderCalls).toBe(before);
-    // The borrower's words still reach the ledger — Q4: the ledger is the truth about what was said.
     expect(out.events.some((e) => e.type === "USER_TURN_FINAL")).toBe(true);
-    // And the agent said nothing *on this turn* — the call's opening line is already in the ledger,
-    // which is why this asks about `w1` rather than about agent turns in general.
+    // Scoped to this turn's id because the call's opening line is already in the ledger.
     expect(out.events.some((e) => e.type === "AGENT_TURN" && e.payload.turn_id === "w1")).toBe(false);
   });
 
@@ -92,8 +81,6 @@ describe("a borrower asking for a moment", () => {
   });
 
   it("does not treat a hold phrase carrying an offer as a hold", async () => {
-    // "hold on, I can pay Friday" is an offer that opens politely. Waiting on it would drop the
-    // offer entirely, which is the worst outcome this lexicon can produce.
     const out = await rt.runPromise(
       Effect.gen(function* () {
         const started = yield* startCall;

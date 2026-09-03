@@ -1,20 +1,3 @@
-/**
- * The fully-heard read-back guard (C1).
- *
- * PRD §5.2.8: a promise is recorded only after the borrower has confirmed a read-back they
- * actually heard. The guard's evidence is the `AGENT_TURN_PLAYOUT` the voice worker reports for
- * the read-back turn. Three cases, and the third is the one this file exists for:
- *
- *  - reported `interrupted` -> rejected, read-back repeated;
- *  - reported heard        -> recorded;
- *  - **never reported**    -> on a voice call there is no evidence the borrower heard anything,
- *    so it is rejected too. A worker killed after speaking, a failed signal POST or a dead job
- *    process all produce exactly this shape, and ADR 0008's cross-check covers a report that
- *    arrives *wrong*, not one that never arrives.
- *
- * On `simulated` there is no playout reporter by design (the scenario runner drives the
- * orchestrator directly), so the absence keeps its vacuous pass — the fourth case.
- */
 import { Effect, Layer, Option, Stream } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -26,10 +9,7 @@ import { makeInfraLayer, makeRuntime, truncateAll } from "./harness.js";
 const AMOUNT = "550.00";
 const DATE = "2026-09-15";
 
-/**
- * Turn ids are `<case>:<step>` so one decider serves every case: the step drives the tool and the
- * case keeps the ids unique across conversations.
- */
+// Turn ids are `<case>:<step>` so one decider serves every case: the step drives the tool, the case keeps ids unique across conversations.
 const decider = StaticTurnDeciderLive((input) => {
   const step = input.turnId.slice(input.turnId.indexOf(":") + 1);
   switch (step) {
@@ -56,7 +36,6 @@ const layer = Layer.mergeAll(Orchestrator.Default, WorkflowService.Default, Quer
 );
 const rt = makeRuntime(layer);
 
-/** A conversation driven as far as the read-back: the proposal is pending on turn `<case>:propose`. */
 const upToReadBack = (caseId: string, channel: Channel, phone: string) =>
   Effect.gen(function* () {
     const sql = yield* PgClient.PgClient;
@@ -77,7 +56,6 @@ const upToReadBack = (caseId: string, channel: Channel, phone: string) =>
     return id;
   });
 
-/** What the ledger says after the record attempt. */
 const outcomeOf = (conversationId: string) =>
   Effect.gen(function* () {
     const q = yield* Queries;
@@ -124,7 +102,6 @@ describe("the fully-heard read-back guard", () => {
     expect(out.finalOutcome).toBeNull();
     expect(out.rejections).toHaveLength(1);
     expect(out.rejections[0]?.type === "TOOL_REJECTED" && out.rejections[0].payload.detail).toBe(READBACK_INTERRUPTED_DETAIL);
-    // The guard's recovery: the read-back is spoken again, re-armed on this turn.
     expect(out.sayText).toContain(promiseReadback({ amount: AMOUNT, date: DATE }));
     expect(out.pendingProposal?.read_back_turn_id).toBe("interrupted:record");
   });
@@ -156,15 +133,12 @@ describe("the fully-heard read-back guard", () => {
       Effect.gen(function* () {
         const id = yield* upToReadBack("absent", "voice", "+15550003003");
         const orch = yield* Orchestrator;
-        // No `playout` on the turn: the worker died after speaking, or the signal never landed.
         yield* orch.processTurn({ conversationId: id, turnId: "absent:record", userText: "yes" }, () => Effect.void);
         return yield* outcomeOf(id);
       }),
     );
     expect(out.finalOutcome).toBeNull();
     expect(out.rejections).toHaveLength(1);
-    // The ledger says which of the two failures it was: nothing reported, not a barge-in. An
-    // operator reading the call needs to tell "the borrower talked over it" from "the worker died".
     expect(out.rejections[0]?.type === "TOOL_REJECTED" && out.rejections[0].payload.detail).toBe(READBACK_UNCONFIRMED_DETAIL);
     expect(out.sayText).toContain(promiseReadback({ amount: AMOUNT, date: DATE }));
     expect(out.pendingProposal?.read_back_turn_id).toBe("absent:record");

@@ -1,8 +1,3 @@
-/**
- * The LLM judge's pure half (spec 2026-08-26, D3): what it is shown, what it is allowed to return,
- * and what its verdict becomes in the score table. The model call itself is the outbox job's
- * business and is tested against the recording client in `packages/control-plane/test/db`.
- */
 import { Either } from "effect";
 import { describe, expect, it } from "vitest";
 import {
@@ -37,9 +32,7 @@ const verdict = (overrides: Partial<JudgeVerdict> = {}): JudgeVerdict => ({
 });
 
 describe("JUDGE_RESPONSE_SCHEMA", () => {
-  // OpenAI's strict structured output rejects a schema that leaves any property optional or lets
-  // extra ones through. Getting this wrong is a 400 at request time, on a path that only runs
-  // post-call — so it is pinned here rather than discovered in production.
+  /** OpenAI's strict structured output rejects a schema with any optional property or extra ones allowed, as a 400 at request time. */
   const walk = (node: Record<string, unknown>): void => {
     if (node["type"] !== "object") return;
     const properties = node["properties"] as Record<string, Record<string, unknown>>;
@@ -65,8 +58,6 @@ describe("decodeJudgeVerdict", () => {
   });
 
   it("rejects a verdict missing a dimension, rather than scoring the ones that arrived", () => {
-    // A partial verdict is not a partial opinion — the model may have failed halfway through, and
-    // four dimensions with a silent fifth would read on the page as "the fifth was not applicable".
     const { compliance, ...partial } = verdict();
     expect(Either.isLeft(decodeJudgeVerdict(partial))).toBe(true);
   });
@@ -84,8 +75,6 @@ describe("decodeJudgeVerdict", () => {
   });
 
   it("keeps a long rationale by clamping it, rather than failing the whole verdict", () => {
-    // The schema asks for 200 characters. A model that overshoots has still done the work, and
-    // throwing away five dimensions over a long sentence would be the wrong trade.
     const long = "x".repeat(JUDGE_RATIONALE_MAX + 50);
     const out = decodeJudgeVerdict(verdict({ compliance: { pass: false, rationale: long, evidence: "\"quote\"" } }));
     expect(Either.isRight(out)).toBe(true);
@@ -105,9 +94,6 @@ describe("buildJudgeInput", () => {
   ];
 
   it("shows the judge what the borrower heard, not what was generated", () => {
-    // A barged-in line the borrower never heard the end of cannot be held against the agent, and
-    // cannot be credited to it either. The transcript already prefers heard text; the judge sees
-    // the same thing the console does.
     const input = buildJudgeInput(events);
     const agentLines = input.transcript.filter((t) => t.speaker === "AGENT").map((t) => t.text);
     expect(agentLines).toContain("Your balance is");
@@ -121,9 +107,7 @@ describe("buildJudgeInput", () => {
   });
 
   it("contains nothing but what the ledger already holds", () => {
-    // D3: "Not the raw prompt, not account context beyond the transcript." The judge must not
-    // become a second path by which protected account data leaves the system, so the input is
-    // assembled from events alone — there is no parameter through which context could arrive.
+    /** The input is assembled from events alone, so there is no parameter through which account context could reach the judge. */
     const serialized = JSON.stringify(buildJudgeInput(events));
     expect(serialized).not.toContain("prompt");
     expect(buildJudgeInput.length).toBe(2);
@@ -139,7 +123,6 @@ describe("judgePrompt", () => {
   it("asks for evidence before the verdict and warns against the friendly wrong call", () => {
     const system = judgePrompt(input)[0]!.content.toLowerCase();
     expect(system).toContain("evidence");
-    // The failure mode this judge exists to catch: a call that sounded warm and achieved nothing.
     expect(system).toMatch(/polite|friendly|warm|fluen/);
   });
 
@@ -165,7 +148,6 @@ describe("judgeScores", () => {
     expect(scores.every((s) => s.source === "JUDGE" && s.turnId === null)).toBe(true);
     expect(byName.get("judge.compliance")!.value).toBe(0);
     expect(byName.get("judge.compliance")!.comment).toBe("no disclosure");
-    // The quote is what makes a verdict checkable in seconds, so it is structured, not prose.
     expect(byName.get("judge.compliance")!.evidence).toEqual({ quote: "\"Hi, is Jordan there?\"" });
   });
 

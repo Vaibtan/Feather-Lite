@@ -1,95 +1,37 @@
-/**
- * Application configuration, read once from the environment through Effect `Config`
- * so tests can override any of it with `ConfigProvider.fromMap`.
- */
 import { Config, Context, Effect, Layer, Redacted } from "effect";
 import type { ConversationState } from "@feather-lite/domain";
 
-/**
- * How hard a reasoning model thinks before answering, as OpenAI's models page defines it. A closed
- * vocabulary rather than a string, so a typo is a compile error here instead of a 400 from the
- * provider on a path that only runs after a call has ended.
- */
 export const REASONING_EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
 export interface AppConfigShape {
   readonly databaseUrl: Redacted.Redacted<string>;
   readonly dbMaxConnections: number;
-  /** Public identity spoken on every call. */
   readonly agentName: string;
   readonly companyName: string;
   readonly callbackNumber: string;
-  /** Per-state LLM model selection (PRD §5.2.2). */
   readonly llmModelByState: Readonly<Record<ConversationState, string>>;
   readonly openaiApiKey: Redacted.Redacted<string> | null;
   readonly openaiBaseUrl: string;
   readonly turnDecider: "scripted" | "openai";
   readonly langfuse: { readonly publicKey: string; readonly secretKey: Redacted.Redacted<string>; readonly baseUrl: string; readonly environment: string } | null;
-  /**
-   * Kill switch, separate from the keys. A tier-1 load run drives tens of thousands of turns
-   * through the scripted decider; `LANGFUSE_ENABLED=false` silences the exporter for that run
-   * without anyone having to strip credentials out of .env and put them back afterwards.
-   */
   readonly langfuseEnabled: boolean;
-  /**
-   * Mask account facts — amounts, dates, long digit runs — in every span body before it is
-   * exported (D3). **On by default**: Langfuse is a second store with its own retention and its
-   * own readers, and nothing in the pipeline had ever drawn that line. Turn it off to debug a
-   * prompt, knowing what that writes.
-   */
   readonly traceRedactAccountData: boolean;
-  /**
-   * The media plane, and — separately — whether it can place an *outbound* call.
-   *
-   * `sipOutboundTrunkId` is null on the self-hosted profile, which has no SIP at all. It is
-   * read here as well as in the worker because the control plane is what decides to re-dial, and
-   * scheduling a call that the worker can only hang up on is how C4's loop happened.
-   */
   readonly livekit:
     | { readonly url: string; readonly apiKey: string; readonly apiSecret: Redacted.Redacted<string>; readonly agentName: string; readonly sipOutboundTrunkId: string | null }
     | null;
-  /** Demo conveniences: clock override on /calls/start, "reset demo" endpoint. */
   readonly demoMode: boolean;
   readonly apiBearerToken: Redacted.Redacted<string> | null;
-  /**
-   * A secret that exempts a caller from the per-IP budget and the daily turn cap (O9).
-   *
-   * The harness drives hundreds of turns a minute from one address, so the server's own middleware
-   * sheds it: a tier-1 run was 429ed 92 times and reported "23/50 correct". The workaround was to
-   * raise `RATE_LIMIT_PER_MINUTE` and `DAILY_TURN_CAP` in the server's environment for load runs,
-   * which means the run is measured against a server configured differently from the one being
-   * described — and it is the same knob a public demo depends on.
-   *
-   * A separate secret rather than a per-bearer bucket, because there is exactly one bearer here and
-   * a bucket keyed on it would exempt the demo as well. It exempts nothing else: the bearer check
-   * above still applies, so this cannot be used to reach an endpoint, only to be allowed to reach
-   * it often. Null unless set, and every bypassed request is counted.
-   */
   readonly rateLimitBypassToken: Redacted.Redacted<string> | null;
-  /** Public-demo hardening budgets. Raised deliberately for load runs (docs/loadtest/). */
   readonly rateLimitPerMinute: number;
   readonly dailyTurnCap: number;
-  /**
-   * Orphaned-call sweeper (spec 2026-08-26, D6). A conversation is a candidate once no worker has
-   * claimed it for `orphanMissedHeartbeats` heartbeat intervals; the media plane is then asked
-   * whether an agent is still in the room, and only a definite "no" finalizes it. When the media
-   * plane cannot answer, the much longer `orphanUnconfirmedMs` applies instead, so a LiveKit outage
-   * degrades into a slower sweep rather than a fleet-wide hangup.
-   */
   readonly sweeperEnabled: boolean;
   readonly orphanMissedHeartbeats: number;
   readonly orphanHeartbeatIntervalMs: number;
   readonly orphanUnconfirmedMs: number;
   /**
-   * The LLM judge (spec 2026-08-26, D3). Off by default so CI, tier-1 load runs and anyone who
-   * clones this repo do not spend money by accident; on in the dev `.env`, where the user decided
-   * cost is not a constraint.
-   *
-   * The model is **GPT-5.6 Luna and no other** — the efficient tier of the GPT-5.6 family, chosen
-   * by the user on 2026-08-26. The id is spelled out rather than using the bare `gpt-5.6` alias,
-   * which OpenAI routes to Sol (the frontier tier) and would quietly cost an order of magnitude
-   * more per call than was agreed.
+   * The judge model id is spelled out in full rather than the bare `gpt-5.6` alias, which OpenAI
+   * routes to the frontier tier and costs an order of magnitude more per call.
    */
   readonly judge: {
     readonly enabled: boolean;
@@ -97,23 +39,12 @@ export interface AppConfigShape {
     readonly reasoningEffort: ReasoningEffort;
     readonly maxTokens: number;
   };
-  /**
-   * Latency SLO targets (spec 2026-08-26, D6). These are what this stack actually achieves plus
-   * headroom, not the 800 ms-1.5 s "natural conversation" band vendor literature quotes: the
-   * measured local p50 is 1.5-2.1 s, and a target the system has never met is decoration.
-   * The per-stage targets exist so a regression names its own cause instead of moving one number.
-   */
   readonly slo: {
     readonly turnP95Ms: number;
     readonly eouP95Ms: number;
     readonly transcriptionP95Ms: number;
     readonly ttftP95Ms: number;
     readonly ttsTtfbP95Ms: number;
-    /**
-     * Below this many observations a component reports `insufficient_sample` rather than pass or
-     * fail (O2). At n=6 a p95 is simply the maximum, and a verdict computed from it trains an
-     * operator to ignore the page.
-     */
     readonly minSample: number;
   };
 }
@@ -211,34 +142,15 @@ export const appConfig: Config.Config<AppConfigShape> = Config.all({
               apiKey: c.livekitApiKey.value,
               apiSecret: c.livekitApiSecret.value,
               agentName: c.livekitAgentName,
-              // Blank reads as absent, for the same reason the bypass token does below: an operator
-              // who writes `LIVEKIT_SIP_OUTBOUND_TRUNK_ID=` to turn it off means off.
               sipOutboundTrunkId: c.livekitSipOutboundTrunkId._tag === "Some" && c.livekitSipOutboundTrunkId.value.length > 0 ? c.livekitSipOutboundTrunkId.value : null,
             }
           : null,
       demoMode: c.demoMode,
       /**
-       * Blank is absent, the same rule the bypass token below documents — and for a sharper reason.
-       *
-       * `API_BEARER_TOKEN=` in an environment reads as `Some("")`, which switched authentication
-       * **on** with an empty secret: every mutating request then had to present the literal header
-       * `Bearer `, and every real client — the worker above all — got a 401. An operator who writes
-       * the variable with no value to turn auth off would have turned it on and locked out the
-       * fleet.
-       *
-       * Found by running it (issue #4): compose began passing `API_BEARER_TOKEN: ${API_BEARER_TOKEN:-}`
-       * so the server and worker could agree about it (C2), the empty default reached the server,
-       * and every worker heartbeat 401'd silently — `client.heartbeat` is fire-and-forget. The
-       * symptom was a fleet run refusing to start because no worker was reporting its mode, three
-       * layers from the cause.
+       * Blank must read as absent: `API_BEARER_TOKEN=` parses as `Some("")`, which switches
+       * authentication on with an empty secret and 401s every real client, including the worker.
        */
       apiBearerToken: c.apiBearerToken._tag === "Some" && Redacted.value(c.apiBearerToken.value).length > 0 ? c.apiBearerToken.value : null,
-      /**
-       * A blank value is treated as absent, and it has to be: `RATE_LIMIT_BYPASS_TOKEN=` in a
-       * `.env` reads as `Some("")` rather than `None`, and an empty secret would have matched the
-       * empty-string fallback the middleware uses when the header is missing — exempting *every*
-       * request, from a line an operator wrote to turn the feature off.
-       */
       rateLimitBypassToken: c.rateLimitBypassToken._tag === "Some" && Redacted.value(c.rateLimitBypassToken.value).length > 0 ? c.rateLimitBypassToken.value : null,
       rateLimitPerMinute: c.rateLimitPerMinute,
       dailyTurnCap: c.dailyTurnCap,
@@ -264,13 +176,11 @@ export const appConfig: Config.Config<AppConfigShape> = Config.all({
   }),
 );
 
-/** Live config from the process environment (and `.env` if the host loaded it). */
 export const AppConfigLive: Layer.Layer<AppConfig, import("effect/ConfigError").ConfigError> = Layer.effect(
   AppConfig,
   appConfig,
 );
 
-/** Config for tests: overrides on top of defaults. */
 export const AppConfigTest = (overrides: Partial<AppConfigShape> = {}): Layer.Layer<AppConfig> =>
   Layer.effect(
     AppConfig,

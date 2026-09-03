@@ -1,27 +1,3 @@
-/**
- * One automated end-to-end voice call with a *speaking* headless borrower.
- *
- * The borrower joins the room with a published audio track and speaks a scripted set of lines at
- * the right moments:
- *
- *   1. wait for the agent to finish its opening (the right-party question)
- *   2. say "Yes, this is <name>."
- *   3. wait for the agent's reply to *start*, then barge in with "I can pay 550 dollars on Friday."
- *      after ~2s (the same amount+date the simulation reference line carries, so the decider's
- *      choice is not riding on whether the model infers an unstated amount)
- *   4. wait for the read-back to finish, say "Yes, that's correct." — answering an amount
- *      clarification first if the agent asks one (an extra DISCUSSING_PAYMENT turn changes neither
- *      the state path nor the tool sequence, so equivalence is preserved)
- *   5. stay until the agent hangs up
- *
- * This is the real audio path — STT -> llmNode -> control-plane turn -> TTS -> playout -> barge-in —
- * so it doubles as the regression that proves a self-hosted SFU behaves like LiveKit Cloud
- * (ADR 0006). Timing is deliberately heuristic; the assertion that matters is the ledger
- * equivalence check the callers run afterwards (`equivalence.ts`).
- *
- * The borrower's voice comes from the same `STT_TTS_PROVIDER` switch the worker uses, and its lines
- * are cached to WAV so an N-call fleet pays for synthesis once, not 3xN times per run.
- */
 import {
   AudioFrame,
   AudioSource,
@@ -38,27 +14,20 @@ import { addNoiseAtSnr, dropFrames, makeRng, muLawRoundTrip, wordErrorRate, type
 import { buildSpeechStack, speechProvider } from "../speech.js";
 import { synthesizeCached } from "./line-cache.js";
 import { harnessHeaders, harnessJsonHeaders } from "@feather-lite/load-test/harness-http";
-// The threshold and the hangover come from `domain`, not a second copy here: the live detector and
-// the post-hoc `speechWindows()` have to agree, and a harness and a metric drifting apart on the
-// value is exactly the failure the domain module was written to prevent (H1).
+// The threshold and the hangover come from `domain` rather than a second copy: the live detector
+// and the post-hoc `speechWindows()` must agree, and drifting apart on the value is the failure
+// that module exists to prevent.
 import { SILENCE_HANGOVER_MS, SPEECH_RMS, type BorrowerEvent, type RmsSample } from "@feather-lite/domain";
 
-/**
- * A different voice than the agent's, so a human listening can tell the two apart.
- * Resolved lazily: harnesses load .env after module imports are hoisted, so reading
- * STT_TTS_PROVIDER at module level would always see the "inference" default.
- */
+/** Resolved lazily: harnesses load .env after imports are hoisted. */
 const borrowerVoice = (): string =>
   speechProvider() === "plugins"
     ? "aura-2-orion-en" // Deepgram Aura model name (the voice IS the model)
     : "a0e99841-438c-4a64-b679-ae501e7d6091"; // Cartesia voice id via Cloud Inference
 
-/** How long to wait for the agent's reply to start before giving up on a clean barge-in. */
 const SPEECH_START_TIMEOUT_MS = 60_000;
-/** How long to wait for the promise read-back. */
 const READBACK_TIMEOUT_MS = 60_000;
 
-/** One borrower line: the audio, and the exact words it says — the WER ground truth (D4). */
 export interface ScriptedLine {
   readonly frames: ReadonlyArray<AudioFrame>;
   readonly text: string;
@@ -67,18 +36,8 @@ export interface ScriptedLine {
 export interface ScriptedLines {
   readonly yes: ScriptedLine;
   readonly pay: ScriptedLine;
-  /** Answer to an amount-clarifying question, if the agent asks one instead of proposing. */
   readonly amount: ScriptedLine;
   readonly confirm: ScriptedLine;
-  /**
-   * The tier-3 lines (issue #1, D4). Synthesised with the rest so a scenario pays no cost the first
-   * time it runs, and cached by the same key.
-   *
-   * `backchannel` is the "mm-hm" D1's `resume` is about: short, no content, and the thing that
-   * should *not* stop the agent. `hold` is the "hold on" that should stop it and buy silence.
-   * `yesEarly` is the same word as `confirm` and a different act — said *during* the read-back
-   * rather than after it, which is the one D4 scenario that reproduces a known live defect.
-   */
   readonly backchannel: ScriptedLine;
   readonly hold: ScriptedLine;
   readonly yesEarly: ScriptedLine;
@@ -88,29 +47,15 @@ export interface ScriptedLines {
   readonly describe: string;
 }
 
-/**
- * Synthesise (or load from the WAV cache) the three borrower lines. Call once per process and share
- * the frames across every call in a fleet.
- */
-/**
- * A persona: whose voice the borrower speaks in (issue #4, H9).
- *
- * D4 wants at least five, fixed per seed and reported by name, because the literature's one
- * consistent finding is that accents cost most and cost provider-specifically — so a per-persona
- * number is the only honest one and an average across them is not.
- *
- * A name here rather than a voice id: the id is provider-specific and the report has to stay
- * readable when the provider changes. `undefined` is the voice `BORROWER_TTS_VOICE` selects, which
- * is what every number recorded so far was taken on.
- */
+/** A name, not a voice id: the id is provider-specific and the report must stay readable. */
 export type BorrowerPersona = string;
 
 export const loadScriptedLines = async (persona?: BorrowerPersona): Promise<ScriptedLines> => {
   const speech = buildSpeechStack(persona ?? borrowerVoice());
   const key = `${speech.provider}|${speech.describe}`;
   try {
-    // Sequential on purpose: some TTS plugins (Cartesia was one) multiplex synthesis over a single
-    // pooled WebSocket and silently drop a generation under concurrency; sequential costs nothing here.
+    // Sequential on purpose: some TTS plugins multiplex synthesis over one pooled WebSocket and
+    // silently drop a generation under concurrency.
     const YES = "Yes, this is Jordan.";
     const PAY = "Actually, wait. I can pay 550 dollars on Friday.";
     const AMOUNT = "The full balance. 550 dollars.";
@@ -148,89 +93,46 @@ export interface ScriptedCallOptions {
   readonly controlPlaneUrl: string;
   readonly borrowerName: string;
   readonly participantIdentity: string;
-  /**
-   * What the borrower does on this call (H9). Defaults to the promise-to-pay conversation this
-   * harness has always run; a tier-3 scenario supplies its own.
-   */
   readonly script?: BorrowerScript | undefined;
-  /**
-   * Called when the agent starts and stops speaking, live (H1).
-   *
-   * The seam a tier-3 scenario needs — "interrupt 400 ms into the agent's second line" is a reaction
-   * to an onset, and a scripted borrower that waits for a transcript reacts a sentence too late.
-   * Optional: tier 2 does not use them and its behaviour is unchanged.
-   */
+  /** The seam a scenario needs to react to an onset; a transcript arrives a sentence too late. */
   readonly onStretchStart?: ((index: number, atMs: number) => void) | undefined;
   readonly onStretchEnd?: ((index: number, atMs: number) => void) | undefined;
-  /** Short tag used in log lines so concurrent calls are readable. */
   readonly label: string;
   /**
-   * Which harness this is, stamped on the conversation row (issue #1, D4). `"sim"` is tier 3.
-   *
-   * The one thing that keeps a simulator call out of the window the product's latency claim is made
-   * from: a tier-3 call is `channel: "voice"` served by the real decider, so neither of the other
-   * two segment columns can tell it apart. Left unset by tier 2, whose calls belong in the window.
+   * What keeps a simulator call out of the window the product's latency claim is made from: it is
+   * `channel: "voice"` served by the real decider, so no other segment column can tell it apart.
    */
   readonly harness?: string | undefined;
-  /**
-   * The persona's line quality (issue #1, D4). Absent or null means a studio-clean borrower, which
-   * is what every run before Phase 4 measured.
-   */
   readonly degradation?: DegradationProfile | null | undefined;
   /** Seeds the noise and the frame loss, so a degraded run is repeatable. */
   readonly degradationSeed?: number | undefined;
   readonly log?: (message: string) => void;
-  /**
-   * Chaos hook: once the agent has actually replied — so there is a live call to break — this is
-   * invoked and the call is abandoned where it stands, with no further lines and no hangup. Only
-   * `chaos-orphan.ts` uses it; every other harness leaves it unset and runs the full script.
-   */
+  /** Abandons the call where it stands, with no further lines and no hangup. */
 }
 
 /**
- * One measurement of the composite metric that matters: borrower stops speaking -> agent starts
- * responding. `ms` is measured from the return of `speak()` (i.e. after `waitForPlayout()`, so the
- * borrower's last audio frame has actually left the source) to the first delta of the *next* agent
- * transcription segment. LiveKit forwards agent transcription in step with playout, so the first
- * delta of a fresh segment is the closest proxy for "first agent audio frame" available to a
- * headless client — the subscribed audio track carries frames continuously, silence included, so
- * frame arrival cannot mark speech onset.
- *
- * Segments already in flight when the borrower barges in are excluded: a latency is only attributed
- * to a segment whose text stream *opened* after the borrower fell silent. (The stream-open stamp is
- * only that guard; the latency itself is measured to the first agent delta, i.e. the same instant
- * the call's `agentSpeakingAt` transitions.)
+ * Measured from the return of `speak()` to the first delta of the next agent segment: a headless
+ * client cannot see audio onset, because the subscribed track carries silence continuously. A
+ * segment already in flight during a barge-in is the line being interrupted, not a reply.
  */
 export interface TurnLatency {
-  /** Which scripted borrower line this reply answers. */
   readonly turn: string;
-  /**
-   * Wall clock when the borrower fell silent — the instant this measurement is anchored to.
-   *
-   * Carried so a score can be joined to the ledger's turn by *time* rather than by position
-   * (review #10). The turn row is created after this, when the worker posts the committed turn, so
-   * the matching turn is the first one that started at or after this.
-   */
+  /** Carried so a score joins the ledger's turn by time rather than by position. */
   readonly atMs: number;
   readonly ms: number;
   /**
-   * Same interval, but measured to the first agent audio frame with speech-level RMS energy
-   * instead of the first transcription delta. The transcription stream is paced by the framework
-   * against playout and consistently lags the audio itself; this is the number a human ear
-   * experiences. Null when no energetic frame was seen before the transcription delta (should not
-   * happen; kept honest rather than defaulted).
+   * The same interval measured to the first energetic audio frame instead of the first
+   * transcription delta, which the framework paces against playout and which lags it.
    */
   readonly audioMs: number | null;
 }
 
-/** One borrower line, what the STT made of it, and the error rate between them (D4). */
 export interface WerLine {
   readonly turn: string;
-  /** Wall clock when the line finished being spoken; `NaN` if it never did. See {@link TurnLatency.atMs}. */
   readonly atMs: number;
   readonly reference: string;
   readonly hypothesis: string;
-  /** null when the reference was empty — nothing to be wrong about. */
+  /** Null when the reference was empty — nothing to be wrong about. */
   readonly wer: number | null;
   readonly substitutions: number;
   readonly insertions: number;
@@ -242,128 +144,68 @@ export interface ScriptedCallResult {
   readonly borrowerName: string;
   readonly conversationId: string | null;
   readonly roomName: string | null;
-  /** The agent ended the call itself (the expected happy-path ending). */
   readonly hungUp: boolean;
   readonly agentSegments: ReadonlyArray<string>;
   readonly agentAudioFrames: number;
   readonly durationMs: number;
-  /**
-   * When the call finished, in epoch milliseconds (H3).
-   *
-   * `durationMs` cannot close a join window: the measurements it is compared against are absolute
-   * instants, matched to `conversation_turns.started_at`. Without an absolute end the last line's
-   * window ran to infinity and could claim a turn the ledger opened after the call was over.
-   */
+  /** `durationMs` cannot close a join window: measurements are absolute instants. */
   readonly endedAtMs: number;
-  /** Per-turn response latency, in scripted order. See {@link TurnLatency}. */
   readonly turnLatencies: ReadonlyArray<TurnLatency>;
-  /** Per-line STT accuracy, in scripted order. See {@link WerLine}. */
   readonly werLines: ReadonlyArray<WerLine>;
-  /**
-   * The call's agent-audio energy, frame by frame (H1). Returned so `speechWindows()` runs once,
-   * post hoc and pure, on exactly what the live detector saw.
-   */
   readonly rmsSamples: ReadonlyArray<RmsSample>;
-  /** How many stretches the live detector counted, for reconciliation against the post-hoc index. */
   readonly liveStretchCount: number;
-  /** The borrower's own events, for `turnTakingMetrics` (issue #1, D4). */
   readonly borrowerEvents: ReadonlyArray<BorrowerEvent>;
-  /**
-   * Borrower transcripts that arrived with no spoken line waiting for them. Non-empty means the
-   * reference/hypothesis pairing above may be off by one, so the WER is not to be trusted for that
-   * run — reported rather than hidden.
-   */
+  /** Non-empty means the reference/hypothesis pairing may be off by one for that run. */
   readonly unmatchedTranscripts: ReadonlyArray<string>;
-  /**
-   * Scripted turns that the borrower spoke but that no agent segment ever answered (the script moved
-   * on first). Reported so a short `turnLatencies` list can never be mistaken for a clean run.
-   */
+  /** Reported so a short `turnLatencies` list is never mistaken for a clean run. */
   readonly unansweredTurns: ReadonlyArray<string>;
   readonly error: string | null;
 }
 
 /**
- * Everything a borrower script is given, and nothing else (issue #4, H9).
- *
  * Deep on purpose: behind these few members sit the LiveKit room, the audio source, the RMS onset
  * detector, the transcript join, the per-line word-error bookkeeping and the response-latency
- * measurement. A script says "speak this, wait for that" and none of the rest is its business —
- * which is what makes five scenarios a matter of writing five scripts rather than five forks of a
- * 350-line function.
+ * measurement. A script says "speak this, wait for that" and none of the rest is its business,
+ * which is what makes five scenarios five scripts rather than five forks of one long function.
  */
 export interface CallContext {
-  /** The persona's WAV-cached lines. */
   readonly lines: ScriptedLines;
   readonly borrowerName: string;
   readonly log: (message: string) => void;
   readonly sleep: (ms: number) => Promise<unknown>;
-  /**
-   * Play one line and close the previous one for scoring. Returns when playout finishes, which is
-   * the instant both the WER line and the response-latency measurement are anchored to.
-   */
+  /** Returns when playout finishes, the instant both measurements about the line are anchored to. */
   readonly speak: (label: string, line: ScriptedLine) => Promise<void>;
-  /** Wait for an agent segment matching `pattern` after index `from`; returns the next index, or -1. */
   readonly waitAgentSaid: (pattern: RegExp, from: number, timeoutMs: number) => Promise<number>;
-  /** Wait until the agent is actually producing audio, rather than until it has said something. */
   readonly waitAgentSpeaking: (timeoutMs: number) => Promise<boolean>;
-  /** Every agent segment so far, in order. Read-only to a script. */
   readonly agentSaid: ReadonlyArray<{ readonly at: number; readonly text: string }>;
-  /** Whether the agent has left the room. */
   readonly agentGone: boolean;
-  /**
-   * Wait for the agent's next stretch of speech to **begin**, returning its onset or null (H1).
-   *
-   * The seam that makes "interrupt 400 ms into the agent's next line" expressible. A script that
-   * waits for the line's *transcript* and then speaks is speaking after it, because a segment
-   * arrives when it closes.
-   */
+  /** Returns the onset, or null: a segment arrives when it closes, so its text is too late. */
   readonly waitNextStretchStart: (timeoutMs: number) => Promise<number | null>;
   /**
-   * Wait until the agent has been silent for `quietMs`. Returns whether it went quiet in time.
-   *
-   * The seam for D1's non-interruptible lines: words spoken into one are dropped, so a scenario that
-   * means to be heard must wait for the line to finish, and only the audio can say when.
+   * Words spoken into a non-interruptible line are dropped at the worker, so a scenario that means
+   * to be heard must wait for silence — and only the audio can say when.
    */
   readonly waitAgentQuiet: (quietMs: number, timeoutMs: number) => Promise<boolean>;
-  /** Wait for the agent to hang up, or give up. Returns whether it did. */
   readonly waitForHangup: (timeoutMs: number) => Promise<boolean>;
 }
 
-/**
- * One borrower's behaviour for one call.
- *
- * A `name` because it goes in the report: a run whose borrower behaved differently is a different
- * measurement, and "which script" is the first thing to know about a tier-3 number.
- */
 export interface BorrowerScript {
   readonly name: string;
   readonly run: (ctx: CallContext) => Promise<void>;
 }
 
-/** How long to wait for the agent to start speaking at all. */
 const SPEECH_START_WAIT_MS = SPEECH_START_TIMEOUT_MS;
 
-/**
- * The promise-to-pay conversation this harness has always run, now one implementation of the seam
- * rather than the only thing the file can do.
- *
- * Unchanged in behaviour, deliberately: H9's verification is that tier 2 is unchanged, because the
- * script is the same script.
- */
 export const promiseToPayScript: BorrowerScript = {
   name: "promise-to-pay",
   run: async (ctx) => {
     const firstNameOf = (full: string) => full.trim().split(/\s+/)[0] ?? full;
-    // 1. opening (non-interruptible): wait for the right-party question, then a short pause for playout
     ctx.log("waiting for opening to finish...");
     let cursor = await ctx.waitAgentSaid(new RegExp(`speak with ${firstNameOf(ctx.borrowerName)}`, "i"), 0, 60_000);
     await ctx.sleep(1500);
-    // 2. right-party confirmation
     await ctx.speak("yes this is the borrower", ctx.lines.yes);
-    // 3. wait for the reply to *start*, then barge in ~2s into it.
-    //    The wait must be generous: against LiveKit Cloud the STT -> turn -> TTS round trip has been
-    //    seen to take 25s+, and barging in before the agent speaks is not a barge-in — the line lands
-    //    in silence, the agent then talks over it, and the turn is lost.
+    // The wait must be generous: the STT -> turn -> TTS round trip has been seen to take 25 s, and
+    // barging in before the agent speaks is not a barge-in — the line lands in silence and is lost.
     ctx.log("waiting for agent reply to start...");
     if (await ctx.waitAgentSpeaking(SPEECH_START_WAIT_MS)) {
       await ctx.sleep(2000);
@@ -372,17 +214,14 @@ export const promiseToPayScript: BorrowerScript = {
       ctx.log("agent did not start speaking; speaking anyway");
       await ctx.speak("I can pay 550 on Friday", ctx.lines.pay);
     }
-    // 4. wait for the read-back ("Please say yes to confirm"), then confirm. If the agent asks a
-    //    clarifying question about the amount instead of proposing, answer it once and keep
-    //    waiting — a real borrower would, and the deaf alternative is two NO_INPUT timeouts and a
-    //    NO_ANSWER close.
+    // Answer an amount clarification once and keep waiting; the deaf alternative is a NO_ANSWER close.
     ctx.log("waiting for read-back...");
     {
       const readback = /say yes to confirm/i;
       const askedAmount = /amount|how much/i;
       const start = Date.now();
-      // Anchor past everything already said: the broad amount-pattern must only ever see segments
-      // that came after the barge-in, not the earlier account statement.
+      // Anchor past everything already said: the broad amount-pattern must only see segments from
+      // after the barge-in, not the earlier account statement.
       let from = Math.max(cursor, ctx.agentSaid.length);
       let clarified = false;
       let rb = -1;
@@ -405,25 +244,17 @@ export const promiseToPayScript: BorrowerScript = {
     }
     await ctx.sleep(2500); // the transcript stream closes before audio playout finishes
     await ctx.speak("yes, that's correct", ctx.lines.confirm);
-    // 5. wait for hangup
     ctx.log("waiting for agent to hang up...");
     ctx.log((await ctx.waitForHangup(40_000)) ? "agent hung up" : "agent did not hang up within 40s");
   },
 };
 
-/**
- * The borrower who stops mid-call and never says goodbye — what a killed worker leaves behind.
- *
- * The second implementation, and the reason this is a seam rather than a hypothetical one: the chaos
- * probe used to reach this behaviour through an `abandonAfterFirstReply` callback threaded into the
- * middle of the one script, which is the shape H9 exists to remove.
- */
 export const abandonAfterFirstReplyScript = (onAbandon: () => void): BorrowerScript => ({
   name: "abandon-after-first-reply",
   run: async (ctx) => {
     ctx.log("waiting for agent reply to start...");
     if (!(await ctx.waitAgentSpeaking(SPEECH_START_WAIT_MS))) ctx.log("agent never replied; abandoning anyway");
-    // No more lines, no hangup, nothing that would let the control plane learn the call is over.
+    // No more lines, no hangup: nothing that lets the control plane learn the call is over.
     onAbandon();
   },
 });
@@ -431,13 +262,9 @@ export const abandonAfterFirstReplyScript = (onAbandon: () => void): BorrowerScr
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const firstName = (full: string) => full.trim().split(/\s+/)[0] ?? full;
 
-/** Bootstrap the room through the real control plane, or (TRACER_RAW=1) with a raw agent dispatch. */
 /**
- * Join the room the agent will be dispatched to, and hand back what a call needs to run in it (H9).
- *
- * Exported because a tier-3 scenario that is not a `runScriptedCall` — a third party dialling in, a
- * borrower that only listens — still has to get into the room the same way, and copying twelve lines
- * of token minting is how two harnesses come to disagree about how a call starts.
+ * Exported because a tier-3 scenario that is not a `runScriptedCall` still has to enter the room
+ * the same way. `TRACER_RAW=1` uses a raw agent dispatch instead of the control plane.
  */
 export const bootstrapRoom = async (opts: ScriptedCallOptions): Promise<{ roomName: string; token: string; conversationId: string | null }> => {
   const url = process.env["LIVEKIT_URL"] ?? "";
@@ -454,10 +281,8 @@ export const bootstrapRoom = async (opts: ScriptedCallOptions): Promise<{ roomNa
     return { roomName, token: await at.toJwt(), conversationId: null };
   }
 
-  // Through `harnessHeaders`, like every other request this harness makes (H5). A bare `fetch` here
-  // is exempt from nothing: it is the one call in the run that the server's own per-IP budget can
-  // shed, and a run that cannot read the borrower directory fails in a way that looks like a missing
-  // fixture rather than a 429.
+  // Through `harnessHeaders`: this is the one call the server's per-IP budget can shed, and a 429
+  // here looks like a missing fixture.
   const dir = (await (await fetch(`${opts.controlPlaneUrl}/api/borrowers`, { headers: harnessHeaders() })).json()) as Array<{ borrower_id: string; name: string; contact_points: Array<{ contact_point_id: string }> }>;
   const b = dir.find((x) => x.name === opts.borrowerName);
   if (!b) throw new Error(`borrower ${opts.borrowerName} not found in ${opts.controlPlaneUrl}/api/borrowers`);
@@ -490,62 +315,33 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
   const room = new Room();
   const turnLatencies: Array<TurnLatency> = [];
   const werLines: Array<WerLine> = [];
-  /**
-   * Every frame's energy for the whole call (H1), so `speechWindows()` can run on it post hoc and
-   * the turn-taking metrics have something to be computed from.
-   */
   const rmsSamples: Array<RmsSample> = [];
-  /** What the borrower said and when, for the turn-taking metrics (issue #1, D4). */
   const borrowerEvents: Array<BorrowerEvent> = [];
   /**
-   * Every fourth sample, not every sample (W8). Frames are ~10 ms and the onset detector needs that
-   * 10 ms of resolution — it does not need the RMS of a 10 ms frame over all ~480 of its samples at
-   * 48 kHz. A quarter of them puts the same decision either side of a threshold that sits between 25
-   * and 250, and takes three quarters of this loop off the box the worker is being measured on.
+   * Every fourth sample: the onset detector needs 10 ms of resolution, not the RMS of a 10 ms frame
+   * over all ~480 of its samples at 48 kHz. A quarter of them puts the same decision either side of
+   * a threshold that sits between 25 and 250, and takes three quarters of this loop off the box.
    */
   const SAMPLE_STRIDE = 4;
-  /** The live onset index, reconciled against the post-hoc one when the call ends (H1). */
   let liveStretches = 0;
-  /**
-   * When each agent stretch began, on the audio clock (H1).
-   *
-   * The seam a scenario needs to interrupt *into* a line rather than after it. The transcript is a
-   * lagging indicator — a segment arrives when it closes, i.e. once the agent has finished saying
-   * it — so a scenario that waits for the read-back's text and then speaks is speaking **after** the
-   * read-back, which is a different act entirely. Onsets are the only thing that says "the agent is
-   * talking *now*".
-   */
+  /** On the audio clock. Onsets are the only thing that says the agent is talking now. */
   const stretchStarts: number[] = [];
-  /** Wall-clock instant the agent last stopped speaking; the other half of the onset seam (H1). */
   let lastStretchEndMs = 0;
-  /** True while a stretch is open, so "quiet" is never claimed mid-sentence. */
   let agentSpeakingNow = false;
   const unmatchedTranscripts: string[] = [];
   /**
-   * The line currently being spoken (or most recently spoken), collecting every borrower-final
-   * transcript that belongs to it.
-   *
    * A list, not a single transcript, because the STT splits one utterance across several finals:
-   * measured live, "Actually, wait. I can pay 550 dollars on Friday." came back as "Actually,
-   * wait." followed by "I can pay $550 on Friday.". Taking only the first final scored the missing
-   * half as two deleted words and reported 0.222 for a transcription that was in fact perfect.
+   * measured, "Actually, wait. I can pay 550 dollars on Friday." came back as two, and taking only
+   * the first scored the missing half as deletions. Opened before the audio is played, since the
+   * first final can arrive while the borrower is still speaking.
    *
-   * Opened *before* the audio is played, since the first final can arrive while the borrower is
-   * still speaking, and closed when the next line opens.
-   */
-  /**
-   * `closedAt` is null until the line has finished being spoken. Null rather than 0, because a 0
-   * would sort before every ledger turn and silently join the wrong one; a null is a measurement
-   * that cannot be joined, which is a thing the score builder already handles honestly.
+   * `closedAt` is null rather than 0 until the line is finished: a 0 would sort before every ledger
+   * turn and silently join the wrong one.
    */
   let currentLine: { turn: string; reference: string; parts: string[]; closedAt: number | null } | null = null;
   const unansweredTurns: Array<string> = [];
-  /** Set when the borrower falls silent; cleared by the first delta of the next agent segment. */
   const awaiting: { reply: { turn: string; at: number; audioAt: number | null } | null } = { reply: null };
-  /**
-   * Give up on the pending turn. Recorded rather than dropped: a silently shorter `turnLatencies`
-   * would flatter the mean, which is exactly the optimistic summary this harness must not produce.
-   */
+  /** Recorded rather than dropped: a silently shorter `turnLatencies` would flatter the mean. */
   const abandonPendingReply = (why: string) => {
     const p = awaiting.reply;
     if (!p) return;
@@ -561,24 +357,14 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
     log(`room=${roomName} conversation=${conversationId ?? "(raw)"}`);
 
     /**
-     * Whose audio is the agent's (issue #4, H2).
-     *
-     * The handler filtered on `kind` alone and called whatever it got "agent audio". With one agent
-     * and one borrower in the room that is true by accident; with the third-party-pickup scenario
-     * D4 adds, a second voice on the line would have its energy booked as agent speech — so the
-     * agent would appear to talk over the borrower, and `turn.agent_interrupt_rate` would be
-     * measuring a person the agent never spoke over.
-     *
-     * The same identity rule the transcript handler already uses, in one place now so the two
-     * cannot disagree about who is speaking.
+     * The same identity rule the transcript handler uses, in one place: filtering on `kind` alone
+     * books a third party's energy as agent speech.
      */
     const isAgent = (identity: string): boolean => identity.startsWith("agent");
 
     room.on(RoomEvent.TrackSubscribed, (track, _pub, participant) => {
       if (track.kind !== TrackKind.KIND_AUDIO) return;
       if (!isAgent(participant.identity)) {
-        // Not a failure: a third party on the line is a scenario, not a fault. It is logged so a run
-        // that hears one is not silently reinterpreted afterwards.
         log(`ignoring audio from non-agent participant ${participant.identity} (not the agent's speech)`);
         return;
       }
@@ -586,25 +372,13 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       const stream = new AudioStream(track);
       void (async () => {
         /**
-         * Every frame's energy is kept, and the onset is a consumer of that (issue #4, H1).
+         * RMS is computed for every frame of agent audio, not only while a reply is pending: the
+         * turn-taking metrics are about stretches, and `speechWindows()` needs samples for all of them.
          *
-         * The loop used to compute RMS **only while a reply was pending** and stop at the first loud
-         * frame: `if (pending && pending.audioAt === null)`. That is exactly enough for one number —
-         * response latency — and it throws away the sample tier 3 needs for six. D4's metrics are
-         * about *stretches* of agent audio with a beginning and an end, and `speechWindows()` in
-         * `domain` already turns samples into stretches; it had nothing to run on because the
-         * harness never kept any.
-         *
-         * So RMS is computed for every frame of agent audio, the samples are kept for the whole
-         * call and returned on the result, and `pending.audioAt` is now set by the same loop rather
-         * than being the reason it runs.
-         *
-         * **Timed from a sample counter, not `Date.now()` per chunk.** Frames arrive in bursts
-         * through an async iterator, so wall-clock at delivery is jittered by the event loop — and
-         * the stretch boundaries this feeds are compared against the ledger at 100 ms resolution.
-         * The audio's own clock does not jitter: every frame is `samplesPerChannel / sampleRate`
-         * seconds of speech, whenever it happens to arrive. `t0Audio` anchors that count to the wall
-         * clock once, so a stretch can still be joined to a playout report.
+         * Timed from a sample counter, not `Date.now()` per chunk. Frames arrive in bursts through
+         * an async iterator, so wall-clock at delivery is jittered by the event loop, while every
+         * frame is `samplesPerChannel / sampleRate` seconds of speech whenever it arrives. `t0Audio`
+         * anchors that count to the wall clock once, so a stretch can still be joined to a playout.
          */
         let audioMs = 0;
         let t0Audio: number | null = null;
@@ -627,14 +401,10 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
           audioMs += (frame.samplesPerChannel / frame.sampleRate) * 1000;
 
           /**
-           * The hangover state machine, inline and live (H1).
-           *
            * The same rule `speechWindows()` applies post hoc, at the same threshold and the same
-           * 700 ms hangover — a pause inside a line is a few hundred milliseconds and the gap
-           * between two turns is the whole latency waterfall, so 700 separates them with an order of
-           * magnitude either side. Live because a scenario has to *react* to an onset (interrupt at
-           * offset t into the agent's k-th line), and post hoc because the run must be able to check
-           * that what it reacted to is what the samples say.
+           * 700 ms hangover — a pause inside a line is a few hundred milliseconds and the gap between
+           * two turns is the whole latency waterfall. Live because a scenario has to react to an
+           * onset, and post hoc so the run can check that what it reacted to is what the samples say.
            */
           if (rms > SPEECH_RMS) {
             if (!inStretch) {
@@ -652,8 +422,7 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
             opts.onStretchEnd?.(liveStretches, lastLoudMs);
           }
 
-          // The onset the response-latency number is anchored to: the first energetic frame after
-          // the borrower fell silent. A consumer of the loop now, not its purpose.
+          // The first energetic frame after the borrower fell silent.
           const pending = awaiting.reply;
           if (pending && pending.audioAt === null && rms > SPEECH_RMS) pending.audioAt = Date.now();
         }
@@ -664,22 +433,19 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       void (async () => {
         const attrs = reader.info.attributes ?? {};
         const fromAgent = isAgent(participantInfo.identity);
-        // Only the borrower this harness is playing feeds the word-error gate (H2). A third party's
-        // words are not a transcription of the script, and scoring them against the borrower's
-        // reference line would report a WER failure for a scenario behaving exactly as designed.
+        // Only this borrower feeds the word-error gate: a third party's words are not the script.
         const fromThisBorrower = participantInfo.identity === opts.participantIdentity;
         if (!fromAgent && !fromThisBorrower) {
           log(`ignoring transcript from ${participantInfo.identity}: neither the agent nor this borrower`);
           return;
         }
         let text = "";
-        // Agent segments are delta streams: chunks arrive as the agent speaks; the stream closes at segment end.
         for await (const chunk of reader) {
           text += chunk;
           if (fromAgent) {
             agentSpeakingAt = Date.now();
-            // Only a segment that *opened* after the borrower fell silent is a reply to it; a segment
-            // already in flight during a barge-in is the line being interrupted, not an answer.
+            // Only a segment that opened after the borrower fell silent is a reply to it; one already
+            // in flight during a barge-in is the line being interrupted.
             const pending = awaiting.reply;
             if (pending && openedAt >= pending.at) {
               const ms = Date.now() - pending.at;
@@ -698,9 +464,7 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
           if (currentLine) {
             currentLine.parts.push(text);
           } else {
-            // No line open at all: only possible before the first line is spoken. Counted and
-            // printed rather than dropped, because an unnoticed mis-pairing would move WER without
-            // moving anything that looks wrong.
+            // Counted rather than dropped: an unnoticed mis-pairing moves WER without looking wrong.
             unmatchedTranscripts.push(text);
             log(`stt wer: unmatched borrower transcript (no line open): ${JSON.stringify(text.slice(0, 60))}`);
           }
@@ -726,7 +490,6 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
     await room.localParticipant!.publishTrack(track, publishOpts);
     log("mic published");
 
-    /** Score the line that just finished; its transcripts are complete once the next line starts. */
     const closeCurrentLine = () => {
       if (!currentLine) return;
       const { turn, reference, parts, closedAt } = currentLine;
@@ -739,12 +502,9 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
     };
 
     /**
-   * The persona's degradation chain, or a pass-through when there is none (D4).
-   *
-   * Order is physical: the room's noise reaches the microphone first, the codec quantises what the
-   * microphone captured, and the network loses whole frames of the encoded stream last. Doing it in
-   * any other order would model a system that does not exist.
-   */
+     * Order is physical: the room's noise reaches the microphone first, the codec quantises what
+     * the microphone captured, and the network loses whole frames of the encoded stream last.
+     */
   const degradeFrames = (frames: ReadonlyArray<AudioFrame>): ReadonlyArray<AudioFrame | null> => {
     const profile = opts.degradation;
     if (profile === undefined || profile === null) return [...frames];
@@ -761,40 +521,26 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
   const speak = async (label: string, line: ScriptedLine) => {
       const startedAt = Date.now();
       closeCurrentLine();
-      // Opened before playout: the STT can emit a final for the first phrase while the rest is
-      // still being spoken, and that phrase is part of this line, not a stray.
+      // Opened before playout: the STT can emit a final for the first phrase while the rest is still
+      // being spoken, and that phrase is part of this line, not a stray.
       currentLine = { turn: label, reference: line.text, parts: [], closedAt: null };
       log(`speaking: ${label}`);
       /**
-       * The borrower arrives through a phone, not a studio microphone (issue #1, D4 — Phase 4).
-       *
-       * Applied here, at the last moment before the frames are published, so everything upstream —
-       * the line cache, the WAV parsing, the persona's voice — is unchanged and the degradation is
-       * the only difference between a clean run and a degraded one. `null` frames are simply not
-       * sent: a lost frame is absent audio, not silence, and sending silence would be a different
-       * degradation with a different effect on the endpointer.
+       * Applied at the last moment before publishing, so everything upstream is unchanged and the
+       * degradation is the only difference between a clean run and a degraded one. `null` frames are
+       * not sent: a lost frame is absent audio, and sending silence would affect the endpointer.
        */
       for (const f of degradeFrames(line.frames)) {
         if (f !== null) await source.captureFrame(f);
       }
       await source.waitForPlayout();
       log(`finished: ${label}`);
-      // The line is over; both measurements about it are anchored to this instant.
       const spokenAt = Date.now();
-      /**
-       * What the borrower did, for the turn-taking metrics (issue #1, D4).
-       *
-       * `kind` is `line` for everything the promise-to-pay script speaks: each one is a bid for the
-       * turn. Tier 3's scenarios are what introduce backchannels and non-directed noise, and they
-       * label their own — which is why this is recorded here, where the script's intent is known,
-       * rather than inferred from audio afterwards.
-       */
       borrowerEvents.push({ kind: "line", label, startMs: startedAt, endMs: spokenAt });
       currentLine.closedAt = spokenAt;
       abandonPendingReply("before the next line"); // the script waited, timed out, and moved on
       awaiting.reply = { turn: label, at: spokenAt, audioAt: null };
     };
-    /** Wait until the agent has produced a final segment matching `pattern` (after index `from`). */
     const waitAgentSaid = async (pattern: RegExp, from: number, timeoutMs: number): Promise<number> => {
       const start = Date.now();
       while (Date.now() - start < timeoutMs) {
@@ -814,19 +560,6 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       return false;
     };
 
-    /**
-     * What a borrower script is given (issue #4, H9).
-     *
-     * The call was one ~350-line function with the script inlined — hard-coded regexes, hard-coded
-     * sleeps, and the promise-to-pay conversation interleaved with the room, the tracks, the RMS
-     * detector and the WER bookkeeping. D4 needs five scenarios out of that, and the spec calls the
-     * shape it would otherwise take a fork risk.
-     *
-     * So this is the seam, and everything above it stays where it is: the context is **deep** —
-     * behind five methods sit the LiveKit room, the audio source, the onset detector, the transcript
-     * join, the per-line WER and the response-latency bookkeeping — and a script never sees any of
-     * it. A scenario says "speak this, wait for that", which is what a scenario is.
-     */
     const ctx: CallContext = {
       lines: opts.lines,
       borrowerName: opts.borrowerName,
@@ -839,13 +572,7 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
       get agentGone() {
         return agentGone;
       },
-      /**
-       * Wait for the agent's next stretch of speech to **begin** (H1).
-       *
-       * Returns the onset instant, or null on timeout. This is what lets a scenario say "400 ms into
-       * the agent's next line" — the thing the transcript cannot answer, because by the time a
-       * segment arrives the line is over.
-       */
+      /** Returns the onset instant, or null on timeout — what the transcript cannot answer. */
       waitNextStretchStart: async (timeoutMs: number) => {
         const from = stretchStarts.length;
         const started = Date.now();
@@ -858,13 +585,9 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
         return null;
       },
       /**
-       * Wait until the agent has been quiet for `quietMs`, or give up (H1's other half).
-       *
-       * D1 gives the agent lines the borrower may not talk over — the promise read-back — and words
-       * spoken into one are dropped at the worker rather than deferred. A scenario that means to be
-       * heard therefore has to wait for silence, and the transcript cannot tell it when: a segment
-       * arrives when it closes, which is the same lagging indicator that made the first
-       * `yes-during-read-back` scenario measure the wrong act.
+       * Words spoken into a non-interruptible line are dropped at the worker rather than deferred,
+       * so a scenario that means to be heard has to wait for silence — and the transcript cannot
+       * tell it when, because a segment arrives only once it has closed.
        */
       waitAgentQuiet: async (quietMs: number, timeoutMs: number) => {
         const started = Date.now();
@@ -885,7 +608,6 @@ export const runScriptedCall = async (opts: ScriptedCallOptions): Promise<Script
     await (opts.script ?? promiseToPayScript).run(ctx);
 
     abandonPendingReply("before the call ended");
-    // The last line's transcripts have had the whole hangup wait to arrive.
     closeCurrentLine();
 
     return {

@@ -1,13 +1,3 @@
-/**
- * The JUDGE outbox job (spec 2026-08-26, D3), on the real seams: a call driven through the real
- * orchestrator, judged by the recording LLM client, and asserted on what reached the ledger.
- *
- * The verdict's *shape* is proved pure in `packages/domain/test/judge.test.ts`. What is worth
- * asserting here is everything the pure tests cannot see: that the request carries the parameters a
- * reasoning model needs and none it rejects, that an unusable verdict is recorded as a broken judge
- * rather than as silence, that the judge is not a second path for account data to escape, and that
- * switching it off leaves no trail of jobs behind.
- */
 import { DateTime, Effect, Layer } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -43,12 +33,8 @@ const VERDICT: JudgeVerdict = {
 };
 
 /**
- * The judge's replies, consumed in order. A queue rather than an index so each test can set up its
- * own replies without knowing how many calls the tests before it made; running dry is how a judge
- * that cannot be reached at all is expressed.
- *
- * The stream side is never used: the conversation itself runs on the scripted decider, so every
- * recorded completion is the judge's.
+ * A queue rather than an index, so a test can set up its replies without knowing how many calls the
+ * tests before it made. Running dry is how "the judge cannot be reached at all" is expressed.
  */
 const judgeReplies: Array<string> = [];
 const rec = RecordingLlmClient(
@@ -74,7 +60,6 @@ const judgeOn = Layer.mergeAll(
 const rt = makeRuntime(judgeOn);
 
 let phone = 7000;
-/** Drive one call to a promise to pay, through the real three-phase turn. */
 const promiseCall = (name: string) =>
   Effect.gen(function* () {
     const sql = yield* PgClient.PgClient;
@@ -90,8 +75,8 @@ const promiseCall = (name: string) =>
     const orch = yield* Orchestrator;
     yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t1", userText: "yes this is speaking" }, () => Effect.void);
     yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t2", userText: "I can pay 550 on Friday" }, () => Effect.void);
-    // The worker reports the read-back it played; without it the fully-heard guard (C1) refuses
-    // to record the promise on a voice call, and this fixture is a call that reaches one.
+    // Without a reported read-back the fully-heard guard refuses to record the promise this
+    // fixture needs.
     const playout = yield* playoutOfAgentTurn(started.conversationId, "t2");
     yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t3", userText: "yes", playout }, () => Effect.void);
     return started.conversationId;
@@ -131,10 +116,8 @@ describe("JUDGE outbox job", () => {
     const compliance = judge.find((r) => r.name === "judge.compliance")!;
     expect(compliance.value).toBe(0);
     expect(compliance.comment).toBe("the disclosure was not the first thing said");
-    // The quote is what makes a verdict checkable in seconds without relistening to the call.
     expect(compliance.evidence).toEqual({ quote: "\"Hi, is Jordan there?\"" });
     expect(judge.find((r) => r.name === "judge.overall_pass")!.value).toBe(0);
-    // Scores are not events: the judge never takes a sequence number.
     expect(judge.every((r) => r.turnId === null)).toBe(true);
 
     expect(out.job.status).toBe("DONE");
@@ -144,38 +127,30 @@ describe("JUDGE outbox job", () => {
   });
 
   it("asks the model the way a reasoning model must be asked", async () => {
-    // Verified against OpenAI's current docs (2026-08-27): `gpt-5.6-luna` is the efficient tier of
-    // the GPT-5.6 family and the bare `gpt-5.6` alias routes to Sol, the frontier tier. Reasoning
-    // models reject sampling parameters, so the completion request has no temperature to omit.
+    // Reasoning models reject sampling parameters, so the completion request has no temperature.
     const request = rec.completions.at(-1)!.request;
     expect(request.model).toBe("gpt-5.6-luna");
     expect(request.reasoningEffort).toBe("medium");
     expect(Object.keys(request)).not.toContain("temperature");
-    // Strict structured output: every property required, no extras, at every level.
     expect(request.jsonSchema?.schema["additionalProperties"]).toBe(false);
     expect(request.jsonSchema?.name).toBe("call_verdict");
-    // Reasoning tokens are billed against the same budget as the answer, so it is generous.
+    // Reasoning tokens are billed against the same budget as the answer, so the budget is generous.
     expect(request.maxTokens).toBeGreaterThanOrEqual(2000);
   });
 
   it("shows the judge the call and nothing else about the account", async () => {
-    // D3: "Not the raw prompt, not account context beyond the transcript." The judge must not
-    // become a second path by which protected data leaves the system.
     const body = JSON.stringify(rec.completions.at(-1)!.request);
     expect(body).not.toContain("DELINQUENT");
     expect(body).not.toContain("2026-08-01");
     expect(body).not.toContain("10000.00");
-    // Nor the decider's prompt scaffolding, which would carry the account block with it.
     expect(body).not.toContain("CURRENT STATE:");
     expect(body).not.toContain("ACCOUNT:");
-    // It does get the call: the transcript, the states, the outcome.
     expect(body).toContain("attempt to collect a debt");
     expect(body).toContain("PROMISE_TO_PAY");
   });
 
   it("records a broken judge as a broken judge, not as a call nobody looked at", async () => {
-    // Two unusable replies: the model gets one retry, as D3 says. Silence here would show on the
-    // Quality page as a call awaiting review, which is a much more reassuring claim than the truth.
+    // Two unusable replies, because the model gets one retry.
     judgeReplies.push("I think the call went quite well overall.", "{\"task_completion\": {\"pass\": true}}");
     const out = await rt.runPromise(
       withFrozenClock(NOW)(
@@ -191,15 +166,13 @@ describe("JUDGE outbox job", () => {
     const judge = out.rows.filter((r) => r.source === "JUDGE");
     expect(judge.map((r) => r.name)).toEqual(["judge.invalid_output"]);
     expect(judge[0]!.value).toBe(1);
-    // The job itself succeeded: the judge answered, the answer was unusable. Failing the job would
-    // spend the retry budget meant for the judge being unreachable, which is a different problem.
+    // The job succeeded: failing it would spend the retry budget meant for an unreachable judge.
     expect(out.job.status).toBe("DONE");
     expect(out.job.result["invalid_output"]).toBe(true);
     expect(out.job.result["attempts"]).toBe(2);
   });
 
   it("retries the job, rather than recording a verdict, when the judge cannot be reached", async () => {
-    // A transport failure is not an opinion. It must leave no score at all and come back later.
     expect(judgeReplies).toEqual([]);
     const out = await rt.runPromise(
       withFrozenClock(NOW)(
@@ -213,7 +186,6 @@ describe("JUDGE outbox job", () => {
     );
     expect(out.judged.status).toBe("PENDING");
     expect(out.rows.filter((r) => r.source === "JUDGE")).toEqual([]);
-    // The deterministic jobs are unaffected: a judge outage does not stop the compliance checks.
     expect(out.rows.some((r) => r.source === "EVALUATOR")).toBe(true);
   });
 });
@@ -236,8 +208,6 @@ describe("JUDGE_ENABLED=false", () => {
   });
 
   it("enqueues no judge job at all, rather than one that is skipped forever", async () => {
-    // A job enqueued and then skipped is indistinguishable on the console from a stuck worker, and
-    // every CI run and load run would leave a trail of them.
     const jobs = await offRt.runPromise(
       withFrozenClock(NOW)(
         Effect.gen(function* () {

@@ -1,9 +1,3 @@
-/**
- * The tier-3 scenario table and the shape each scenario asserts (issue #1, D4).
- *
- * The table is the reviewable half: a scenario's expectation has to be readable before the machinery
- * that exercises it exists, or the machinery decides what the test means.
- */
 import { describe, expect, it } from "vitest";
 import { checkExpectedLedger, scenarioById, TIER3_SCENARIOS, verdictFor } from "../src/tracer/scenarios-tier3.js";
 
@@ -20,27 +14,17 @@ describe("the tier-3 scenario table", () => {
   });
 
   it("says what each scenario it cannot run yet is waiting for", () => {
-    // A scenario that cannot exercise what it asserts must not report a green it did not earn, so
-    // the runner refuses it — which it can only do if the table says so.
     const blocked = TIER3_SCENARIOS.filter((s) => s.needs.length > 0).map((s) => s.id);
     expect(blocked).toEqual(["third-party-pickup", "accent-noise-ablation"]);
     for (const id of blocked) expect(scenarioById(id)?.needs.join(" ")).toMatch(/Phase 4/);
   });
 
-  it("expects one read-back on yes-during-read-back, which is what D1 fixed", () => {
-    /**
-     * This assertion used to read `atLeast: 2`, and asserting the defect was the point: the "yes"
-     * committed a turn, the fully-heard guard refused it, and the read-back played again. D1 marks
-     * the read-back non-interruptible so `held` can park that turn, and the same seed now produces
-     * one. Flipping this expectation *is* Phase 2's verification, which is why it was written as a
-     * bound rather than as a relaxed "one or two".
-     */
+  it("expects exactly one read-back on yes-during-read-back, as a bound rather than a relaxed one-or-two", () => {
     expect(scenarioById("yes-during-read-back")?.expected.readBacks).toEqual({ atMost: 1 });
   });
 
   it("expects the third-party call to disclose nothing", () => {
     const never = scenarioById("third-party-pickup")?.expected.neverSaid ?? [];
-    // The FDCPA rule the state machine encodes, exercised rather than assumed.
     expect(never.some((p) => p.test("your balance of 550 dollars"))).toBe(true);
     expect(never.some((p) => p.test("Thank you, goodbye."))).toBe(false);
   });
@@ -60,8 +44,6 @@ describe("checkExpectedLedger", () => {
   });
 
   it("allows extra tools between the expected ones, in order", () => {
-    // A clarifying question is a legitimate extra turn (ADR 0008 D1); a scenario cares that its
-    // sequence happened, not that nothing else did.
     expect(
       checkExpectedLedger(happy, {
         finalOutcome: "PROMISE_TO_PAY",
@@ -92,7 +74,7 @@ describe("checkExpectedLedger", () => {
   });
 });
 
-describe("checkExpectedLedger — truncation (D4: backchannel mid-line expects no truncated agent line)", () => {
+describe("checkExpectedLedger — truncation", () => {
   const base = { finalOutcome: null, tools: [], agentLines: [], playouts: [] };
 
   it("fails when an agent line was cut off and the scenario said none should be", () => {
@@ -112,9 +94,7 @@ describe("checkExpectedLedger — truncation (D4: backchannel mid-line expects n
     expect(out).toEqual([]);
   });
 
-  it("fails on no playout evidence at all rather than passing vacuously (C1's lesson)", () => {
-    // Absence of evidence read as "nothing was truncated" is exactly the defect C1 fixed in the
-    // read-back guard; a harness must not reintroduce it one directory over.
+  it("fails on no playout evidence at all rather than passing vacuously", () => {
     const out = checkExpectedLedger({ finalOutcome: null, tools: [], noTruncatedAgentLine: true }, base);
     expect(out).toHaveLength(1);
     expect(out[0]).toContain("no playout evidence");
@@ -128,7 +108,6 @@ describe("checkExpectedLedger — truncation (D4: backchannel mid-line expects n
 describe("every scenario says what it is not yet checking", () => {
   it("declares notYetAsserted for the halves that need machinery, and nothing else", () => {
     for (const s of TIER3_SCENARIOS) {
-      // A runnable scenario with an unstated gap is the run-and-pass this tier exists to avoid.
       expect(Array.isArray(s.notYetAsserted ?? [])).toBe(true);
     }
     expect(scenarioById("backchannel-mid-line")?.notYetAsserted ?? []).not.toHaveLength(0);
@@ -147,19 +126,12 @@ describe("verdictFor — a known-red scenario is a tripwire, not a permanent fai
   });
 
   it("FAILS the run when a known-red scenario starts passing, because that is the signal", () => {
-    // The whole reason to encode it: the day D5 lands, this run must say so rather than stay quiet.
     const v = verdictFor([], red);
     expect(v.exitCode).toBe(1);
     expect(v.line).toContain("passes now");
   });
 
-  it("FAILS when the scenario failed for some other reason as well", () => {
-    /**
-     * The flaw this closes, found by running it. A broken worker produced `NO_ANSWER` with no tools
-     * at all, and the run reported **"failed as expected"** and exited 0 — because the mark excused
-     * every failure rather than the one it names. A known-red scenario that goes green on a broken
-     * box is worse than no scenario.
-     */
+  it("FAILS when the scenario failed for some other reason as well, since the mark excuses only the failure it names", () => {
     const v = verdictFor(["1 agent line(s) were cut off, expected none", "outcome NO_ANSWER != expected PROMISE_TO_PAY"], red);
     expect(v.exitCode).toBe(1);
     expect(v.line).toContain("not only in the expected way");
@@ -176,13 +148,10 @@ describe("verdictFor — a known-red scenario is a tripwire, not a permanent fai
   });
 });
 
-describe("checkExpectedLedger — dispositions (D4: the hold scenario expects a `wait`)", () => {
+describe("checkExpectedLedger — dispositions", () => {
   const base = { finalOutcome: null, tools: [], agentLines: [], playouts: [] };
 
   it("FAILS when the wait never happened, which is the whole point of asserting it", () => {
-    // Written because the first version of this check passed on `["respond","respond","respond"]`:
-    // the edit that added the expectation never landed, and a green run said the hold produced a
-    // wait when no turn had. A silence is also what a slow model looks like.
     const out = checkExpectedLedger({ finalOutcome: null, tools: [], dispositions: ["wait"] }, { ...base, dispositions: ["respond", "respond", "respond"] });
     expect(out).toHaveLength(1);
     expect(out[0]).toContain('no turn recorded disposition "wait"');

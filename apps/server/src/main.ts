@@ -1,11 +1,3 @@
-/**
- * Feather-Lite control-plane server (Node). One process:
- *   - HTTP API (Effect HttpApi) with OpenAPI docs at /docs
- *   - in-process schedulers: scheduled actions (callbacks/retries) and outbox jobs
- *   - root pointer page (the console is a separate static app, see apps/console)
- *
- * Config comes from the environment / .env at the repo root (see packages/control-plane/src/config.ts).
- */
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -42,34 +34,19 @@ loadEnv({ path: fileURLToPath(new URL("../../../.env", import.meta.url)) });
 const port = Number(process.env["PORT"] ?? 8080);
 const host = process.env["HOST"] ?? "0.0.0.0";
 
-/** Which conversationalist to run: TURN_DECIDER=openai (real model + Langfuse) or scripted (deterministic). */
 const DeciderLive = Layer.unwrapEffect(
   Effect.gen(function* () {
     const cfg = yield* AppConfig;
     if (cfg.turnDecider === "openai") {
       if (cfg.openaiApiKey === null) yield* Effect.logWarning("TURN_DECIDER=openai but OPENAI_API_KEY is missing; every turn will degrade to the safe fallback");
-      // `cfg.langfuse` alone was not the state: LANGFUSE_ENABLED=false with keys present reported
-      // "tracing: langfuse" while exporting nothing.
       yield* Effect.logInfo(`turn decider: openai (${cfg.llmModelByState.GREETING} / ${cfg.llmModelByState.DISCUSSING_PAYMENT}); tracing: ${cfg.langfuse && cfg.langfuseEnabled ? "langfuse" : "off"}`);
-      // Tracing is provided once, at the root: the decider records the generation and the
-      // orchestrator records the turn it belongs to, and they have to be the same instance for the
-      // two halves to meet.
-      // The client comes from the root rather than being provided here: the judge needs one too,
-      // and it must be the same one whichever decider is running.
       return OpenAITurnDeciderLive;
     }
-    /**
-     * The tracing state is said on *both* branches (D3). It used to be named only under
-     * `openai`, so a scripted run left "is Langfuse on?" unanswered in the log — and the answer
-     * matters most there: the scripted decider is what the tier-1 harness drives, and an exporter
-     * left on during a load run is both a cost and a latency the numbers would carry silently.
-     */
     yield* Effect.logInfo(`turn decider: scripted (deterministic); tracing: ${cfg.langfuse && cfg.langfuseEnabled ? "langfuse" : "off"}`);
     return ScriptedTurnDeciderLive;
   }),
 );
 
-/** Background loops: claim + process due scheduled actions and outbox jobs. */
 const SchedulersLive = Layer.scopedDiscard(
   Effect.gen(function* () {
     const cfg = yield* AppConfig;
@@ -78,26 +55,9 @@ const SchedulersLive = Layer.scopedDiscard(
     const sweeper = yield* Sweeper;
     const media = yield* MediaPlane;
     const process = yield* ProcessMetrics;
-    /**
-     * Each loop records that it ticked (D3). A loop whose fiber has died stops updating its stamp
-     * and `/readyz` fails — which is the point: a process with a dead outbox answers HTTP perfectly
-     * and is not ready, and nothing could tell the difference before.
-     *
-     * **Two orderings here were wrong and both made the instrument lie in the direction of "fine"**
-     * (review #3). `catchAll` used to precede the stamp, so a loop that errored on *every* tick
-     * kept stamping `last_tick_at` and `/readyz` stayed green for ever — an outbox with bad
-     * credentials was invisible. And the loop only entered the map on its first completed tick, so
-     * one that died before that never appeared at all and `/readyz` reported `loops: []` and ready.
-     *
-     * So: register before forking, stamp only on the success path, and count the failures on the
-     * error path. A loop that is alive and failing now reads as a fresh tick with a rising
-     * `consecutive_failures`, which is a different fact from a loop that has stopped.
-     *
-     * `run` takes the stamp rather than being a plain `Effect` because one loop needs to report
-     * progress *inside* a tick: an outbox drain is up to ten batches and can outlast its own
-     * staleness window (review #9). Handing the stamp down is what lets the interval and the loop's
-     * name stay written once, here, instead of being repeated at the call site.
-     */
+    // Register before forking, stamp only on the success path. Stamping under `catchAll` keeps
+    // `/readyz` green for a loop that fails every tick; registering on first success hides a loop
+    // that died before reaching one.
     const tick = <A, E, R>(name: string, run: (onProgress: Effect.Effect<void>) => Effect.Effect<A, E, R>, every: Duration.DurationInput) =>
       Effect.gen(function* () {
         const intervalMs = Duration.toMillis(Duration.decode(every));
@@ -112,32 +72,20 @@ const SchedulersLive = Layer.scopedDiscard(
           Effect.forkScoped,
         );
       });
-    /**
-     * Declared before any of them is registered, so `/readyz` can tell "no loops are late" from
-     * "the schedulers never started" (C11). This list and the three `tick` calls below are the same
-     * three names; a boot that throws between here and them is now an unready process rather than a
-     * cheerfully ready one with an empty loop list.
-     */
+    // Declared before any is registered, so `/readyz` can tell "no loops are late" from "the
+    // schedulers never started".
     yield* process.expectLoops(["scheduled-actions", "outbox", "sweeper"]);
     yield* tick("scheduled-actions", () => scheduling.runOnce(20), "15 seconds");
-    // `drain`, not `runOnce`: a full batch means there is more waiting, and a backlog should clear
-    // at the rate the work can be done rather than at the rate this loop polls (C2). The stamp is
-    // passed in so a long drain reports liveness per batch rather than only when it finishes —
-    // otherwise a *busy* outbox is what trips `/readyz` (review #9).
+    // The stamp is passed in so a long drain reports liveness per batch rather than only when it
+    // finishes; otherwise a busy outbox is what trips `/readyz`.
     yield* tick("outbox", (onBatch) => outbox.drain(20, onBatch), "5 seconds");
-    // Every 10 s, so worst-case detection is one heartbeat interval past the staleness window
-    // (~40 s) and typical is ~35 s — the number D6 set.
+    // Every 10 s puts worst-case orphan detection one heartbeat interval past the staleness window.
     yield* tick("sweeper", () => sweeper.runOnce(20), "10 seconds");
-    // Which media plane resolved matters: without LiveKit every sweep falls back to the long
-    // unconfirmed window, which is a very different detection time than the ~35 s headline.
     yield* Effect.logInfo(`schedulers started (sweeper ${cfg.sweeperEnabled ? `on, ${sweeper.stalenessMs} ms staleness, confirming via ${media.name}` : "off"})`);
-    // `PROFILE_SECONDS=30 pnpm start:server` writes a .cpuprofile of the first N seconds and keeps
-    // serving. See services/Profiler.ts for why `node --cpu-prof` cannot be used on this box.
     yield* profileIfAsked;
   }),
 );
 
-/** Root pointer page; serves the built console if present. */
 const consoleDist = fileURLToPath(new URL("../../console/dist", import.meta.url));
 const RootRoute = HttpApiBuilder.Router.use((router) =>
   router.get(
@@ -154,31 +102,15 @@ const NodeServerLive = NodeHttpServer.layer(() => createServer(), { port, host }
 const MainLive = Layer.mergeAll(HttpLive, RootRoute, SchedulersLive).pipe(
   Layer.provide(ServicesLive),
   Layer.provide(DeciderLive),
-  // Provided unconditionally, not only for TURN_DECIDER=openai: the post-call judge calls a model
-  // regardless of which conversationalist ran the call, and constructing the client is free — it
-  // fails at call time, with a clear message, when no key is configured.
+  // Provided unconditionally, not only for the openai decider: the post-call judge calls a model
+  // whichever conversationalist ran the call.
   Layer.provideMerge(OpenAILlmClientLive),
-  // Metrics is provided once, at the root, for the same reason Tracing is: the decider records
-  // provider failures, the HTTP edge counts requests and rejections, and the status handler reads
-  // both. Separate instances would each hold half the answer.
-  //
-  // (This comment used to say the orchestrator counted here as well. It never has — O14.)
   Layer.provideMerge(LiveKitMediaPlaneLive),
   Layer.provideMerge(LangfuseTracingLive),
-  // Below the tracing layer, not above it: `provideMerge` supplies downward, and the Langfuse
-  // exporter now counts its own ingestion failures (O7). Still merged upward, so the decider and
-  // the HTTP edge see the same single instance.
   Layer.provideMerge(Metrics.Default),
-  // The process's own gauges (D3). Its sources are functions rather than services because the
-  // things it reports on — the pool, the SSE map, the rate-limit buckets — are owned by modules
-  // that must not depend on a metrics service to be observable. The live-turn and SSE numbers now
-  // come through the `Gauges` registry rather than two module-level `let`s a second build would
-  // clobber (F5); the pool and the limiter still read their own module, which owns them outright.
   Layer.provideMerge(
     Layer.unwrapEffect(
       Effect.gen(function* () {
-        // The same registry `TurnRunner` registers into: `Gauges.Default` is one layer value, and
-        // Effect memoizes layers by reference within a build (measured under F1), so both see it.
         const gauges = yield* Gauges;
         return ProcessMetricsLive({
           pgPool: pgPoolGauge,

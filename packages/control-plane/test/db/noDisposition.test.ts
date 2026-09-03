@@ -1,15 +1,3 @@
-/**
- * A polite goodbye with nothing to record is not a system failure (C13).
- *
- * When the model closes the call without calling an outcome tool, `finalize` had nothing to record
- * and wrote `FAILED`. That conflated two different things — "this call had no outcome" and "this
- * system broke" — and `FAILED` is one of the three outcomes that schedule a `RETRY_CALL`, so a
- * borrower who was told goodbye politely got called again for it, while the funnel counted the call
- * among its failures.
- *
- * `NO_DISPOSITION` is a completed call with nothing to record, and it does not retry: nothing went
- * wrong that trying again would fix.
- */
 import { Effect, Layer, Stream } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -17,10 +5,7 @@ import { decision } from "@feather-lite/domain";
 import { ConversationRepo, IdGen, Orchestrator, Queries, StaticTurnDeciderLive, WorkflowService, FROZEN_NOW } from "../../src/index.js";
 import { makeInfraLayer, makeRuntime, truncateAll } from "./harness.js";
 
-/**
- * Two turns to reach `CONFIRMING_OUTCOME`, which is the only state a goodbye can legally close
- * from, and then the goodbye itself: a reply, no tool, `ENDING`.
- */
+// Two turns first: `CONFIRMING_OUTCOME` is the only state a goodbye can legally close from.
 const decider = StaticTurnDeciderLive((input) => {
   switch (input.turnId) {
     case "t1":
@@ -50,7 +35,7 @@ afterAll(async () => {
 });
 
 describe("a call the model closes without an outcome tool", () => {
-  it("is recorded as NO_DISPOSITION and schedules no re-dial", async () => {
+  it("is recorded as NO_DISPOSITION, schedules no re-dial, and counts the attempt COMPLETED", async () => {
     const out = await rt.runPromise(
       Effect.gen(function* () {
         const sql = yield* PgClient.PgClient;
@@ -65,7 +50,6 @@ describe("a call the model closes without an outcome tool", () => {
         const orch = yield* Orchestrator;
         yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t1", userText: "yes this is Jordan" }, () => Effect.void);
         yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t2", userText: "I can pay 550 on Friday" }, () => Effect.void);
-        // The goodbye: no tool, nothing recorded.
         yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t3", userText: "actually never mind, goodbye" }, () => Effect.void);
 
         const row = yield* (yield* ConversationRepo).findConversation(started.conversationId);
@@ -82,10 +66,7 @@ describe("a call the model closes without an outcome tool", () => {
     );
 
     expect(out.outcome).toBe("NO_DISPOSITION");
-    // The borrower is not called back for having been told goodbye.
     expect(out.retries).toHaveLength(0);
-    // And the attempt reads as a call that completed, not one that failed: `attemptStatusFor` maps
-    // only NO_ANSWER, VOICEMAIL_LEFT and FAILED to something other than COMPLETED.
     expect(out.attempts.map((a) => a.attemptStatus)).toEqual(["COMPLETED"]);
   });
 });

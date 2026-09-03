@@ -8,14 +8,13 @@ import {
   type EventRecord,
 } from "../src/index.js";
 
-/** Build a stored event, in the exact JSON shape the DB (and Python) produce. */
+/** The exact JSON shape the DB (and Python) produce, rather than the TypeScript type. */
 const rec = (sequence_no: number, type: string, payload: Record<string, unknown>): EventRecord => {
   const decoded = decodeEventRecord({ sequence_no, created_at: `2026-08-16T10:00:${String(sequence_no).padStart(2, "0")}Z`, type, payload });
   if (Either.isLeft(decoded)) throw new Error(`fixture invalid: ${type} ${JSON.stringify(payload)}`);
   return decoded.right;
 };
 
-/** A full happy-path promise-to-pay conversation, as the orchestrator would write it. */
 const happyPath: ReadonlyArray<EventRecord> = [
   rec(1, "CALL_STARTED", { workflow_execution_id: "w", call_attempt_id: "a", contact_point_id: "c", channel: "simulated", attempt_no: 1 }),
   rec(2, "STATE_TRANSITION", { from: null, to: "GREETING", triggered_by: "SYSTEM_START" }),
@@ -41,7 +40,7 @@ const happyPath: ReadonlyArray<EventRecord> = [
   rec(22, "OUTBOX_ENQUEUED", { job_types: ["SUMMARY", "EVALUATION", "VECTOR_INDEX"] }),
 ];
 
-describe("replay (SPEC §11.3)", () => {
+describe("replay", () => {
   it("recovers state, unlock, outcome, tools and the state path", () => {
     const snap = replay(happyPath);
     expect(snap.currentState).toBe("COMPLETED");
@@ -117,7 +116,7 @@ describe("event decoding is strict about type but tolerant of the Python wire sh
   });
 });
 
-describe("transcript and timeline (PRD §5.2.6)", () => {
+describe("transcript and timeline", () => {
   it("interleaves borrower and agent lines in sequence order", () => {
     const t = buildTranscript(happyPath);
     expect(t.map((e) => e.speaker)).toEqual(["AGENT", "BORROWER", "AGENT", "BORROWER", "AGENT", "BORROWER", "AGENT"]);
@@ -136,8 +135,6 @@ describe("transcript and timeline (PRD §5.2.6)", () => {
   });
 
   it("keeps superseded borrower lines by default, and drops them when the decider asks", () => {
-    // A barge-in: t1's USER_TURN_FINAL was already appended in T1, then t2 superseded it, so t1
-    // never gets an AGENT_TURN and its borrower line is left orphaned.
     const events = [
       rec(1, "AGENT_TURN", { text: "May I speak with Jordan?", state: "GREETING", turn_id: "opening" }),
       rec(2, "USER_TURN_FINAL", { text: "hold on", turn_id: "t1" }),
@@ -145,9 +142,7 @@ describe("transcript and timeline (PRD §5.2.6)", () => {
       rec(4, "USER_TURN_FINAL", { text: "yes this is Jordan", turn_id: "t2" }),
       rec(5, "AGENT_TURN", { text: "Thank you, Jordan.", state: "VERIFYING_IDENTITY", turn_id: "t2" }),
     ];
-    // The ledger view (console, outbox) keeps it: the borrower did say it.
     expect(buildTranscript(events).map((e) => e.text)).toEqual(["May I speak with Jordan?", "hold on", "yes this is Jordan", "Thank you, Jordan."]);
-    // The prompt-assembly view drops it, so the decider never sees two borrower lines in a row.
     const forPrompt = buildTranscript(events, { excludeSuperseded: true });
     expect(forPrompt.map((e) => e.text)).toEqual(["May I speak with Jordan?", "yes this is Jordan", "Thank you, Jordan."]);
     expect(forPrompt.map((e) => e.speaker)).toEqual(["AGENT", "BORROWER", "AGENT"]);

@@ -1,9 +1,3 @@
-/**
- * The fleet harness's command line (issue #4, H6).
- *
- * Both halves are about a run you cannot trust afterwards: a report that overwrote the previous one
- * without saying so, and a flag that was accepted and ignored.
- */
 import { describe, expect, it } from "vitest";
 import { normaliseLabel, parseFleetArgs, reportFileName } from "../src/tracer/fleet-args.js";
 
@@ -29,8 +23,6 @@ describe("parseFleetArgs", () => {
   });
 
   it("requires a label, because without one a second run overwrites the first", () => {
-    // This is not tidiness: a tracked report was lost to exactly this on 2026-09-02, and five more
-    // runs in one session each had to be copied aside by hand.
     const r = parseFleetArgs(["--calls", "5"]);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.message).toContain("--label is required");
@@ -43,8 +35,6 @@ describe("parseFleetArgs", () => {
   });
 
   it("refuses a flag it does not have, rather than accepting it in silence", () => {
-    // The defect: `--label` itself used to be accepted and ignored. A run invoked with a misspelled
-    // gate ran without that gate and said nothing about it.
     const r = parseFleetArgs(["--label", "x", "--allow-shedding"]);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.message).toContain("--allow-shedding is not a flag this harness has");
@@ -85,16 +75,14 @@ describe("reportFileName", () => {
   });
 });
 
-describe("--allow-shed (H4)", () => {
+describe("--allow-shed", () => {
   it("is off unless asked for, so a run past the ceiling refuses", () => {
-    // The capacity gate was a warning, and a warning is what the first N=10 attempt printed and was
-    // read past: nine calls served, the tenth `NEVER_SERVED`, and the run reported a WER breach.
     expect(ok(["--label", "x"]).allowShed).toBe(false);
     expect(ok(["--label", "x", "--allow-shed"]).allowShed).toBe(true);
   });
 });
 
-describe("--max-amount-errors (D3's entity gate)", () => {
+describe("--max-amount-errors", () => {
   it("defaults to zero, because a wrong amount is a wrong promise", () => {
     const r = parseFleetArgs(["--label", "x"]);
     expect(r.ok && r.args.maxAmountErrors).toBe(0);

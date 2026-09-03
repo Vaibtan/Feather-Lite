@@ -1,9 +1,9 @@
 import type { SqlClient } from "@effect/sql";
 
 /**
- * SQL twin of the domain's `silentPlayoutTurnIds`: a playout that was cut short with nothing heard,
- * excluding turns the borrower superseded before the agent replied (same shape, not a TTS failure).
- * Column references only; never interpolate user data here.
+ * SQL twin of the domain's `silentPlayoutTurnIds`: a playout cut short with nothing heard, excluding
+ * turns the borrower superseded before the agent replied (same shape, not a TTS failure). Column
+ * references only; never interpolate user data here.
  */
 export const silentPlayoutSql = (sql: SqlClient.SqlClient) => ({
   unheardPlayout: (events: string) =>

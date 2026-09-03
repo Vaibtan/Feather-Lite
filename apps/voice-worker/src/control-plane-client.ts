@@ -1,7 +1,3 @@
-/**
- * Minimal HTTP client for the control plane used by the voice worker: turn stream (SSE),
- * signals, no-input, heartbeat. Plain fetch (Node 22) — the SSE parser is the only real logic.
- */
 import type { TurnFrame } from "@feather-lite/contracts";
 import { decodeFrame } from "@feather-lite/contracts";
 
@@ -52,7 +48,6 @@ export class ControlPlaneClient {
     return h;
   }
 
-  /** Stream a turn. Yields decoded frames; throws on non-2xx before the stream starts. */
   async *turn(conversationId: string, body: TurnRequestBody, signal?: AbortSignal): AsyncGenerator<TurnFrame> {
     const res = await fetch(`${this.cfg.baseUrl}/api/conversations/${conversationId}/turn`, {
       method: "POST",
@@ -96,10 +91,8 @@ export class ControlPlaneClient {
   }
 
   /**
-   * Report vendor failures the runtime saw (spec 2026-08-26, D6). Deliberately not a conversation
-   * signal: a retried STT socket is not an event on the call, and it must not consume a
-   * `sequence_no` on a path that is already degraded. Fire-and-forget for the same reason the
-   * heartbeat is — telemetry must never be able to fail a call.
+   * Deliberately not a conversation signal: a retried STT socket must not consume a `sequence_no`
+   * on a path that is already degraded. Fire-and-forget, because telemetry must never fail a call.
    */
   async providerEvents(events: ReadonlyArray<ProviderEventBody>): Promise<void> {
     if (events.length === 0) return;
@@ -107,17 +100,15 @@ export class ControlPlaneClient {
   }
 
   /**
-   * Liveness. `conversations` is what this process is serving right now: the control plane records
-   * a last-seen time per conversation, and the orphaned-call sweeper finalizes anything nobody has
-   * claimed for three intervals (D6). A job process reports its own call; the main worker reports
-   * none, and the control plane only ever touches the ids it is given.
+   * `conversations` is what this process is serving right now: the sweeper finalizes anything
+   * nobody has claimed for three intervals, and the control plane only touches the ids it is given.
    */
   async heartbeat(agentName: string, meta: Record<string, unknown> | undefined, conversations: ReadonlyArray<string> = []): Promise<void> {
     await fetch(`${this.cfg.baseUrl}/api/agents/heartbeat`, {
       method: "POST",
       headers: this.headers(),
-      // Omitted rather than `{}`: the control plane merges what it is given onto the row, so a beat
-      // with no meta touches the timestamp without erasing what the main worker last reported.
+      // Omitted rather than `{}`: the control plane merges meta onto the row, so a beat with none
+      // must not erase what the main worker last reported.
       body: JSON.stringify({ agent_name: agentName, ...(meta === undefined ? {} : { meta }), conversations }),
     }).catch(() => undefined);
   }

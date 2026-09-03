@@ -1,7 +1,3 @@
-/**
- * Read side for the operator console and API (SPEC §12.3/§12.4): list, detail with
- * transcript + timeline + replay snapshot, borrowers for the demo picker, worker liveness.
- */
 import { DateTime, Duration, Effect, Option } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import type { LatencyAggregate, TurnLatencyRow } from "@feather-lite/contracts";
@@ -47,7 +43,6 @@ export interface ConversationDetail {
   readonly events: ReadonlyArray<EventRecord>;
 }
 
-/** The durable, all-time ledger view. Named at module scope so the service's type can refer to it. */
 export interface LedgerCountsValue {
   readonly conversations_total: number;
   readonly outcomes: Record<string, number>;
@@ -110,7 +105,6 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
         return detail;
       });
 
-    /** Borrowers with their primary contact point and whether a call is allowed right now (for the demo picker). */
     const borrowerDirectory = () =>
       Effect.gen(function* () {
         const now = yield* DateTime.now;
@@ -136,19 +130,6 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
 
     const heartbeats = () => sched.listHeartbeats().pipe(Effect.map((rows) => rows.map((r) => ({ agent_name: r.agentName, last_seen_at: r.lastSeenAt.toISOString(), meta: r.meta }))));
 
-    /** Durable counts for /api/system/status ("the state machine caught the model N times"). */
-    /**
-     * The durable, all-time ledger view, memoised for 5 seconds (O10/O11).
-     *
-     * Four aggregate scans of `conversation_events`, one of them with a correlated NOT EXISTS, run
-     * on every `/status` poll — and the console polls every 5 s, per open tab. Measured on a
-     * 13 982-conversation database this is what `/status` spends its ~0.29 s on; the O11 work on
-     * the turn window could not move that number at all until this was cached.
-     *
-     * All-time counts over an append-only ledger cannot meaningfully change inside five seconds,
-     * and the page labels them "all time" precisely because they are not a live reading.
-     */
-
     const ledgerCounts = () =>
       Effect.gen(function* () {
         const total = yield* conv.countConversations();
@@ -171,56 +152,23 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
         return value;
       });
 
-    /**
-     * The same counts for the status page, memoised for 5 seconds.
-     *
-     * The cache is here rather than inside `ledgerCounts` deliberately. That function is what the
-     * DB tests read as a source of truth immediately after writing events, and a five-second-stale
-     * answer broke four of them — correctly, because a stale read *is* wrong for that caller. It is
-     * right only for a dashboard that polls every five seconds, so only that caller opts in.
-     *
-     * `Effect.cachedWithTTL` rather than a hand-rolled timestamp cell, because a timestamp cell
-     * does not deduplicate *concurrent* callers: N console tabs polling a cold or expired entry
-     * would each run the full scan before any of them wrote the result, which is precisely the
-     * scenario this exists to prevent. `cachedWithTTL` holds a latch, so the second through Nth
-     * callers await the first instead of repeating its work.
-     */
+    // The cache lives on this caller, not inside `ledgerCounts`, because a stale read is wrong for
+    // anyone reading the ledger as a source of truth immediately after writing to it.
+    // `Effect.cachedWithTTL` rather than a timestamp cell: it latches, so concurrent pollers await
+    // the first scan instead of each running their own.
     const ledgerCountsForStatus = yield* Effect.cachedWithTTL(ledgerCounts(), Duration.seconds(5));
 
-    /**
-     * The per-turn latency waterfall across a set of conversations, read straight out of
-     * `conversation_turns.result` — `ttft_ms` written by the orchestrator, the three worker-side
-     * numbers merged in later by the `turn_metrics` signal.
-     *
-     * One query for the whole set, not one per conversation (O11). It used to be called in a loop:
-     * measured at ~1.4 ms per conversation and linear, so the status page's `MAX_WINDOW` of 1 000
-     * meant ~1.4 s of round trips — on an endpoint the console polls every 5 seconds. A console tab
-     * left open during a load run was itself a meaningful share of the load.
-     */
-    /**
-     * The turn-level half of the segment (F4).
-     *
-     * `latencyAggregateForSegment` selects *conversations* — channel, decider, harness. That cannot
-     * separate two turns of the same call, and D2's fast path makes them genuinely different
-     * populations: a regex answering in a microsecond and a model turn taking two seconds are both
-     * `voice`/`openai`, so mixing them moves the p95 the product's latency claim is made from
-     * without anything getting faster. It is O2's defect one level down.
-     *
-     * `null` (or an absent predicate) means "do not filter", so every existing window is unchanged.
-     * Reads `result->>'decider'`, which `TurnResult` already carries into `conversation_turns.result`
-     * — no migration.
-     */
+    // Conversation-level facets cannot separate two turns of one call, and the fast path makes them
+    // different populations: a regex answering in a microsecond and a model turn taking two seconds
+    // are both `voice`/`openai`.
     const turnRowsForMany = (
       conversationIds: ReadonlyArray<string>,
       turns?: { readonly decider?: string | null | undefined } | undefined,
     ): Effect.Effect<{ rows: TurnLatencyRow[]; dropped: number }, never, PgClient.PgClient> =>
       Effect.gen(function* () {
-        // `sql.in` of an empty set is not valid SQL, and an empty window is a normal thing to ask
-        // about — a fresh database, or a range with no calls in it.
         if (conversationIds.length === 0) return { rows: [], dropped: 0 };
         const sql = yield* PgClient.PgClient;
         const { unheardPlayout, notSuperseded } = silentPlayoutSql(sql);
-        // The client camel-cases result keys, so `turn_id` arrives as `turnId`.
         const rows = yield* sql<{
           turnId: string;
           startedAt: Date;
@@ -257,16 +205,10 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
           WHERE t.conversation_id IN ${sql.in(conversationIds)}
             AND (${turns?.decider ?? null}::text IS NULL OR t.result->>'decider' = ${turns?.decider ?? null}::text)
           ORDER BY t.conversation_id, t.started_at ASC`.pipe(Effect.orDie);
-        // `::float8` can still surface as a string depending on the driver's type parsing, so each
-        // component is coerced once here rather than trusted.
-        //
-        // Values outside a plausible range are dropped rather than plotted. Turns written before
-        // the TTFT clock fix carry a "latency" of several days — the old code subtracted a virtual
-        // (VirtualClock-shifted) start from a real `Date.now()` — and one of those in the sample
-        // makes every percentile meaningless. Five minutes is not a turn component either way.
+        // Turns written while a virtual start was being subtracted from a wall-clock now carry a
+        // "latency" of days, and one of those in the sample makes every percentile meaningless.
         const MAX_PLAUSIBLE_MS = 300_000;
         let dropped = 0;
-        /** A latency component: absent stays absent, anything impossible is dropped and counted. */
         const num = (v: unknown): number | null => {
           if (v === null || v === undefined) return null;
           const n = coerce(v);
@@ -274,9 +216,6 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
           dropped += 1;
           return null;
         };
-        // Counts and played durations are not latency components: they are not summed into
-        // `total_ms`, and a long read-back or a big character count is not an implausible *latency*
-        // to be reported as dropped data. Same coercion, no range guard, no drop count.
         const plain = (v: unknown): number | null => {
           const n = coerce(v);
           return n !== null && n >= 0 ? n : null;
@@ -302,8 +241,6 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
             total_ms: parts.length > 0 ? Math.round(parts.reduce((a, b) => a + b, 0)) : null,
             tts_audio_ms: audioMs,
             tts_chars: chars,
-            // One definition of the rate, in the domain, so the console's per-turn figure and the
-            // fleet's median cannot be computed two different ways.
             tts_chars_per_second: charsPerSecond({ turnId: r.turnId, audioMs, chars, silent: r.ttsSilent }),
             tts_silent: r.ttsSilent === true,
           };
@@ -311,17 +248,8 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
         return { rows: mapped, dropped };
       });
 
-    /** One conversation's waterfall, for the call detail page. */
     const turnLatencies = (conversationId: string) => turnRowsForMany([conversationId]).pipe(Effect.map((r) => r.rows as ReadonlyArray<TurnLatencyRow>));
 
-    /**
-     * The same components across an explicit set of conversations.
-     *
-     * Taking the ids rather than a count is what lets the Quality report measure the SLO over
-     * *its own* window: a `from`/`to` range and "the most recent N" are different sets of calls, and
-     * an SLO computed over a different window than the funnel beside it is a number that cannot be
-     * reconciled with anything on the page.
-     */
     const turnRowsFor = turnRowsForMany;
 
     const latencyAggregateFor = (
@@ -330,7 +258,6 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
     ): Effect.Effect<LatencyAggregate, never, PgClient.PgClient> =>
       turnRowsFor(conversationIds, turns).pipe(Effect.map(({ rows, dropped }) => aggregateTurnRows(conversationIds.length, rows, dropped)));
 
-    /** The same components across the most recent N conversations, as p50/p95. */
     const latencyAggregate = (calls: number): Effect.Effect<LatencyAggregate, never, PgClient.PgClient> =>
       Effect.gen(function* () {
         const sql = yield* PgClient.PgClient;
@@ -338,46 +265,19 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
         return yield* latencyAggregateFor(ids.map((r) => r.id));
       });
 
-    /**
-     * The same, over the most recent N conversations **in a segment** (O2).
-     *
-     * "The last 50 calls" and "the last 50 voice calls served by the real decider" are different
-     * windows, and an SLO computed over the first is diluted by whatever else ran recently — a
-     * tier-1 load run moved `ttft_ms` 3 228 -> 1 252 ms without anything getting faster. A null
-     * facet means "do not filter on this", so the unsegmented window is still expressible.
-     *
-     * `found` is returned alongside because "the window asked for 50 and found 3" is the fact that
-     * makes a green verdict readable.
-     */
     const latencyAggregateForSegment = (
       segment: {
         readonly channel: string | null;
         readonly decider: string | null;
         readonly harness?: string | null | undefined;
-        /**
-         * Which arm decided the turns to count (F4). Conversation-level facets cannot express this:
-         * a fast-path turn and a model turn of one call share every one of them.
-         */
         readonly turnDecider?: string | null | undefined;
       },
       calls: number,
     ): Effect.Effect<{ aggregate: LatencyAggregate; found: number }, never, PgClient.PgClient> =>
       Effect.gen(function* () {
         const sql = yield* PgClient.PgClient;
-        /**
-         * Harness calls are excluded unless one is asked for (issue #1, D4's segment rule).
-         *
-         * A tier-3 call is `channel: 'voice'` served by the real decider — exactly what the default
-         * segment selects — and its audio is deliberately harder than a real call's: degraded
-         * channel, seeded interruptions, accent personas. Left in, the simulator would move the
-         * number the product's latency claim is made from.
-         *
-         * Not hypothetical: a tier-1 load run put 36 scripted turns into the "last 50 calls" window
-         * and `ttft_ms` fell 3 228 -> 1 252 ms. Nothing got faster.
-         *
-         * `undefined` means the default — real callers only. An explicit `"sim"` asks for the
-         * simulator's own segment, which is how its numbers are read.
-         */
+        // `undefined` means the default, which excludes harness calls: their audio is deliberately
+        // harder than a real call's, so leaving them in moves the latency number for everyone.
         const wanted = segment.harness ?? null;
         const ids = yield* sql<{ id: string }>`
           SELECT id FROM conversations
@@ -425,17 +325,11 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
   dependencies: [ConversationRepo.Default, CrmRepo.Default, SchedulingRepo.Default],
 }) {}
 
-/** `::float8` can surface as a string depending on the driver's type parsing; coerce once. */
 const coerce = (v: unknown): number | null => {
   const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
   return Number.isFinite(n) ? n : null;
 };
 
-/**
- * Percentiles per waterfall component over a set of turn rows. Separated from the query so the
- * Quality report can read the window's rows once and derive both this and the TTS heuristics from
- * them, rather than asking the database for the same turns twice.
- */
 export const aggregateTurnRows = (conversations: number, all: ReadonlyArray<TurnLatencyRow>, dropped: number): LatencyAggregate => {
   const pct = (values: ReadonlyArray<number | null>) => {
     const xs = values.filter((v): v is number => v !== null);
@@ -445,9 +339,8 @@ export const aggregateTurnRows = (conversations: number, all: ReadonlyArray<Turn
     };
     return { n: xs.length, p50: at(50), p95: at(95) };
   };
-  // The total is taken only over turns that have all four components. A simulated turn records the
-  // decide TTFT alone, and letting those into the total would report a p50 of ~20ms for something
-  // that means "how long a reply takes end to end".
+  // The total is taken only over turns carrying all four components; a simulated turn records the
+  // decide TTFT alone, which would report a p50 of ~20 ms for an end-to-end reply time.
   const complete = all.filter((t) => t.eou_delay_ms !== null && t.transcription_delay_ms !== null && t.ttft_ms !== null && t.tts_ttfb_ms !== null);
   return {
     conversations,
@@ -461,6 +354,5 @@ export const aggregateTurnRows = (conversations: number, all: ReadonlyArray<Turn
   };
 };
 
-/** The TTS readings of a window's turns, in the shape the domain heuristics take. */
 export const ttsReadingsOf = (rows: ReadonlyArray<TurnLatencyRow>): ReadonlyArray<TurnTtsReading> =>
   rows.map((r) => ({ turnId: r.turn_id, audioMs: r.tts_audio_ms, chars: r.tts_chars, silent: r.tts_silent, ttfbMs: r.tts_ttfb_ms }));

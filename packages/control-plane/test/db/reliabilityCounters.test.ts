@@ -1,12 +1,3 @@
-/**
- * Reliability counts and provider events (spec 2026-08-26, D6).
- *
- * The five conversation-loop counts are derived from committed events, so what is worth asserting
- * is that driving the real orchestrator down each failure path moves the right count — and that the
- * count agrees with the ledger it is derived from, rather than with a constant in this file. The
- * provider-event ring is in-process (a retried vendor socket is not a ledger event) and is asserted
- * through the `Metrics` seam, which is what `/api/system/status` reads.
- */
 import { DateTime, Effect, Layer, Stream } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -34,7 +25,6 @@ const NOW = DateTime.unsafeMake("2026-08-16T14:00:00Z");
 
 const baseServices = Layer.mergeAll(Orchestrator.Default, WorkflowService.Default, Queries.Default, ConversationRepo.Default, IdGen.Default);
 const rt = makeRuntime(baseServices.pipe(Layer.provide(ScriptedTurnDeciderLive), Layer.provideMerge(makeInfraLayer())));
-/** A second runtime whose decider always fails, for the DECIDER_UNAVAILABLE path. */
 const failingRt = makeRuntime(
   baseServices.pipe(Layer.provide(FailingTurnDeciderLive(new TurnDeciderUnavailable({ detail: "provider down" }))), Layer.provideMerge(makeInfraLayer())),
 );
@@ -74,17 +64,11 @@ describe("reliability counts (from the ledger)", () => {
           const wf = yield* WorkflowService;
           const orch = yield* Orchestrator;
           const started = yield* wf.startCall({ borrowerId, contactPointId: cpId, channel: "voice", now: NOW });
-          // Exactly how the worker reports a TTS stream that produced no frames (ADR 0008): the
-          // borrower heard nothing, whatever the chat item claimed.
+          // Exactly how the worker reports a TTS stream that produced no frames: the borrower heard nothing, whatever the chat item claimed.
           yield* orch.processSignal(started.conversationId, { kind: "playout", turnId: "t1", heardText: "", interrupted: true });
-          // A turn the borrower superseded before the agent replied reports the very same shape and
-          // is NOT a TTS failure -- nothing was heard because nothing was synthesised. Measured on a
-          // fleet run, where counting these put the silent-playout rate at 22% against one real
-          // failure in eighteen turns. The supersession is written straight to the ledger rather
-          // than raced into existence: what needs proving here is that the SQL agrees with the
-          // domain predicate, and the race itself is already covered by concurrency.test.ts.
           const conv = yield* ConversationRepo;
           yield* orch.processSignal(started.conversationId, { kind: "playout", turnId: "t2", heardText: "", interrupted: true });
+          // A turn the borrower superseded before the agent replied reports the very same shape and is not a TTS failure. Written straight to the ledger rather than raced: what needs proving here is that the SQL agrees with the domain predicate.
           yield* conv.lockConversation(started.conversationId);
           yield* conv.appendEvent({
             id: yield* (yield* IdGen).next(),
@@ -92,7 +76,6 @@ describe("reliability counts (from the ledger)", () => {
             event: { type: "TURN_SUPERSEDED", payload: { turn_id: "t2", superseded_by: "t3" } },
             createdAt: DateTime.toDateUtc(NOW),
           });
-          // Two strikes close the call.
           yield* orch.processNoInput(started.conversationId);
           yield* orch.processNoInput(started.conversationId);
           const q = yield* Queries;
@@ -105,16 +88,12 @@ describe("reliability counts (from the ledger)", () => {
     const delta = (k: string) => (out.after[k] ?? 0) - (out.before[k] ?? 0);
     expect(delta("tts_silent_playouts")).toBe(1);
     expect(delta("no_input_closes")).toBe(1);
-    // The SQL predicate and the domain predicate are two spellings of one rule.
     expect(out.domainSilent).toEqual(["t1"]);
     expect(out.sqlSilent).toBe(out.domainSilent.length);
   });
 
+  // The same event type and reason is raised when the model records a promise that was never proposed, the opposite situation, which is why the count keys off the rejection detail.
   it("counts a read-back repeated because the borrower heard silence", async () => {
-    // The ADR 0008 failure mode: the read-back's playout says it was not heard in full, the
-    // fully-heard guard refuses the promise, and the agent repeats itself. The same event type and
-    // reason is also raised when the model asks to record a promise that was never proposed — the
-    // opposite situation — which is why the count keys off the rejection detail.
     const out = await rt.runPromise(
       withFrozenClock(NOW)(
         Effect.gen(function* () {
@@ -125,9 +104,7 @@ describe("reliability counts (from the ledger)", () => {
           const q = yield* Queries;
           const started = yield* wf.startCall({ borrowerId, contactPointId: cpId, channel: "voice", now: NOW });
           yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t1", userText: "yes this is speaking" }, () => Effect.void);
-          // t2 proposes and speaks the read-back...
           yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t2", userText: "I can pay 550 on Friday" }, () => Effect.void);
-          // ...which the borrower did not hear in full.
           yield* orch.processSignal(started.conversationId, { kind: "playout", turnId: "t2", heardText: "To confirm: you will pay", interrupted: true });
           yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t3", userText: "yes" }, () => Effect.void);
           const detail = yield* q.conversationDetail(started.conversationId);
@@ -141,17 +118,12 @@ describe("reliability counts (from the ledger)", () => {
         }),
       ),
     );
-    // Tied to the ledger rather than to a constant: the count's only job is to agree with the
-    // events it is derived from, and an assertion that cannot fail would not check that.
     expect(out.rejections).toBe(1);
+    // Tied to the ledger rather than to a constant, so the assertion can go red.
     expect((out.after["readbacks_repeated_unheard"] ?? 0) - (out.before["readbacks_repeated_unheard"] ?? 0)).toBe(out.rejections);
   });
 
-  it("counts a read-back repeated because nothing ever reported it (C1)", async () => {
-    // The other half of the same counter. Here the read-back's playout report never arrives at all
-    // — the worker was killed after speaking, or the signal POST failed — and the guard refuses on
-    // the absence rather than on a report that says "interrupted". Different detail, same counter:
-    // both are a read-back repeated because nobody can say the borrower heard it.
+  it("counts a read-back repeated because nothing ever reported the playout, on the same counter as an interrupted one", async () => {
     const out = await rt.runPromise(
       withFrozenClock(NOW)(
         Effect.gen(function* () {
@@ -163,7 +135,6 @@ describe("reliability counts (from the ledger)", () => {
           const started = yield* wf.startCall({ borrowerId, contactPointId: cpId, channel: "voice", now: NOW });
           yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t1", userText: "yes this is speaking" }, () => Effect.void);
           yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t2", userText: "I can pay 550 on Friday" }, () => Effect.void);
-          // No playout signal for t2 at all — the difference from the test above.
           yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t3", userText: "yes" }, () => Effect.void);
           const detail = yield* q.conversationDetail(started.conversationId);
           return {
@@ -190,7 +161,6 @@ describe("reliability counts (from the ledger)", () => {
           const orch = yield* Orchestrator;
           const q = yield* Queries;
           const started = yield* wf.startCall({ borrowerId, contactPointId: cpId, channel: "voice", now: NOW });
-          // The decider is down, so the turn degrades to the safe fallback and the ledger records why.
           yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t1", userText: "yes this is speaking" }, () => Effect.void);
           const detail = yield* q.conversationDetail(started.conversationId);
           return {
@@ -217,27 +187,21 @@ describe("provider events (in process)", () => {
         return yield* metrics.providerEvents();
       }),
     );
-    // By vendor answers "who is degrading"; by stage answers "what broke". One number cannot.
     expect(out.counters["provider_deepgram.STT_retry"]).toBe(2);
     expect(out.counters["provider_stage_stt_retry"]).toBe(2);
     expect(out.counters["provider_openai:gpt-4.1_error"]).toBe(1);
     expect(out.counters["provider_stage_llm_error"]).toBe(1);
-    // Newest first, so the status page leads with what just broke.
     expect(out.recent[0]?.message).toBe("502");
     expect(out.recent.map((e) => e.provider)).toEqual(["openai:gpt-4.1", "deepgram.STT", "deepgram.STT"]);
   });
 
   it("labels an OpenAI transport failure a retry exactly when the decider will retry it", async () => {
-    // D6: "Control plane counts its own OpenAI retries/failures the same way." The decider retries
-    // once, but only before any output has reached the caller, so the same predicate that decides
-    // the retry decides the label — a failure counted as a retry is one that actually gets retried.
     const alwaysFails = Layer.succeed(LlmClient, {
       name: "gpt-test",
       stream: () => Stream.fail(new TurnDeciderUnavailable({ detail: "connection reset" })),
       complete: () => Effect.die("this test never takes the non-streaming path"),
     });
-    // `provideMerge`, not two separate `provide`s: the decider and this test must read the same
-    // Metrics instance, and two builds of `Metrics.Default` are two different maps.
+    // `provideMerge`, not two separate `provide`s: the decider and this test must read the same Metrics instance.
     const deciderLayer = OpenAITurnDeciderLive.pipe(
       Layer.provide(alwaysFails),
       Layer.provide(NoopTracingLive),
@@ -279,7 +243,6 @@ describe("provider events (in process)", () => {
         return yield* (yield* Metrics).providerEvents();
       }).pipe(Effect.provide(deciderLayer)),
     );
-    // Two attempts — the original and the one retry — both before any output reached the caller.
     expect(out.counters["provider_openai:gpt-test_retry"]).toBe(2);
     expect(out.counters["provider_stage_llm_retry"]).toBe(2);
     expect(out.recent[0]?.message).toContain("connection reset");

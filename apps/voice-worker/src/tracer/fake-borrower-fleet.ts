@@ -1,22 +1,4 @@
-/**
- * Tier-2 voice load test: N concurrent scripted calls through the media plane, each asserted for
- * SPEC §10.5 equivalence against the simulation scenario.
- *
- * This tier is deliberately modest (single-digit N). Real audio costs provider credits and laptop
- * CPU (silero VAD + Opus encode per call); the claim under test is "the media plane and the worker
- * handle N simultaneous calls *correctly*", not raw scale. Tier 1 (`apps/load-test`) is where the
- * hundreds-of-conversations number lives.
- *
- * Each call needs its own borrower — one live conversation per borrower is a pre-call rule — so the
- * fleet mints throwaway fixtures via POST /api/demo/load-fixtures. Borrower lines are synthesised
- * once and replayed from the WAV cache, so a 10-call run does not pay TTS for 30 utterances.
- *
- * Since 2026-08-27 the borrowers run in their own forked process (`--in-proc` to opt out) and the
- * run reports CPU-seconds and peak RSS per process role, so the fleet finally distinguishes what
- * the worker cost from what the harness cost on the same laptop (spec D1, findings W8).
- *
- * Run: pnpm --filter @feather-lite/voice-worker fake-borrower-fleet -- --calls 5
- */
+/** Run: pnpm --filter @feather-lite/voice-worker fake-borrower-fleet -- --calls 5 */
 import { fork } from "node:child_process";
 import { existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -34,10 +16,6 @@ import { speechWindows, turnTakingMetrics, withPlayoutTruth } from "@feather-lit
 
 loadEnv({ path: fileURLToPath(new URL("../../../../.env", import.meta.url)) });
 
-/**
- * Parsed rather than scanned (H6). The old `flag()` read one name at a time and never looked at what
- * else was on the line, so an unknown flag — `--label` included — was accepted and ignored.
- */
 const PARSED = parseFleetArgs(process.argv);
 if (!PARSED.ok) {
   process.stderr.write(`${PARSED.message}
@@ -48,39 +26,18 @@ const ARGS = PARSED.ok ? PARSED.args : null!;
 
 const CALLS = ARGS.calls;
 /**
- * STT regression gate (D4). A provider or model change that degrades transcription is otherwise
- * invisible: the call still completes, the ledger still replays, and equivalence still passes,
- * because the scripted borrower's words survive a surprising amount of mangling.
- *
- * 0.20, set from measurement rather than taste. Two of the three scripted lines transcribe at
- * 0.000. The third is the barge-in, where the borrower deliberately talks over the agent and the
- * STT loses a word to the overlap ("wait", 1 deletion of 9 reference words = 0.111). That loss is
- * structural to the script rather than a provider defect, so the gate has to clear it: the spec's
- * provisional 0.15 leaves almost no room above it, and a single extra clipped word on one line
- * would fail an otherwise healthy run. 0.20 leaves ~80% headroom over the measured structural
- * worst while still failing a run whose transcription genuinely degrades.
+ * 0.20, from measurement: two of the three scripted lines transcribe at 0.000, and the third is
+ * the barge-in, where the overlap costs the STT a word (0.111). That loss is structural to the
+ * script, so the gate has to clear it with room above.
  */
 const MAX_WER = ARGS.maxWer;
-/**
- * Borrowers run in a forked child by default (W8). `--in-proc` keeps the old single-process shape
- * for a quick one-off; every committed measurement uses the forked one, because a run that reports
- * the worker's latency while N Opus encoders share its event loop is measuring the harness.
- */
+/** Every committed measurement uses the forked borrowers; `--in-proc` is for a one-off. */
 const IN_PROC = ARGS.inProc;
 /**
- * Every fleet number taken before 2026-08-27 was measured against a `dev`-mode worker and nothing
- * said so, which is why a `dev`-mode run is a refusal rather than a footnote. `--allow-dev` is
- * there for a deliberate one, and it is recorded in the report.
- *
- * What dev mode actually costs here is `tsx` instead of the bundle, debug logging and the
- * framework's development defaults — **not** load shedding. That claim (repeated in the Dockerfile
- * and in the refusal message) was wrong: `ServerOptions` forces `loadThreshold` to `Infinity` only
- * under `--simulation` (`agents/dist/worker.js:166`), and this worker passes 0.75 explicitly, which
- * survives dev mode. `--simulation` is its own refusal with its own flag, below: it is a different
- * fact — a `--simulation` worker is `production: true` — and one flag must not wave through two.
+ * A dev-mode run is a refusal rather than a footnote. What it costs here is `tsx` instead of the
+ * bundle and the framework's development defaults — not load shedding, which is `--simulation`.
  */
 const ALLOW_DEV = ARGS.allowDev;
-/** Deliberately measuring a worker that can never ask the SFU to prefer somebody else. */
 const ALLOW_NO_SHEDDING = ARGS.allowNoShedding;
 const CONTROL_PLANE_URL = (process.env["CONTROL_PLANE_URL"] ?? "http://127.0.0.1:8080").replace(/\/$/, "");
 const REPORT_DIR = fileURLToPath(new URL("../../../../docs/loadtest/", import.meta.url));
@@ -90,19 +47,11 @@ const log = (m: string) => console.log(`[fleet] +${String(Date.now() - t0).padSt
 
 log(`calls=${CALLS} max-wer=${MAX_WER} borrowers=${IN_PROC ? "in-process" : "forked child"} livekit=${process.env["LIVEKIT_URL"] ?? "(unset)"} stt/tts=${process.env["STT_TTS_PROVIDER"] ?? "inference"}`);
 
-/**
- * Started first so its opening tick is the idle worker tree: that reading is the `idle_rss_tree`
- * term of `mb_per_call`, and it is only idle before the first room is created.
- */
+/** Started first, so its opening tick is the idle worker tree that `mb_per_call` subtracts. */
 const roleOverrides = new Map<number, Role>([[process.pid, "harness"]]);
 const sampler = startResourceSampler({ roleOverrides });
 await sampler.awaitFirstSample();
 
-/**
- * Which worker is about to serve this run, and in which mode. Read from `/status` rather than
- * asked of the worker directly: the heartbeat is already the only channel between them, and a
- * worker that is not heartbeating is one this run would have waited on anyway.
- */
 interface WorkerMode {
   /** Null when no online worker is reporting at all — a different fact from "dev mode". */
   readonly production: boolean | null;
@@ -110,7 +59,6 @@ interface WorkerMode {
   /** `loadThreshold` resolved to `Infinity`, so the worker can never report itself busy. */
   readonly sheddingDisabled: boolean;
   readonly maxJobs: number | null;
-  /** The pool's real warm count, and the number it was configured with. */
   readonly idleProcesses: number | null;
   readonly idleConfigured: number | null;
 }
@@ -140,35 +88,21 @@ if (workerMode.production !== true && !ALLOW_DEV) {
   process.exit(1);
 }
 /**
- * Separate from the dev-mode gate, because it is a separate fact and the two were conflated.
- *
- * `start --simulation` is `production: true` and would pass the gate above, and it is the mode in
- * which `ServerOptions` forces `loadThreshold` to `Infinity` (`agents/dist/worker.js:166`) — so the
- * worker never tells the SFU it is busy. Dev mode does *not* do that here: this worker passes 0.75
- * explicitly and it survives, which is what the old message claimed the opposite of.
+ * Separate from the dev-mode gate: `start --simulation` is `production: true` and would pass that
+ * one, and it is the mode in which `ServerOptions` forces `loadThreshold` to `Infinity`.
  */
 if (workerMode.sheddingDisabled && !ALLOW_NO_SHEDDING) {
   console.error("[fleet] the worker is running under --simulation, where loadThreshold is Infinity and it can never ask the SFU to prefer somebody else. Restart it without --simulation, or pass --allow-no-shedding deliberately.");
   process.exit(1);
 }
 if (workerMode.idleProcesses !== null && workerMode.idleConfigured !== null && workerMode.idleProcesses < workerMode.idleConfigured) {
-  // Now visible because the heartbeat reports the pool's real count rather than the constant it was
-  // configured with. A short pool means the first calls pay a ~1.8 s cold start inside the call.
+  // A short pool means the first calls pay a ~1.8 s cold start inside the call.
   log(`warning: the warm pool is ${String(workerMode.idleProcesses)} of a configured ${String(workerMode.idleConfigured)}; the first calls will pay a cold start.`);
 }
 if (workerMode.maxJobs !== null && CALLS > Math.floor(workerMode.maxJobs * 0.75)) {
   /**
-   * A refusal now, not a warning (H4).
-   *
-   * It was a warning on the argument that a run *meant* to find the shedding point is legitimate —
-   * which is true, and is what `--allow-shed` is for. What the warning could not stop is the far
-   * commoner case: a run configured past the ceiling by accident, whose surplus calls are refused,
-   * and whose report then reads as a **quality** failure rather than a capacity one.
-   *
-   * Measured, on the first N=10 acceptance attempt (2026-09-01): `WORKER_MAX_JOBS=10` served nine
-   * calls, the tenth finalized `NEVER_SERVED` with no transcript, and the harness scored its three
-   * lines at WER 1.000 — so the run came back "8/10 with the WER gate breached" and the gate that
-   * actually failed was the ceiling. The warning was printed and read past.
+   * A refusal, not a warning: a run configured past the ceiling by accident has its surplus refused
+   * and its report then reads as a quality failure rather than a capacity one.
    */
   const admitted = Math.floor(workerMode.maxJobs * 0.75);
   const detail =
@@ -197,12 +131,10 @@ log(`reference: states=${JSON.stringify(reference.statePath)} tools=${JSON.strin
 
 const callSpecs = fixtures.map((f, i) => ({ borrowerName: f.name, participantIdentity: `borrower-fleet-${i}`, label: `call${String(i).padStart(2, "0")}` }));
 
-/** Run the fleet in a forked child so its CPU is attributable, or in this process on `--in-proc`. */
 const runBorrowers = async (): Promise<{ results: ScriptedCallResult[]; speech: string; dispose: () => void }> => {
   if (IN_PROC) {
     // Imported here, not at the top: with the borrowers in a child this process never touches the
-    // media stack, and a harness that loads `@livekit/agents` and `rtc-node` to measure a worker is
-    // adding hundreds of megabytes to the box it is measuring.
+    // media stack, and loading it would add hundreds of megabytes to the box being measured.
     const { initializeLogger } = await import("@livekit/agents");
     initializeLogger({ pretty: true, level: "warn" });
     const { loadScriptedLines, runScriptedCall } = await import("./scripted-call.js");
@@ -212,8 +144,7 @@ const runBorrowers = async (): Promise<{ results: ScriptedCallResult[]; speech: 
     const results = await Promise.all(callSpecs.map((c) => runScriptedCall({ lines, controlPlaneUrl: CONTROL_PLANE_URL, ...c })));
     return { results, speech: lines.describe, dispose: () => undefined };
   }
-  // The tracer harnesses run under `tsx`, so the child is the `.ts` source; the `.js` sibling is
-  // what a bundled build would leave. Pick whichever exists rather than assuming the toolchain.
+  // The harnesses run under `tsx`, so pick whichever of the two entry points exists.
   const tsPath = fileURLToPath(new URL("./borrower-proc.ts", import.meta.url));
   const childPath = existsSync(tsPath) ? tsPath : fileURLToPath(new URL("./borrower-proc.js", import.meta.url));
   const child = fork(childPath, [], { execArgv: process.execArgv, stdio: ["ignore", "inherit", "inherit", "ipc"] });
@@ -228,13 +159,11 @@ const runBorrowers = async (): Promise<{ results: ScriptedCallResult[]; speech: 
         if (m.line.startsWith("borrower lines ready")) speech = m.line.slice(m.line.indexOf("): ") + 3);
         log(m.line);
       } else if (m.kind === "results") {
-        // Left alive until the sampler has stopped: killing it here would drop up to a second of
-        // its CPU from the report, which is the one number this whole change exists to produce.
+        // Left alive until the sampler has stopped, or its last second of CPU is lost.
         resolve({ results: [...m.results], speech, dispose: () => child.kill() });
       } else reject(new Error(`borrower process failed: ${m.error}`));
     });
-    // A child that dies without answering must fail the run loudly; a fleet that silently reported
-    // zero calls would read as "nothing went wrong".
+    // A child that dies without answering must fail the run loudly.
     child.on("exit", (code, signal) => {
       if (signal === null && code !== 0) reject(new Error(`borrower process exited ${String(code)} before reporting results`));
     });
@@ -244,9 +173,8 @@ const runBorrowers = async (): Promise<{ results: ScriptedCallResult[]; speech: 
 
 sampler.mark();
 const { results, speech: speechDescribe, dispose: disposeBorrowers } = await runBorrowers();
-// Stopped the moment the calls end. The equivalence sweep and the ledger reads that follow are the
-// harness's own work; leaving them inside the window would stretch the wall clock the per-core
-// budget divides by and flatter every figure derived from it.
+// Stopped the moment the calls end: the equivalence sweep that follows is the harness's own work,
+// and leaving it in would stretch the wall clock every per-core figure divides by.
 const resources = await sampler.stop();
 disposeBorrowers();
 const callMinutes = results.reduce((a, r) => a + r.durationMs, 0) / 60_000;
@@ -269,31 +197,19 @@ for (const call of results) {
 const green = equivalences.filter((r) => r.eq?.equivalent === true).length;
 const hungUp = results.filter((r) => r.hungUp).length;
 const durations = results.map((r) => r.durationMs).sort((a, b) => a - b);
-// The domain's nearest-rank rule, not a fourth local copy of it: this harness had the same
-// off-by-one the SLO gate had (O1), so a fleet report's p50 could be the larger of two readings.
-// `?? 0` keeps the report's numeric shape for an empty sample, which the schema has always had.
+// The domain's nearest-rank rule rather than a fourth local copy of it.
 const pct = (p: number) => percentile(durations, p) ?? 0;
 
-// Per-turn response latency across every call in the fleet. This — not call durationMs, which is
-// dominated by the scripted sleeps — is the number a latency A/B compares.
+// Per-turn latency, not `durationMs`, which is dominated by the scripted sleeps.
 const turnMs = results.flatMap((r) => r.turnLatencies.map((t) => t.ms)).sort((a, b) => a - b);
 const turnPct = (p: number) => percentile(turnMs, p) ?? 0;
 const unanswered = results.reduce((n, r) => n + r.unansweredTurns.length, 0);
 
 /**
- * Every borrower line across the fleet — **from the calls a worker actually served** (H4).
- *
- * A call the SFU never assigned finalizes `NEVER_SERVED` with no transcript, so every one of its
- * lines scores WER 1.000: perfect deletions against a hypothesis nobody produced. That is not a
- * transcription result, and folding it into the gate turns a capacity failure into a quality one.
- *
- * Measured, on the first N=10 acceptance attempt (2026-09-01): nine calls served, the tenth never
- * assigned, and the run reported "8/10 with the WER gate breached" — a breach caused entirely by the
- * call that had no audio to transcribe.
- *
- * "Served" is `agentAudioFrames > 0`: the borrower heard the agent speak, so there was something to
- * transcribe. The excluded calls are counted and reported rather than quietly dropped, because a run
- * that silently narrows its own denominator is the other way to get a flattering number.
+ * From the calls a worker actually served: a call the SFU never assigned finalizes `NEVER_SERVED`
+ * with no transcript, so its lines score WER 1.000 against a hypothesis nobody produced, turning a
+ * capacity failure into a quality one. "Served" is `agentAudioFrames > 0`, and the excluded calls
+ * are counted rather than dropped.
  */
 const servedResults = results.filter((r) => r.agentAudioFrames > 0);
 const neverServedCalls = results.length - servedResults.length;
@@ -307,19 +223,9 @@ const worstLine = servedResults.flatMap((r) => r.werLines).reduce<{ turn: string
   null,
 );
 /**
- * The six turn-taking numbers, per call (issue #1, D4 — Phase 1's headline).
- *
- * Every piece was already here and none of them had been joined: H1 keeps the agent's speech
- * stretches, `withPlayoutTruth` attaches the ledger's `AGENT_TURN_PLAYOUT.interrupted` to each, the
- * script records what the borrower did and when, and `turnTakingMetrics` turns the pair into the
- * numbers. This is the joining.
- *
- * **They are VAD-interruption numbers and the report says so** (issue #4, amendment 8). Adaptive
- * interruption has never run on this profile — W1 made the config admit it — so Phase 2's A/B has to
- * compare against a baseline labelled with the mode that produced it.
- *
- * `truncated: null` for a stretch with no playout behind it, excluded from every rate and counted
- * (H11), so a thin denominator is visible rather than flattering.
+ * VAD-interruption numbers, labelled as such because an A/B has to compare against a baseline that
+ * names the mode. `truncated: null` is excluded from every rate and counted, so a thin denominator
+ * is visible.
  */
 const playoutsByConversation = new Map<string, Array<{ atMs: number; interrupted: boolean }>>();
 for (const { call } of equivalences) {
@@ -352,17 +258,8 @@ const turnTaking = results.map((r) => {
 const unmatched = results.reduce((n, r) => n + r.unmatchedTranscripts.length, 0);
 
 /**
- * The live onset detector against the post-hoc one (issue #4, H1).
- *
- * The harness now counts agent speech stretches twice: live, inside the audio loop, because a
- * scenario has to react to an onset; and afterwards by running `speechWindows()` over the samples it
- * kept. They are the same rule at the same threshold and hangover, so they must agree — and if they
- * ever do not, every turn-taking number computed from the second is describing audio the first did
- * not see, which is the failure that would be least visible and most expensive.
- *
- * Reported, not fatal: a disagreement is a fact about the run worth reading, and failing a fleet run
- * over a metric that gates nothing yet would be the wrong trade. Phase 1 makes it a gate when the
- * numbers it feeds are the ones being reported.
+ * The live onset detector against the post-hoc one: the same rule at the same threshold, so they
+ * must agree, or every turn-taking number describes audio the live one never saw.
  */
 const stretchDisagreements = results.flatMap((r) => {
   const postHoc = speechWindows(r.rmsSamples).length;
@@ -372,15 +269,9 @@ const werP95 = werPct(95);
 const werBreached = werP95 !== null && werP95 > MAX_WER;
 
 /**
- * D3's entity gate, beside the word-error one.
- *
- * They answer different questions. WER asks how much of the transcript was wrong; this asks whether
- * the parts that decide the call survived — and an amount error is a **wrong promise**, not a
- * degraded transcript, which is why its budget is zero by default rather than a rate. Dates and
- * names are counted and reported, not gated, until the accent personas say what their floor is.
- *
- * The fixtures are minted as "Jordan <prefix>", so the first name is the one name the scripted
- * lines carry; the per-fixture surname never appears in them.
+ * An amount error is a wrong promise, not a degraded transcript, which is why its budget is zero
+ * rather than a rate. The fixtures are minted as "Jordan <prefix>", so the first name is the one
+ * name the scripted lines carry.
  */
 const entities = summariseEntities(
   servedResults.flatMap((r) => r.werLines.map((l) => ({ reference: l.reference, hypothesis: l.hypothesis }))),
@@ -389,16 +280,10 @@ const entities = summariseEntities(
 const amountsBreached = entities.amount_errors > ARGS.maxAmountErrors;
 
 /**
- * TTS heuristics over the fleet (D5). Read from the ledger's turn rows rather than measured here:
- * the worker is what knows how much audio it produced for how many characters, and it already
- * reports both on the `turn_metrics` signal. The harness only knows that *some* audio arrived.
- *
- * Scoped to this run's own conversations, not "the last N calls" — the fleet runs a reference
- * simulation scenario of its own before starting, and a window that swept that in would be
- * describing a different set of calls than every other number in this report.
+ * Read from the ledger rather than measured here: the worker knows how much audio it produced for
+ * how many characters. Scoped to this run's conversations, because a reference scenario runs first.
  */
 const turnRows: TurnLatencyRow[] = [];
-/** The same rows, kept per conversation, so a harness score can carry the ledger's turn id (O8). */
 const rowsByConversation = new Map<string, TurnLatencyRow[]>();
 for (const { call } of equivalences) {
   if (!call.conversationId) continue;
@@ -426,10 +311,6 @@ console.log(`  turn latency  n       ${turnMs.length} (${unanswered} unanswered)
 console.log(`  turn latency p50/p95  ${turnPct(50)}ms / ${turnPct(95)}ms`);
 console.log(`  stt wer  n            ${werValues.length}${unmatched > 0 ? `  (${unmatched} unmatched transcript(s) — pairing may be off)` : ""}`);
 console.log(`  stt wer  p50/p95      ${werPct(50) === null ? "n/a" : werPct(50)!.toFixed(3)} / ${werP95 === null ? "n/a" : werP95.toFixed(3)}   (gate ${MAX_WER}${werBreached ? " — BREACHED" : ""})`);
-/**
- * Printed as a block per metric rather than per call: six numbers over five calls is a table nobody
- * reads, and the median across the fleet is what a baseline is.
- */
 {
   const med = (pick: (m: (typeof turnTaking)[number]["metrics"]) => number | null): string => {
     const vs = turnTaking.map((t) => pick(t.metrics)).filter((v): v is number => v !== null).sort((a, b) => a - b);
@@ -455,8 +336,7 @@ if (worstLine && worstLine.wer > 0) {
   console.log(`      ref: ${JSON.stringify(worstLine.reference)}`);
   console.log(`      stt: ${JSON.stringify(worstLine.hypothesis)}`);
 }
-// Labelled "heuristic" on the line itself, not only in the docs: this is an outlier flag, not a
-// measure of how the speech sounded, and the console is the wrong place to learn that distinction.
+// Labelled "heuristic" on the line itself: an outlier flag, not a measure of how the speech sounded.
 console.log(`  tts silent playouts   ${tts.silentPlayouts}/${tts.turns}${tts.silentPlayoutRate === null ? "" : `  (${(tts.silentPlayoutRate * 100).toFixed(1)}%)`}`);
 console.log(`  tts ttfb p50/p95      ${tts.ttfbMs.p50 ?? "n/a"}ms / ${tts.ttfbMs.p95 ?? "n/a"}ms   over ${tts.ttfbMs.n} turn(s)`);
 console.log(
@@ -478,35 +358,24 @@ for (const { call, eq, eqError } of equivalences) {
 
 const report = {
   tier: "2-voice",
-  /** What this run was called (H6). In the filename too, so an archived report identifies itself. */
   label: ARGS.label,
   livekit_url: process.env["LIVEKIT_URL"] ?? null,
   stt_tts_provider: process.env["STT_TTS_PROVIDER"] ?? "inference",
   speech: speechDescribe,
-  /** Which mode served the run, so no number in this file is ever again unattributable to it (W2). */
+  /** Which mode served the run, so no number in this file is unattributable to it. */
   worker: { ...workerMode, allow_dev: ALLOW_DEV, allow_no_shedding: ALLOW_NO_SHEDDING },
   calls: CALLS,
   agent_hung_up: hungUp,
-  /** Calls no worker served, excluded from the WER denominator because they have no transcript (H4). */
+  /** Excluded from the WER denominator, because they have no transcript. */
   never_served_calls: neverServedCalls,
-  /** Live vs post-hoc onset detection, per H1. Empty means the two agree on every call. */
   agent_stretch_disagreements: stretchDisagreements,
-  /**
-   * D4's six numbers per call, and the label that makes them comparable (issue #1 Phase 1, issue #4
-   * amendment 8). `interruption_mode` is what the session asked for and what it actually ran, which
-   * since W1 are the same thing.
-   */
   turn_taking: { interruption_mode: process.env["WORKER_INTERRUPTION_MODE"] ?? "vad", per_call: turnTaking },
   equivalence_green: green,
   duration_ms: { p50: pct(50), p95: pct(95), max: durations.at(-1) ?? 0 },
   turn_latency_ms: { n: turnMs.length, unanswered, p50: turnPct(50), p95: turnPct(95), max: turnMs.at(-1) ?? 0 },
   stt_entities: { ...entities, gate: ARGS.maxAmountErrors, breached: amountsBreached },
   stt_wer: { n: werValues.length, unmatched_transcripts: unmatched, p50: werPct(50), p95: werP95, max: werValues.at(-1) ?? null, gate: MAX_WER, breached: werBreached, worst_line: worstLine },
-  /**
-   * Heuristics, not a quality score, and not gated: a chars-per-second outlier is a turn worth
-   * listening to, not a failure. Silent playouts are a real defect but already fail the run through
-   * equivalence — a read-back nobody heard cannot record a promise (ADR 0008).
-   */
+  /** Not gated: silent playouts already fail the run through equivalence. */
   tts_heuristics: {
     turns: tts.turns,
     silent_playouts: tts.silentPlayouts,
@@ -538,21 +407,16 @@ const report = {
     final_outcome: eq?.finalOutcome ?? null,
   })),
 };
-// A report without its resources block looks like a measurement and is not; the next phase would
-// cite it. Fail the run rather than write one.
+// A report without its resources block looks like a measurement and is not.
 const reportProblems = validateReport(report);
 if (reportProblems.length > 0) throw new Error(`report is not a valid measurement: ${reportProblems.join("; ")}`);
 mkdirSync(REPORT_DIR, { recursive: true });
-/**
- * The label is in the filename (H6), so a second run on the same day at the same N cannot overwrite
- * the first. It used to, silently — a tracked report was lost that way on 2026-09-02.
- */
+/** The label is in the filename, so a second run at the same N cannot overwrite the first. */
 const path = `${REPORT_DIR}${reportFileName(new Date().toISOString().slice(0, 10), CALLS, ARGS.label)}`;
 writeFileSync(path, `${JSON.stringify(report, null, 2)}\n`);
 log(`report written: ${path}`);
 
-// One score model for harness runs and production calls: the fleet's own measurements land in the
-// same table the evaluator and judge write to, per call, and show on the Quality page beside them.
+// One score model for harness runs and production calls.
 for (const { call, eq } of equivalences) {
   if (!call.conversationId) continue;
   await postHarnessScores(
@@ -563,9 +427,8 @@ for (const { call, eq } of equivalences) {
       equivalenceComment: eq?.equivalent ? `matches scenario ${reference.scenarioId}` : (eq?.failures[0] ?? "no equivalence result"),
       werLines: call.werLines,
       turnLatencies: call.turnLatencies,
-      // The ledger's own turns, which this run already fetched for its TTS numbers (O8).
       ledgerTurns: (rowsByConversation.get(call.conversationId) ?? []).map((r) => ({ turn_id: r.turn_id, startedAtMs: Date.parse(r.started_at) })),
-      // Closes the last line's join window at the end of its call (H3).
+      // Closes the last line's join window at the end of its call.
       callEndedAtMs: call.endedAtMs,
       log,
     }),
@@ -578,9 +441,7 @@ log(
     `${entities.entity_er === null ? "" : ` (er ${entities.entity_er.toFixed(3)})`}`,
 );
 
-// The run fails on any gate. Equivalence is correctness, WER is transcription quality, and the
-// entity gate is whether the numbers that decide the call survived; a run that stayed correct only
-// because the words happened to survive is not a pass.
+// The run fails on any gate: staying correct because the words happened to survive is not a pass.
 if (werBreached) log(`stt wer p95 ${werP95!.toFixed(3)} exceeds the ${MAX_WER} gate: FAIL`);
 if (amountsBreached) log(`${String(entities.amount_errors)} amount error(s) exceeds the ${String(ARGS.maxAmountErrors)} gate: FAIL`);
 process.exit(green === CALLS && !werBreached && !amountsBreached ? 0 : 1);

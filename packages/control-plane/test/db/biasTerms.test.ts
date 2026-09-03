@@ -1,10 +1,3 @@
-/**
- * The recogniser is told what to expect only after the borrower is verified (issue #1, D3).
- *
- * The gate is the point. A keyterm list carrying the borrower's name and balance is account data
- * leaving the system just as surely as a sentence is, so it goes out through the **same** protected-
- * context unlock the prompt uses — never before `confirm_right_party`.
- */
 import { Effect, Layer, Stream } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -51,7 +44,7 @@ describe("contextual biasing", () => {
       Effect.gen(function* () {
         const started = yield* startCall;
         const frames: TurnFrame[] = [];
-        // `t2` does not confirm anything, so the conversation stays locked.
+        // `t2` confirms nothing, so the conversation stays locked.
         yield* (yield* Orchestrator).processTurn({ conversationId: started.conversationId, turnId: "t2", userText: "who is this" }, (f) => Effect.sync(() => void frames.push(f)));
         return turnEndOf(frames);
       }),
@@ -77,11 +70,8 @@ describe("contextual biasing", () => {
   });
 
   it("does not repeat them on later turns, because updating re-opens the STT socket", async () => {
-    /**
-     * Verified in the installed plugin (`stt.js:284`): `updateOptions` calls `#resetWS.resolve()`,
-     * which tears down and re-opens the Deepgram websocket. Sending the same list every turn would
-     * reconnect the recogniser on every turn of the call.
-     */
+    // `updateOptions` tears down and re-opens the Deepgram websocket, so resending the same list
+    // every turn would reconnect the recogniser mid-call.
     const out = await rt.runPromise(
       Effect.gen(function* () {
         const started = yield* startCall;

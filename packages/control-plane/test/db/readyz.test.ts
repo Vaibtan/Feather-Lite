@@ -1,23 +1,3 @@
-/**
- * `/readyz` against the real handler, because the three ways it could not fail were all invisible
- * to a unit test of `staleLoops()` (review #3, #9).
- *
- * Before this file the endpoint had **no** test at all. What it now pins:
- *
- *   1. a loop that died before completing its first tick used to never enter the map, so the
- *      endpoint answered `loops: []` and "ready" for the life of the process;
- *   2. a loop that errors on *every* tick used to keep stamping `last_tick_at`, because `catchAll`
- *      ran before the stamp — an outbox with bad credentials was indistinguishable from a healthy
- *      one;
- *   3. a *busy* outbox used to trip the endpoint, because the stamp was written only when a whole
- *      ten-batch drain finished and a single batch can wait tens of seconds on the judge. The
- *      signal fired hardest when the fiber was healthiest.
- *
- * Each case gets its own ProcessMetrics and its own handler, because the endpoint's verdict is over
- * *all* loops and a stale one left behind by an earlier case would decide the next. (A shared
- * `MemoMap` would be cheaper and is wrong here: it memoises `ApiLive` itself, so every case would
- * get the first case's loop registry back.)
- */
 import { Effect, Exit, Layer, Scope } from "effect";
 import { HttpApiBuilder, HttpServer } from "@effect/platform";
 import { describe, expect, it } from "vitest";
@@ -39,8 +19,7 @@ const sources: ProcessMetricsSources = {
   rateLimitBuckets: () => 0,
 };
 
-// The same shape `apps/server/src/main.ts` composes: the decider is provided *into* the services,
-// not merged beside them, or the orchestrator cannot see it.
+// The decider is provided *into* the services, not merged beside them, or the orchestrator cannot see it.
 const infra = ServicesLive.pipe(Layer.provide(ScriptedTurnDeciderLive), Layer.provideMerge(LiveKitMediaPlaneLive), Layer.provideMerge(makeInfraLayer()));
 
 interface Readyz {
@@ -48,13 +27,7 @@ interface Readyz {
   readonly call: () => Promise<Response>;
 }
 
-/**
- * One case: a fresh loop registry behind the real endpoint, torn down before the next.
- *
- * Each `ProcessMetrics` holds a `PerformanceObserver` and an event-loop histogram, so they are
- * closed per case rather than accumulated — the same one-runtime-per-scope discipline the other DB
- * tests get from `makeRuntime`/`dispose`.
- */
+// Each case gets its own ProcessMetrics and handler: the verdict is over all loops, and each ProcessMetrics holds a PerformanceObserver that has to be closed rather than accumulated.
 const withReadyz = async (body: (r: Readyz) => Promise<void>): Promise<void> => {
   const scope = await Effect.runPromise(Scope.make());
   const metrics = await Effect.runPromise(Scope.extend(makeProcessMetrics(sources), scope));
@@ -79,11 +52,8 @@ describe("/readyz", () => {
       expect(((await res.json()) as { loops: string[] }).loops).toContain("outbox");
     }));
 
-  it("fails for a loop the process said it would run and never registered (C11)", async () =>
+  it("fails when the registry is empty, because no loops registered is not the same as no loops late", async () =>
     withReadyz(async ({ metrics, call }) => {
-      // Boot threw between declaring the schedulers and starting them. The registry is *empty*,
-      // which `staleLoops()` cannot say anything about: "no loops are late" and "there are no
-      // loops" are opposite facts, and this endpoint used to report the second as ready.
       await Effect.runPromise(metrics.expectLoops(["outbox", "sweeper"]));
       await Effect.runPromise(metrics.tick("outbox", 5_000));
       const res = await call();
@@ -93,8 +63,6 @@ describe("/readyz", () => {
 
   it("fails for a loop that was registered and never ticked", async () =>
     withReadyz(async ({ metrics, call }) => {
-      // The fiber died on its first iteration. It has an interval and no tick, and one interval is
-      // long enough to say so: there is no slow first tick to be forgiving of.
       await Effect.runPromise(metrics.register("never-started", 1));
       await new Promise((r) => setTimeout(r, 20));
       const res = await call();
@@ -109,17 +77,12 @@ describe("/readyz", () => {
       await new Promise((r) => setTimeout(r, 20));
       const res = await call();
       expect(res.status).toBe(503);
-      // The stamp is not written on the error path any more, so the loop goes stale — and the count
-      // says it is failing rather than simply gone.
       expect(JSON.stringify(await res.json())).toContain("3 consecutive failures");
     }));
 
   it("stays ready through a drain that runs longer than its own staleness window", async () =>
+    // Six batches at 400 ms is 2.4 s of work against a 1.5 s staleness window: survivable only because each batch reports.
     withReadyz(async ({ metrics, call }) => {
-      // A drain is up to ten batches and a single batch can wait tens of seconds on the judge. The
-      // stamp used to be written only when the whole drain finished, so the *busier* the outbox was
-      // the more likely `/readyz` was to call it dead. Six batches at 400 ms is 2.4 s of work
-      // against a 1.5 s staleness window: it is only survivable because each batch reports.
       const INTERVAL_MS = 500;
       const verdicts: number[] = [];
       for (let batch = 0; batch < 6; batch++) {

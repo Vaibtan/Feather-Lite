@@ -28,7 +28,7 @@ const okInput = (now: DateTime.Utc, tz = "America/New_York"): PreCallInput => ({
   conflictingPendingActions: 0,
 });
 
-describe("TCPA contact window — boundaries in borrower-local time (plan rev.2 R13)", () => {
+describe("TCPA contact window — boundaries in borrower-local time", () => {
   // 2026-08-16 is EDT (UTC-4). 07:59 local = 11:59Z; 08:00 = 12:00Z; 20:59 = 00:59Z next day; 21:00 = 01:00Z.
   it.each([
     ["2026-08-16T11:59:00Z", false, "07:59 EDT"],
@@ -198,7 +198,6 @@ describe("visibleContext — the right-party gate, over every state", () => {
       }),
     ).toBe(`promised 550.00 by 2026-08-28; their last words: "Yes. That's correct."`);
     expect(priorCallNote("OPT_OUT", {})).toBe("asked for no further calls");
-    // A long excerpt is clamped, so the memory block can never blow up the prompt.
     const long = priorCallNote("DISPUTED", { transcript_excerpt: "x".repeat(500) });
     expect(long.length).toBeLessThan(200);
   });

@@ -1,11 +1,9 @@
-/** UUID generation as a service so tests can make ids deterministic. */
 import { Effect, Layer } from "effect";
 
 export class IdGen extends Effect.Service<IdGen>()("@feather-lite/IdGen", {
   succeed: { next: () => Effect.sync(() => crypto.randomUUID()) } as const,
 }) {}
 
-/** Deterministic ids for tests: prefix-00000000-0000-4000-8000-00000000000N */
 export const IdGenSequential = (prefix = "00000000"): Layer.Layer<IdGen> => {
   let n = 0;
   return Layer.succeed(IdGen, {

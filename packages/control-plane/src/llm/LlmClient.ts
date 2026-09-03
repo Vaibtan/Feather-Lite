@@ -1,9 +1,3 @@
-/**
- * Provider seam for chat completions. The decider only ever sees this interface, so
- *  - tests can swap in a recording/scripted client and assert on the EXACT request body
- *    (the protected-context leak test lives at this level, plan rev.2 R12), and
- *  - a different provider is a Layer, not a rewrite.
- */
 import { Context, Effect, Layer, Redacted, Stream } from "effect";
 import OpenAI from "openai";
 import { AppConfig, type ReasoningEffort } from "../config.js";
@@ -26,31 +20,17 @@ export interface ChatRequest {
   readonly tools: ReadonlyArray<ToolSpec>;
   readonly temperature: number;
   readonly maxTokens: number;
-  /**
-   * Groups requests that share a prompt prefix so the provider can route them to the same cache.
-   * One call's turns share everything up to the volatile block, so this is the conversation id.
-   */
   readonly cacheKey: string | null;
-  /** For tracing only. */
   readonly metadata: Readonly<Record<string, string>>;
 }
 
-/**
- * A single non-streaming model call. The judge's shape (spec 2026-08-26, D3), and deliberately not
- * `ChatRequest`: there are no tools, nothing is streamed, and above all there is **no sampling
- * parameter** — reasoning models reject `temperature`, and a field that must never be set is better
- * absent than present-and-ignored.
- */
 export interface CompletionRequest {
   readonly model: string;
   readonly messages: ReadonlyArray<ChatMessage>;
-  /** Reasoning tokens count against this, so it is an order of magnitude above the visible answer. */
   readonly maxTokens: number;
   /** Omitted for a non-reasoning model, which rejects the parameter as unknown. */
   readonly reasoningEffort: ReasoningEffort | null;
-  /** Strict structured output. `schema` must have every property required and no extras. */
   readonly jsonSchema: { readonly name: string; readonly schema: Record<string, unknown> } | null;
-  /** For tracing only. */
   readonly metadata: Readonly<Record<string, string>>;
 }
 
@@ -58,18 +38,11 @@ export interface CompletionResult {
   readonly text: string;
   readonly usage: TokenUsage | null;
   readonly latencyMs: number;
-  /** `length` here means the answer was truncated — usually reasoning ate the token budget. */
   readonly finishReason: string | null;
 }
 
-/**
- * Models that reason before answering, and therefore reject `temperature`, `top_p` and the rest of
- * the sampling family. Matched by prefix rather than by an enumerated list so a new tier of an
- * existing family does not silently fall back to sending parameters that 400.
- */
 export const isReasoningModel = (model: string): boolean => /^(o\d|gpt-5)/.test(model);
 
-/** Normalised streaming deltas. Tool-call argument fragments are concatenated by index. */
 export type LlmDelta =
   | { readonly _tag: "Content"; readonly text: string }
   | { readonly _tag: "ToolCallStart"; readonly index: number; readonly id: string | null; readonly name: string }
@@ -79,25 +52,16 @@ export type LlmDelta =
 export interface TokenUsage {
   readonly promptTokens: number;
   readonly completionTokens: number;
-  /**
-   * Prompt tokens served from OpenAI's prefix cache. Zero until the prefix exceeds ~1,024 tokens,
-   * and reset by anything that changes the prefix -- including `tools`, which change per state.
-   * This is the only way to tell whether the cache-aligned message layout in `prompts.ts` is
-   * actually paying off, so it is measured rather than assumed.
-   */
   readonly cachedTokens: number;
 }
 
 export interface LlmClientShape {
   readonly name: string;
   readonly stream: (request: ChatRequest) => Stream.Stream<LlmDelta, TurnDeciderUnavailable>;
-  /** One non-streaming call, for callers off the turn path (the judge). */
   readonly complete: (request: CompletionRequest) => Effect.Effect<CompletionResult, LlmCallFailed>;
 }
 
 export class LlmClient extends Context.Tag("@feather-lite/LlmClient")<LlmClient, LlmClientShape>() {}
-
-/* ------------------------------ OpenAI ------------------------------ */
 
 export const OpenAILlmClientLive: Layer.Layer<LlmClient, never, AppConfig> = Layer.effect(
   LlmClient,
@@ -105,18 +69,9 @@ export const OpenAILlmClientLive: Layer.Layer<LlmClient, never, AppConfig> = Lay
     const cfg = yield* AppConfig;
     const apiKey = cfg.openaiApiKey ? Redacted.value(cfg.openaiApiKey) : "";
     /**
-     * Built lazily, and only when there is a key.
-     *
-     * This layer is provided unconditionally — the post-call judge needs a client whichever decider
-     * ran the call — on the stated grounds that constructing one is free and fails at call time with
-     * a clear message. That was true of an older SDK and is **not** true of `openai@6`, whose
-     * constructor throws `Missing credentials` when the key is empty. The result was a server that
-     * refused to boot without `OPENAI_API_KEY` even with `TURN_DECIDER=scripted` and the judge off.
-     *
-     * It never showed on a dev box, where `.env` always has a key. It showed the first time the
-     * image was run: `docker run` with a database URL and nothing else, and the process exited
-     * before it listened. Both call sites below already fail properly on a missing key, so nothing
-     * changes except when the constructor runs.
+     * Built lazily: `openai@6`'s constructor throws `Missing credentials` on an empty key, which
+     * would stop the server booting with `TURN_DECIDER=scripted` and the judge off. Both call
+     * sites below already fail properly on a missing key.
      */
     let openai: OpenAI | null = null;
     const client = (): OpenAI => (openai ??= new OpenAI({ apiKey, baseURL: cfg.openaiBaseUrl }));
@@ -133,8 +88,6 @@ export const OpenAILlmClientLive: Layer.Layer<LlmClient, never, AppConfig> = Lay
         if (request.jsonSchema !== null) {
           params.response_format = { type: "json_schema", json_schema: { name: request.jsonSchema.name, strict: true, schema: request.jsonSchema.schema } };
         }
-        // Two minutes, not the turn path's twenty seconds: a reasoning model at medium effort
-        // thinks for a while, and nobody is waiting on the other end of this call.
         const res = yield* Effect.tryPromise({
           try: () => client().chat.completions.create(params, { timeout: 120_000 }),
           catch: (e) => new LlmCallFailed({ detail: `openai completion failed: ${String(e).slice(0, 300)}` }),
@@ -162,18 +115,15 @@ export const OpenAILlmClientLive: Layer.Layer<LlmClient, never, AppConfig> = Lay
               model: request.model,
               messages: request.messages.map((m) => ({ role: m.role, content: m.content })),
               // A reasoning model rejects sampling parameters outright (400, "unsupported
-              // parameter"). The decider runs on gpt-4.1 today, but the seam must not break the
-              // day someone points TURN_DECIDER at a reasoning model to try it.
+              // parameter"), so they are omitted rather than sent and ignored.
               ...(isReasoningModel(request.model) ? {} : { temperature: request.temperature }),
               max_completion_tokens: request.maxTokens,
               stream: true,
               stream_options: { include_usage: true },
             };
-            // Pin every turn of one call to the same prefix cache. Measured on gpt-4.1 with a
-            // growing prefix in the shape prompts.ts emits: without the key, cached_tokens stayed 0
-            // until the 4th turn (0/0/0/1664/1920); with it, the cache hit from the 2nd
-            // (0/1408/1536/1664/1920). A collections call is short enough that the difference is
-            // "caching effectively never engages" vs "engages from turn 2".
+            // Pin every turn of one call to the same prefix cache. Measured on gpt-4.1 with the
+            // prefix prompts.ts emits: without the key cached_tokens first became non-zero on the
+            // 4th turn, with it on the 2nd.
             if (request.cacheKey) params.prompt_cache_key = request.cacheKey;
             if (request.tools.length > 0) {
               params.tools = request.tools.map((t) => ({ type: "function" as const, function: { name: t.name, description: t.description, parameters: t.parameters } }));
@@ -230,20 +180,11 @@ export const OpenAILlmClientLive: Layer.Layer<LlmClient, never, AppConfig> = Lay
   }),
 );
 
-/**
- * An `LlmClient` that refuses every call.
- *
- * For wiring a service graph whose model path must not be exercised — the DB test harness, where
- * the outbox now needs a client for the judge but no test that has not asked for the judge should
- * be able to reach a model. Failing loudly beats a stub that quietly returns something.
- */
 export const NoLlmClientLive: Layer.Layer<LlmClient> = Layer.succeed(LlmClient, {
   name: "none",
   stream: () => Stream.fail(new TurnDeciderUnavailable({ detail: "no LLM client is configured in this environment" })),
   complete: () => Effect.fail(new LlmCallFailed({ detail: "no LLM client is configured in this environment" })),
 });
-
-/* ------------------------------ test doubles ------------------------------ */
 
 export interface RecordedRequest {
   readonly request: ChatRequest;
@@ -253,16 +194,8 @@ export interface RecordedCompletion {
   readonly request: CompletionRequest;
 }
 
-/**
- * A client whose replies are scripted per call and which records every request.
- * `script(i, request)` returns the deltas for the i-th call.
- */
 export const RecordingLlmClient = (
   script: (callIndex: number, request: ChatRequest) => ReadonlyArray<LlmDelta>,
-  /**
-   * Canned replies for the non-streaming path, by call index. Returning a string is a reply;
-   * returning null fails the call, which is how a judge outage is tested without a network.
-   */
   completions?: (callIndex: number, request: CompletionRequest) => string | null,
 ): { readonly layer: Layer.Layer<LlmClient>; readonly requests: RecordedRequest[]; readonly completions: RecordedCompletion[] } => {
   const requests: RecordedRequest[] = [];

@@ -1,12 +1,5 @@
 /**
- * Disk cache for synthesised fake-borrower lines.
- *
- * A voice load run (`fake-borrower-fleet`, N concurrent calls) speaks the same three scripted lines
- * in every call. Paying a TTS provider to re-synthesise 3xN identical utterances per run is pure
- * waste, so the first synthesis is written to a mono 16-bit PCM WAV keyed by
- * provider/model/voice/text and every later run replays the frames from disk.
- *
- * Frames are re-chunked to 10 ms so playout pacing matches what the TTS stream produced.
+ * Frames are re-chunked to 10 ms so replayed playout is paced like the TTS stream that produced it.
  */
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -18,7 +11,6 @@ import { AudioFrame } from "@livekit/rtc-node";
 
 const CACHE_DIR = fileURLToPath(new URL("../../.cache/borrower-lines/", import.meta.url));
 
-/** 10 ms of audio per emitted frame. */
 const FRAME_MS = 10;
 
 const wavPathFor = (key: string) => join(CACHE_DIR, `${createHash("sha256").update(key).digest("hex").slice(0, 32)}.wav`);
@@ -45,18 +37,10 @@ const writeWav = (path: string, pcm: Int16Array, sampleRate: number, channels: n
 };
 
 /**
- * Parse a WAV by walking its chunks (issue #4, H10).
- *
- * This read the header positionally — channels at byte 22, sample rate at 24, the data length at 40
- * and the samples from 44 — which is the layout of a *canonical* 44-byte RIFF header and only that.
- * A file with anything between `fmt ` and `data` reads garbage: `LIST`/`INFO` (encoder name, which
- * plenty of tools write), a `fact` chunk, padding. The failure is not a throw — it is samples read
- * from the middle of a metadata string, which is noise the borrower then speaks.
- *
- * The involuntary-sound asset D4 needs is exactly the kind of file that carries one, which is why
- * this is fixed before tier 3 rather than after the first mysterious run.
- *
- * Exported so it can be tested on a buffer rather than through the filesystem and the cache.
+ * Chunks are walked rather than read positionally: a positional reader assumes a canonical 44-byte
+ * RIFF header, and anything between `fmt ` and `data` (a `LIST`/`INFO` or `fact` chunk) then reads
+ * metadata bytes as samples — noise the borrower speaks, not a throw. Exported so it can be tested
+ * on a buffer rather than through the cache.
  */
 export const parseWav = (buf: Buffer, source = "<buffer>"): { pcm: Int16Array; sampleRate: number; channels: number } => {
   if (buf.length < 12 || buf.toString("ascii", 0, 4) !== "RIFF" || buf.toString("ascii", 8, 12) !== "WAVE") throw new Error(`not a WAV file: ${source}`);
@@ -66,9 +50,6 @@ export const parseWav = (buf: Buffer, source = "<buffer>"): { pcm: Int16Array; s
   let bitsPerSample: number | null = null;
   let data: Buffer | null = null;
 
-  // Chunks start after `RIFF<size>WAVE`; each is a four-byte id, a four-byte little-endian size,
-  // then that many bytes — padded to an even boundary, which is the part a positional reader misses
-  // even when it does walk.
   let off = 12;
   while (off + 8 <= buf.length) {
     const id = buf.toString("ascii", off, off + 4);
@@ -87,8 +68,7 @@ export const parseWav = (buf: Buffer, source = "<buffer>"): { pcm: Int16Array; s
 
   if (channels === null || sampleRate === null || bitsPerSample === null) throw new Error(`WAV has no fmt chunk: ${source}`);
   if (data === null) throw new Error(`WAV has no data chunk: ${source}`);
-  // 16-bit is what the TTS writes and what `AudioFrame` takes; anything else would be read as noise
-  // rather than converted, so it is a refusal.
+  // Anything but 16-bit would be read as noise rather than converted, so it is a refusal.
   if (bitsPerSample !== 16) throw new Error(`WAV is ${String(bitsPerSample)}-bit, expected 16: ${source}`);
 
   const pcm = new Int16Array(Math.floor(data.length / 2));
@@ -127,8 +107,8 @@ export interface SynthesizedLine {
 }
 
 /**
- * Synthesise `text` once and reuse it forever. `cacheKey` must capture everything that changes the
- * audio (provider, model, voice) so a provider switch does not replay the wrong voice.
+ * `cacheKey` must capture everything that changes the audio (provider, model, voice), or a provider
+ * switch replays the wrong voice.
  */
 export const synthesizeCached = async (tts: ttsBase.TTS, text: string, cacheKey: string): Promise<SynthesizedLine> => {
   const path = wavPathFor(`${cacheKey}::${text}`);

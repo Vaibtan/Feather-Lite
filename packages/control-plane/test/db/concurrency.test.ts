@@ -1,8 +1,3 @@
-/**
- * Concurrent turns (plan rev.2 R8): a second turn while one is in flight is rejected with
- * TurnInProgress unless it supersedes (barge-in), in which case the in-flight turn is marked
- * SUPERSEDED, a TURN_SUPERSEDED event is written, and its late commit is discarded.
- */
 import { Deferred, Effect, Fiber, Layer, Ref, Stream } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -20,7 +15,6 @@ import {
 import type { TurnFrame } from "@feather-lite/contracts";
 import { makeInfraLayer, makeRuntime, truncateAll } from "./harness.js";
 
-// A decider that blocks until released, so we can hold a turn "in flight".
 const gate = await Effect.runPromise(Deferred.make<void>());
 const decider = StaticTurnDeciderLive((input) =>
   Stream.fromEffect(Deferred.await(gate)).pipe(
@@ -67,19 +61,15 @@ describe("concurrent turns", () => {
         const frames1 = yield* Ref.make<TurnFrame[]>([]);
         const emit = (ref: Ref.Ref<TurnFrame[]>) => (f: TurnFrame) => Ref.update(ref, (xs) => [...xs, f]);
 
-        // Turn 1 starts and blocks in the decider (T1 committed, active_turn_id = t1).
         const fiber1 = yield* Effect.fork(orch.processTurn({ conversationId: started.conversationId, turnId: "t1", userText: "hello" }, emit(frames1)));
-        // Wait until T1 has committed: the turn_start frame is emitted right after T1.
         let tries = 0;
         while (!(yield* Ref.get(frames1)).some((f) => f.type === "turn_start") && tries < 200) {
           tries++;
           yield* Effect.sleep("20 millis");
         }
 
-        // Turn 2 without supersede -> TurnInProgress
         const rejected = yield* orch.processTurn({ conversationId: started.conversationId, turnId: "t2", userText: "wait" }, () => Effect.void).pipe(Effect.either);
 
-        // Turn 3 with supersede (barge-in) -> takes over; also blocks in the decider until released.
         const frames3 = yield* Ref.make<TurnFrame[]>([]);
         const fiber3 = yield* Effect.fork(orch.processTurn({ conversationId: started.conversationId, turnId: "t3", userText: "actually yes this is Jordan", supersede: true }, emit(frames3)));
         tries = 0;
@@ -87,7 +77,6 @@ describe("concurrent turns", () => {
           tries++;
           yield* Effect.sleep("20 millis");
         }
-        // Release both deciders. t1's T2 must notice it is no longer the active turn.
         yield* Deferred.succeed(gate, void 0);
         const r1 = yield* Fiber.join(fiber1);
         const r3 = yield* Fiber.join(fiber3);
@@ -98,11 +87,9 @@ describe("concurrent turns", () => {
     );
     expect(out.rejected._tag).toBe("Left");
     if (out.rejected._tag === "Left") expect(out.rejected.left).toBeInstanceOf(TurnInProgress);
-    // t1 was superseded: no AGENT_TURN for it, an error frame instead of turn_end.
     expect(out.f1.some((f) => f.type === "error" && f.code === "SUPERSEDED")).toBe(true);
     expect(out.events.some((e) => e.type === "TURN_SUPERSEDED" && e.payload.turn_id === "t1" && e.payload.superseded_by === "t3")).toBe(true);
     expect(out.events.filter((e) => e.type === "AGENT_TURN" && e.payload.turn_id === "t1")).toHaveLength(0);
-    // t3 completed normally.
     expect(out.r3.turnId).toBe("t3");
     expect(out.events.some((e) => e.type === "AGENT_TURN" && e.payload.turn_id === "t3")).toBe(true);
     expect(out.state).toBe("VERIFYING_IDENTITY");

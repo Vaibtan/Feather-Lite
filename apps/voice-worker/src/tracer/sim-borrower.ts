@@ -1,18 +1,11 @@
 /**
- * Tier 3: one seeded scenario, one call, and the numbers it produced (issue #1, D4 — Phase 1).
- *
- * A **composition**, not a second harness (issue #1, user story 29). Everything here already
- * existed: `bootstrapRoom` and `runScriptedCall` join the room and run a `BorrowerScript` (H9), the
- * line cache synthesises the persona's lines (H9), the RMS detector keeps every sample (H1),
- * `withPlayoutTruth` attaches the ledger's playout truth (H11), `turnTakingMetrics` turns the pair
- * into D4's six numbers, `makeRng` makes the stochastic parts reproducible (H7), and the equivalence
- * runner already knows how to compare a call to a scenario. This wires them to a scenario table.
+ * Tier 3: one seeded scenario, one call, and the numbers it produced. A composition of the pieces
+ * the other harnesses already use, wired to a scenario table.
  *
  *   pnpm --filter @feather-lite/voice-worker sim-borrower -- --scenario yes-during-read-back --seed 7
  *
- * The report is `docs/loadtest/${date}-tier3-${scenario}-${label}.json` and it carries the seed, the
- * scenario, the persona and the interruption mode — because a tier-3 number without those four is
- * not reproducible and should not be quoted.
+ * The report carries the seed, the scenario, the persona and the interruption mode, because a
+ * tier-3 number without those four is not reproducible.
  */
 import { fileURLToPath } from "node:url";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -31,14 +24,6 @@ initializeLogger({ pretty: true, level: "warn" });
 const t0 = Date.now();
 const log = (m: string) => console.log(`[tier3] +${String(Date.now() - t0).padStart(6)}ms ${m}`);
 
-/**
- * H6's command line, shared rather than re-invented (`harness-args.ts`).
- *
- * The first cut of this file carried its own `flag()` helper with an optional `--label` defaulting
- * to the scenario id — which is the collision `fleet-args.ts` was written to stop, and which cost a
- * tracked report on 2026-09-02. Two runs of one scenario in a day now have two reports, and a
- * misspelled flag is refused instead of ignored.
- */
 const parsed = parseSimArgs(process.argv.slice(2));
 if (!parsed.ok) {
   console.error(`[tier3] ${parsed.message}`);
@@ -55,19 +40,15 @@ if (!scenario) {
   process.exit(2);
 }
 if (scenario.needs.length > 0) {
-  // Refused rather than run-and-pass: a scenario that cannot exercise what it asserts would report a
-  // green it did not earn, which is the one thing a harness must never do.
+  // Refused rather than run-and-pass: a scenario that cannot exercise what it asserts would report
+  // a green it did not earn.
   console.error(`[tier3] ${scenario.id} cannot run yet — it needs: ${scenario.needs.join("; ")}`);
   process.exit(2);
 }
 
 /**
- * A throwaway borrower per run, minted the way the fleet mints its own.
- *
- * Tier 3 dialled the seeded demo borrower on every scenario and the sixth run of the day was
- * refused with `FREQUENCY_CAP` — a real pre-call rule doing its job, and a harness that cannot be
- * run twice is not a harness. `TRACER_BORROWER` still overrides, for the case where the point is to
- * call a particular borrower.
+ * A throwaway borrower per run: dialling one seeded borrower every time hits `FREQUENCY_CAP`, and a
+ * harness that cannot be run twice in a day is not a harness. `TRACER_BORROWER` still overrides.
  */
 const mintBorrower = async (): Promise<string> => {
   const named = process.env["TRACER_BORROWER"];
@@ -83,7 +64,6 @@ const mintBorrower = async (): Promise<string> => {
   return fixture.name;
 };
 const borrowerName = await mintBorrower();
-/** Amendment 8: every tier-3 number is a VAD-interruption number until the A/B says otherwise. */
 const INTERRUPTION_MODE = process.env["WORKER_INTERRUPTION_MODE"] ?? "vad";
 
 log(`borrower=${borrowerName}`);
@@ -91,12 +71,8 @@ log(`scenario=${scenario.id} seed=${seedGiven}(${String(seed)}) label=${label}`)
 log(scenario.what);
 
 /**
- * The persona is the seed's, unless one was named (issue #1, D4 — Phase 4).
- *
- * Voice *and* line quality together, because an accent and a bad line are the same question asked
- * twice: can the recogniser still hear the amount? One seed therefore picks a whole borrower rather
- * than two knobs a caller has to remember to set consistently. `--persona` still overrides, for the
- * case where the point is to hear one particular voice.
+ * One seed picks a whole borrower — voice and line quality together — because an accent and a bad
+ * line are the same question asked twice. `--persona` still overrides.
  */
 const named = persona === undefined ? undefined : PERSONAS.find((p) => p.id === persona || p.voice === persona);
 if (persona !== undefined && named === undefined) {
@@ -117,9 +93,8 @@ const call = await runScriptedCall({
   participantIdentity: `borrower-sim-${String(seed)}`,
   label: scenario.id,
   /**
-   * The one thing that keeps this call out of the window the product's latency claim is made from
-   * (issue #1, D4). A tier-3 call is `channel: "voice"` served by the real decider — exactly what
-   * the default SLO segment selects — so neither of the other two columns can tell it apart.
+   * What keeps this call out of the window the product's latency claim is made from: a tier-3 call
+   * is `channel: "voice"` served by the real decider, so nothing else distinguishes it.
    */
   harness: "sim",
   degradation: chosen.degradation,
@@ -133,7 +108,6 @@ if (!call.conversationId) {
   process.exit(1);
 }
 
-/** The ledger, for the expected shape and for the playout truth the metrics need. */
 const detailRes = await fetch(`${CONTROL_PLANE_URL}/api/conversations/${call.conversationId}`, { headers: harnessJsonHeaders() });
 if (!detailRes.ok) {
   console.error(`[tier3] could not read the conversation back: ${detailRes.status}`);
@@ -151,10 +125,7 @@ const playouts = detail.event_timeline
   .map((e) => ({ atMs: Date.parse(e.created_at), interrupted: e.payload["interrupted"] === true }))
   .filter((p) => Number.isFinite(p.atMs));
 
-/**
- * What the control plane decided about each turn (issue #1, D1). Read from `/latency`, which is the
- * per-turn seam; the conversation detail is per-event and has no turn rows.
- */
+/** Read from `/latency`, which is the per-turn seam; the conversation detail has no turn rows. */
 const dispositions = await (async () => {
   try {
     const res = await fetch(`${CONTROL_PLANE_URL}/api/conversations/${call.conversationId}/latency`, { headers: harnessJsonHeaders() });
@@ -168,7 +139,6 @@ const dispositions = await (async () => {
 
 const failures = checkExpectedLedger(scenario.expected, { finalOutcome: detail.conversation.final_outcome, tools, agentLines, playouts, dispositions });
 
-/** D4's six numbers, from the stretches this call actually produced. */
 const agent = withPlayoutTruth(speechWindows(call.rmsSamples), playouts);
 const metrics = turnTakingMetrics({ borrower: call.borrowerEvents, agent });
 
@@ -185,11 +155,7 @@ console.log(`                        false_interrupt ${String(metrics.false_inte
 console.log(`                        ${String(metrics.counts.unknown_truncation)} stretch(es) had no playout behind them and are excluded (H11)`);
 console.log(`  agent stretches       ${String(call.liveStretchCount)} live, ${String(agent.length)} post-hoc`);
 
-/**
- * The six numbers as scores, under H8's names (D4: "all are harness scores with the same 'harness
- * metric' labelling as WER"). Posted before the report is written, so the report can carry what the
- * ledger actually accepted rather than what was offered.
- */
+/** Posted before the report is written, so the report carries what the ledger actually accepted. */
 await postHarnessScores(
   CONTROL_PLANE_URL,
   call.conversationId,
@@ -198,13 +164,8 @@ await postHarnessScores(
 );
 
 /**
- * The two gates that lived only in README prose (P2), now in the file.
- *
- * **The SLO block is about the window this call is excluded from, and that is the point.** A tier-3
- * call is `channel: "voice"` served by the real decider, so without `harness` it would land in the
- * window the product's latency claim is made from — with audio deliberately harder than a real
- * call's. Reporting the default segment's verdict beside `excluded_from_segment: true` is how a
- * reader sees the exclusion held, rather than taking it on trust.
+ * The SLO block is about the window this call is excluded from. Reporting the default segment's
+ * verdict beside `excluded_from_segment: true` is how a reader sees the exclusion held.
  */
 const slo = await (async () => {
   try {
@@ -212,19 +173,14 @@ const slo = await (async () => {
     if (!res.ok) return { error: `HTTP ${String(res.status)}` };
     const q = (await res.json()) as { window: { conversations: number }; slo: { verdict: string; segment: unknown; breaches: string[]; insufficient: string[] } };
     return {
-      /** Of the real-call window, which this call must not be in. */
       verdict: q.slo.verdict,
       segment: q.slo.segment,
       breaches: q.slo.breaches,
       insufficient: q.slo.insufficient,
       window_conversations: q.window.conversations,
       /**
-       * The rule's claim, not this run's measurement — and labelled so nobody reads it as the
-       * latter. `latencyAggregateForSegment` filters `harness IS NOT DISTINCT FROM null`, so every
-       * window that does not ask for a harness excludes this call; the proof is the DB test
-       * "keeps a simulator call out of the real-call SLO window" in `quality.test.ts`, not this
-       * field. What this run does establish is the precondition beside it: `harness` came back
-       * `"sim"`, so the column the rule reads was actually written.
+       * The rule's claim, not this run's measurement. What this run establishes is the precondition
+       * beside it: `harness` came back `"sim"`, so the column the rule reads was actually written.
        */
       excluded_by_rule: "harness IS NOT DISTINCT FROM null (Queries.latencyAggregateForSegment)",
     };
@@ -234,10 +190,7 @@ const slo = await (async () => {
   }
 })();
 
-/**
- * The deterministic compliance checks for **this** conversation, from the ledger's own evaluator —
- * not recomputed here, because a harness that grades itself is not a gate.
- */
+/** From the ledger's own evaluator, not recomputed here: a harness that grades itself is not a gate. */
 const compliance = await (async () => {
   try {
     const res = await fetch(`${CONTROL_PLANE_URL}/api/conversations/${call.conversationId}/scores`, { headers: harnessJsonHeaders() });
@@ -258,7 +211,6 @@ const compliance = await (async () => {
 const report = {
   tier: "3-sim",
   scenario: scenario.id,
-  /** All four, because a tier-3 number without them is not reproducible (D4). */
   seed: { given: seedGiven, resolved: seed },
   persona: { id: chosen.id, voice: chosen.voice, requested: persona ?? null, degradation: chosen.degradation },
   interruption_mode: INTERRUPTION_MODE,
@@ -279,9 +231,8 @@ const report = {
   slo,
   compliance,
   /**
-   * Placeholder, and named as one. `stt.entity_er` — the error rate on the amounts, dates and names
-   * a collections call turns on — is issue #1's D3, and a zero here would read as "no entity errors"
-   * rather than "not measured yet". The key exists so the schema does not change under Phase 3.
+   * Placeholder, and named as one: a zero here would read as "no entity errors" rather than "not
+   * measured". The key exists so the schema does not change when it is.
    */
   entities: { measured: false, entity_er: null, note: "stt.entity_er is D3 (Phase 3); not measured" },
   agent_stretches: { live: call.liveStretchCount, post_hoc: agent.length },

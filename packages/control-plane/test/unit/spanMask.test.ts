@@ -1,20 +1,8 @@
-/**
- * The sibling `llmLeak.test.ts` asked for (D3). That test asserts on every request body leaving
- * this system **for a model**; this one asserts on the body leaving it **for the trace backend**,
- * which is the other place account data can land and the one nothing was watching.
- *
- * The two are deliberately different in kind. The model boundary is structural — `visibleContext`
- * decides whether the balance is in the prompt at all — and the leak test proves the structure
- * holds. By the time a span is exported the call is over and the agent has legitimately said the
- * numbers out loud, so the question here is not "should this have been said" but "should a second
- * store keep it", and the answer is a redaction over the exported body.
- */
 import { describe, expect, it } from "vitest";
 import { spanMask } from "../../src/services/Tracing.js";
 
 describe("spanMask (the Langfuse export boundary)", () => {
   it("masks the account facts in a turn span's input and output", () => {
-    // The shape `emit` writes: the SDK hands the mask the serialised attribute.
     const attribute = JSON.stringify({
       input: { user_text: "I can pay 550 dollars on 2026-08-21." },
       output: { agent_text: "Your balance is $550.00, and it was due 2026-08-01.", tool: "record_promise_to_pay", outcome: "PROMISE_TO_PAY" },
@@ -22,7 +10,6 @@ describe("spanMask (the Langfuse export boundary)", () => {
     const masked = JSON.parse(spanMask({ data: attribute }) as string) as { input: { user_text: string }; output: { agent_text: string; tool: string; outcome: string } };
     expect(masked.input.user_text).toBe("I can pay [amount] on [date].");
     expect(masked.output.agent_text).toBe("Your balance is [amount], and it was due [date].");
-    // The reason the call is worth reading at all survives.
     expect(masked.output.tool).toBe("record_promise_to_pay");
     expect(masked.output.outcome).toBe("PROMISE_TO_PAY");
   });
@@ -47,10 +34,7 @@ describe("spanMask (the Langfuse export boundary)", () => {
     expect(JSON.parse(spanMask({ data: attribute }) as string)).toEqual({ latency_decide_ttft_ms: 1234, latency_eou_delay_ms: 578, state: "DISCUSSING_PAYMENT", superseded: false });
   });
 
-  it("masks the phrasing the fleet actually speaks, and the shapes a tool actually returns (review #13)", () => {
-    // The three the review found. Each reached Langfuse in full before this: the borrower's own
-    // line ("I can pay 550" — no currency mark anywhere), a callback number, and an account fact
-    // that arrived as a number under its key rather than as words in a sentence.
+  it("masks the phrasing the fleet actually speaks, and the shapes a tool actually returns", () => {
     const attribute = JSON.stringify({
       input: { user_text: "I can pay 550, call me on 555-123-4567." },
       output: { tool: "record_promise_to_pay", args: { balance_due: 1250, days_past_due: 45 } },
@@ -65,8 +49,6 @@ describe("spanMask (the Langfuse export boundary)", () => {
   });
 
   it("still leaves every measurement alone, which is the counter-case the new rules risk", () => {
-    // The new rules widen what is masked, so the thing worth re-asserting is what they must not
-    // reach: a redacted latency is a lying instrument, and so is a redacted turn count.
     const attribute = JSON.stringify({
       latency_decide_ttft_ms: 1234,
       turn_index: 3,

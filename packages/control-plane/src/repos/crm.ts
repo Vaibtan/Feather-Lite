@@ -1,6 +1,3 @@
-/**
- * CRM-side repository: borrowers, contact points, loans, agent versions.
- */
 import { Effect, Option, Schema } from "effect";
 import { SqlSchema } from "@effect/sql";
 import { PgClient } from "@effect/sql-pg";
@@ -22,7 +19,7 @@ export class CrmRepo extends Effect.Service<CrmRepo>()("@feather-lite/CrmRepo", 
       execute: (id) => sql`SELECT ${sql.unsafe(BORROWER_COLS)} FROM borrowers WHERE id = ${id}`,
     });
 
-    /** Row lock for the duration of the transaction (serialises call starts per borrower). */
+    // Held for the whole transaction, which is what serialises call starts per borrower.
     const lockBorrower = SqlSchema.findOne({
       Request: Schema.String,
       Result: BorrowerRow,
@@ -58,7 +55,6 @@ export class CrmRepo extends Effect.Service<CrmRepo>()("@feather-lite/CrmRepo", 
         WHERE borrower_id = ${borrowerId} AND contact_point_id = ${contactPointId}`,
     });
 
-    /** The loan to discuss: most delinquent first, then earliest due. One loan per borrower in the demo. */
     const primaryLoanForBorrower = SqlSchema.findOne({
       Request: Schema.String,
       Result: LoanRow,
@@ -85,7 +81,6 @@ export class CrmRepo extends Effect.Service<CrmRepo>()("@feather-lite/CrmRepo", 
       execute: () => sql`SELECT id, name, prompt_hash, status FROM agent_versions WHERE status = 'ACTIVE' ORDER BY created_at DESC LIMIT 1`,
     });
 
-    /** Ensures one ACTIVE agent version exists (bootstrap) and returns it. */
     const ensureActiveAgentVersion = (id: string, name: string, promptHash: string) =>
       Effect.gen(function* () {
         const existing = yield* findActiveAgentVersion();

@@ -1,19 +1,3 @@
-/**
- * A voice re-dial needs somewhere to dial (C4).
- *
- * `prepare` checked `hasMediaPlane` — is there a LiveKit at all — and then dispatched the retry in
- * `sip` mode. But the SIP trunk is worker-side configuration the control plane never saw, so on the
- * self-hosted profile, which has no trunk, the loop ran like this: the retry is scheduled, a
- * conversation and a room are created, an agent is dispatched, the worker finds no trunk and hangs
- * up `sip_not_configured`, the call finalizes `NO_ANSWER`, and `NO_ANSWER` schedules another retry.
- * Round and round to the 7-in-7 cap, each lap taking a room, a dispatch and a worker job slot that
- * counts against `WORKER_MAX_JOBS` — so a fleet run sharing the box loses capacity to calls that
- * never had anywhere to go. Observed live on 2026-09-02: 55 done and 26 pending `RETRY_CALL` rows,
- * and `sip_not_configured` in the worker log about every four minutes.
- *
- * The media plane and the ability to dial out are two different questions, and this asserts the
- * second is now asked before anything is written.
- */
 import { DateTime, Effect, Layer, Redacted } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -34,7 +18,6 @@ import { makeInfraLayer, makeRuntime, truncateAll } from "./harness.js";
 
 const NOW = DateTime.unsafeMake("2026-08-16T14:00:00Z");
 
-/** A media plane exists. Whether it can place an outbound call is the separate question. */
 const LIVEKIT = { url: "ws://localhost:7880", apiKey: "devkey", apiSecret: Redacted.make("secret"), agentName: "feather-lite-agent" };
 
 const services = Layer.mergeAll(
@@ -77,7 +60,6 @@ const seedRetry = (name: string, channel: "voice" | "simulated") =>
     return { actionId, borrowerId };
   });
 
-/** A voice call in progress, opened with a given origin. */
 const seedCall = (name: string, phoneValue: string, origin: "browser" | "sip") =>
   Effect.gen(function* () {
     const sql = yield* PgClient.PgClient;
@@ -92,7 +74,6 @@ const seedCall = (name: string, phoneValue: string, origin: "browser" | "sip") =
     return { borrowerId, conversationId: started.conversationId };
   });
 
-/** Conversations opened for this borrower — the row a failed re-dial must not leave behind. */
 const conversationsFor = (borrowerId: string) =>
   Effect.gen(function* () {
     const sql = yield* PgClient.PgClient;
@@ -126,9 +107,8 @@ describe("a scheduled voice re-dial with no SIP trunk", () => {
     expect(out.results).toHaveLength(1);
     expect(out.results[0]?.status).toBe("FAILED");
     expect(out.results[0]?.detail).toMatchObject({ reason: NO_SIP_TRUNK });
-    // The whole point: the guard runs before `startCall`, so nothing is written that the sweeper
-    // will later book as an orphaned call, and the funnel does not count an attempt that was never
-    // placed. Without the guard the run gets as far as `DISPATCH_FAILED`, which is after both rows.
+    // The guard runs before `startCall`; without it the run gets as far as `DISPATCH_FAILED`, which
+    // is after both rows are written.
     expect(out.conversations).toHaveLength(0);
     expect(out.attempts).toHaveLength(0);
   });
@@ -147,14 +127,11 @@ describe("a scheduled voice re-dial with no SIP trunk", () => {
         }),
       ),
     );
-    // One row, terminal. Not a PENDING one waiting to do it all again.
     expect(out.map((r) => r.status)).toEqual(["FAILED"]);
   });
 
   it("schedules no re-dial at all for a call that only ever existed in a browser", async () => {
-    // Every call the load harness places is one of these: a WebRTC session in a tab, with no phone
-    // leg. A `RETRY_CALL` is dispatched `sip`, outbound, so there is no number that would reach this
-    // borrower again — and scheduling one anyway is how the loop this commit's sibling closed began.
+    // A `RETRY_CALL` is dispatched `sip`, outbound, so a browser-only call has no number to reach.
     const out = await noTrunk.runPromise(
       withFrozenClock(NOW)(
         Effect.gen(function* () {
@@ -162,7 +139,6 @@ describe("a scheduled voice re-dial with no SIP trunk", () => {
           const browser = yield* seedCall("Browser Caller", "+15550009101", "browser");
           const sip = yield* seedCall("Dialled Caller", "+15550009102", "sip");
           const orch = yield* Orchestrator;
-          // A call nobody answered, on both origins.
           yield* orch.processSignal(browser.conversationId, { kind: "no_answer" });
           yield* orch.processSignal(sip.conversationId, { kind: "no_answer" });
           const retries = (borrowerId: string) =>
@@ -175,7 +151,6 @@ describe("a scheduled voice re-dial with no SIP trunk", () => {
       ),
     );
     expect(out.browserRetries).toHaveLength(0);
-    // The outbound call still retries, because that one has somewhere to go.
     expect(out.sipRetries).toHaveLength(1);
   });
 

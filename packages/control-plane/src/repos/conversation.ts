@@ -1,11 +1,6 @@
 /**
- * Conversation-side repository: workflow executions, call attempts, conversations,
- * the append-only event log, and turn idempotency records.
- *
- * Invariants enforced here (SPEC §6.3, §11.1):
- *   - `sequence_no` is strictly increasing per conversation; callers hold the conversation
- *     row lock (`lockConversation`) for the whole transaction that appends events.
- *   - one conversation per call attempt (unique constraint).
+ * `sequence_no` is strictly increasing per conversation, which holds only because callers take the
+ * conversation row lock for the whole transaction that appends events.
  */
 import { Effect, Schema } from "effect";
 import { SqlSchema, type Statement } from "@effect/sql";
@@ -51,8 +46,6 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
   effect: Effect.gen(function* () {
     const sql = yield* PgClient.PgClient;
 
-    /* ----------------------------- workflows ----------------------------- */
-
     const findOpenWorkflow = SqlSchema.findOne({
       Request: Schema.Struct({ borrowerId: Schema.String, loanId: Schema.String, workflowType: Schema.String }),
       Result: WorkflowExecutionRow,
@@ -89,8 +82,6 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
     const setWorkflowStatus = (id: string, status: WorkflowExecutionStatus) =>
       sql`UPDATE workflow_executions SET status = ${status}, updated_at = now() WHERE id = ${id}`.pipe(Effect.asVoid);
 
-    /* ----------------------------- attempts ----------------------------- */
-
     const insertAttempt = (row: {
       id: string;
       workflowExecutionId: string;
@@ -99,24 +90,6 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
       startedAt: Date;
     }) => sql`INSERT INTO call_attempts ${sql.insert({ ...row, attemptStatus: "INITIATED" })}`.pipe(Effect.asVoid);
 
-    /**
-     * The five rows the prompt context needs, in one round trip (D5).
-     *
-     * `ContextBuilder` asked for borrower, attempt, workflow, contact point and loan one at a time,
-     * and it does so inside T1 while the conversation row lock is held — five serial round trips on
-     * one pooled connection, on the hot path of every turn. They are one join: the attempt names
-     * the workflow and the contact point, and the borrower and the loan hang off the borrower id
-     * the conversation row already carries.
-     *
-     * Written as a purpose-built query rather than a generic join helper because the *question* is
-     * specific: this is "what does the prompt need to know", and the caller should not have to
-     * reassemble it from five row types.
-     *
-     * `LEFT JOIN LATERAL` for the loan keeps `primaryLoanForBorrower`'s ordering
-     * (`delinquency_days DESC, due_date ASC, id ASC`) exactly, and keeps the row when there is no
-     * loan — a borrower with none has a public context and no protected one, which the gate
-     * already understands.
-     */
     const contextForConversation = SqlSchema.findOne({
       Request: Schema.Struct({ borrowerId: Schema.String, callAttemptId: Schema.String }),
       Result: ConversationContextRow,
@@ -168,8 +141,6 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
         WHERE w.borrower_id = ${borrowerId} AND a.contact_point_id = ${contactPointId} AND a.started_at >= ${since}`,
     });
 
-    /* --------------------------- conversations --------------------------- */
-
     const insertConversation = (row: {
       id: string;
       callAttemptId: string;
@@ -177,11 +148,8 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
       agentVersionId: string;
       startedAt: Date;
       channel: string;
-      /** How the voice leg was established, so a re-dial knows whether it can be placed (C4). */
       origin: string;
-      /** Which harness placed the call; null means a real caller did (issue #1, D4). */
       harness: string | null;
-      /** Which conversationalist will serve this call, for the SLO segment (O2). */
       decider: string;
     }) => sql`INSERT INTO conversations ${sql.insert({ ...row, finalOutcomeMetadata: sql.json({}), currentState: "GREETING" })}`.pipe(Effect.asVoid);
 
@@ -191,7 +159,6 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
       execute: (id) => sql`SELECT ${sql.unsafe(CONV_COLS)} FROM conversations WHERE id = ${id}`,
     });
 
-    /** Row lock; hold for the whole transaction that mutates state or appends events. */
     const lockConversation = SqlSchema.findOne({
       Request: Schema.String,
       Result: ConversationRow,
@@ -230,7 +197,6 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
       execute: () => sql`SELECT count(*)::text AS count FROM conversations`,
     });
 
-    /** Durable counts for the status page: outcomes and guardrail events across the whole ledger. */
     const outcomeCounts = SqlSchema.findAll({
       Request: Schema.Void,
       Result: Schema.Struct({ outcome: Schema.String, count: Schema.NumberFromString }),
@@ -245,33 +211,6 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
         GROUP BY 1 ORDER BY 1`,
     });
 
-    /**
-     * The reliability counts D6 asks for, derived from the ledger rather than incremented in
-     * process (spec 2026-08-26, D6).
-     *
-     * The first version of this incremented an in-memory counter as each event was written. That
-     * was wrong twice over: the write happens inside the three-phase turn's transaction, so a
-     * rollback after the append left the counter claiming an event that no longer exists; and it
-     * put an interpretation of every event type inside a repository whose job is CRUD. Every one of
-     * these is a fact about committed rows, so counting them as such is both simpler and exact —
-     * and it survives a restart, which a process counter does not.
-     *
-     * `readbacks_repeated_unheard` keys off the rejection detail because `record_promise_to_pay` /
-     * INVALID_ARGS covers two opposite situations: the fully-heard guard refusing a real proposal
-     * the borrower did not hear, and the model asking to record a promise that was never proposed.
-     * Only the first is a read-back repeated unheard.
-     */
-    /**
-     * The same six counts over an explicit set of conversations (O10).
-     *
-     * The all-time variant below is what the Quality page was showing under a "last N calls"
-     * header: a report whose funnel, SLO and promises all describe one window, with one card
-     * silently describing every call ever made. It is also a full scan of `conversation_events`
-     * with a correlated NOT EXISTS, which is why `/status` costs ~0.29 s on a 14 000-conversation
-     * database regardless of what else is optimised.
-     *
-     * Same predicates, same SQL twins of the domain's rules — only the scope differs.
-     */
     const { unheardPlayout, notSuperseded } = silentPlayoutSql(sql);
     const EMPTY_COUNTS = { turnsSuperseded: 0, noInputCloses: 0, deciderUnavailable: 0, ttsSilentPlayouts: 0, readbacksRepeatedUnheard: 0, callsOrphaned: 0 };
     const countReliability = (scope: Statement.Fragment) =>
@@ -313,10 +252,8 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
     const reliabilityCountsFor = (conversationIds: ReadonlyArray<string>) =>
       conversationIds.length === 0 ? Effect.succeed(EMPTY_COUNTS) : countReliability(sql`conversation_id IN ${sql.in(conversationIds)}`);
 
-    /** All-time. A full scan with a correlated NOT EXISTS: ~0.29 s on 14 000 conversations. */
     const reliabilityCounts = () => countReliability(sql`true`);
 
-    /** Prior completed conversations for cross-call memory (newest first). */
     const priorConversations = SqlSchema.findAll({
       Request: Schema.Struct({ borrowerId: Schema.String, excludeId: Schema.String, limit: Schema.Number }),
       Result: Schema.Struct({
@@ -331,13 +268,11 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
         ORDER BY started_at DESC LIMIT ${limit}`,
     });
 
-    /** Atomically claim the active turn slot. Returns false if another turn is active. */
     const claimTurn = (conversationId: string, turnId: string) =>
       sql`UPDATE conversations SET active_turn_id = ${turnId} WHERE id = ${conversationId} AND active_turn_id IS NULL RETURNING id`.pipe(
         Effect.map((rows) => rows.length === 1),
       );
 
-    /** Force-take the slot (barge-in supersedes). Returns the previously active turn id, if any. */
     const takeOverTurn = (conversationId: string, turnId: string) =>
       sql<{ readonly previous: string | null }>`
         UPDATE conversations c SET active_turn_id = ${turnId}
@@ -373,31 +308,9 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
       return sql`UPDATE conversations SET ${sql.update(values)} WHERE id = ${id}`.pipe(Effect.asVoid);
     };
 
-    /* ------------------------------ events ------------------------------ */
-
-    /**
-     * Number the row and write it in **one** statement.
-     *
-     * It used to be two: `SELECT COALESCE(MAX(sequence_no),0)+1` and then an `INSERT` with the
-     * answer. Together they were a sixth of every statement this system executes — 2 200 calls each
-     * over a C=100 run, and a terminal turn writes eight events, so sixteen round trips inside the
-     * conversation row lock for what is one write.
-     *
-     * **What was actually costing anything.** `pg_stat_statements` put the aggregate at 0.045 ms a
-     * call: it is an index-only `MAX` over `(conversation_id, sequence_no)`, and 2 200 of them are
-     * 99 ms of server time in a run that spends 1 450. The cost was never the aggregate — it was
-     * the round trip, the event-loop turn, and the pool checkout, all held under the row lock.
-     *
-     * **Which is why `conversations.next_sequence_no` is not built.** D5b offered it as the
-     * alternative and told the implementer to choose on the numbers: a counter column would save
-     * those 99 ms and add a second write to the hottest row in the schema on every event, to remove
-     * a round trip this already removes. The spec says do not ship both; this is the one the
-     * measurement argues for.
-     *
-     * The safety property is unchanged. The caller still holds the conversation row lock, so the
-     * `MAX` cannot race, and `UNIQUE (conversation_id, sequence_no)` is still the backstop if a
-     * caller ever forgets.
-     */
+    // A `conversations.next_sequence_no` counter column was rejected: it would add a second write to
+    // the hottest row in the schema on every event to remove a round trip this single statement
+    // already removes.
     const insertEventRow = SqlSchema.single({
       Request: Schema.Struct({
         id: Schema.String,
@@ -414,10 +327,6 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
         RETURNING sequence_no::text AS sequence_no`,
     });
 
-    /**
-     * Append one event. Caller must hold the conversation row lock (transaction) so the
-     * MAX+1 sequence number is race-free. Returns the stored record.
-     */
     const appendEvent = (params: { id: string; conversationId: string; event: ConversationEvent; createdAt: Date }) =>
       Effect.gen(function* () {
         const { sequenceNo } = yield* insertEventRow({
@@ -443,25 +352,9 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
         WHERE conversation_id = ${conversationId} ORDER BY conversation_events.sequence_no ASC`,
     });
 
-    /** Events decoded into the domain union. Rows that fail to decode are skipped (logged upstream). */
-    /**
-     * The non-interruptible segment this conversation is still playing, if any (issue #1 D1, F2).
-     *
-     * An `AGENT_TURN` with `speak_mode: 'non_interruptible'` and **no** `AGENT_TURN_PLAYOUT` behind
-     * it: the agent was told to say something the borrower may not talk over, and the worker has not
-     * yet reported that it finished. That is the window in which a barge-in produces the repeated
-     * read-back — the borrower's "yes" commits a turn, the fully-heard guard refuses it because the
-     * read-back was not heard in full, and eight seconds play again.
-     *
-     * **No `FOR UPDATE`, and no transaction.** The thing being waited for is reported by a different
-     * process, so the ledger is the only place every replica can observe it; and holding a row lock
-     * for the length of a spoken sentence is not something a claim transaction may do. This is why
-     * `held` is a phase before T1 rather than a step inside it.
-     *
-     * `ttsAudioMs` is usually null here: it reaches `conversation_turns.result` on the later
-     * `turn_metrics` signal, which the worker sends *after* the segment finishes. `holdPolicy` has a
-     * bounded default for exactly that.
-     */
+    // No `FOR UPDATE` and no transaction: the playout is reported by a different process, and holding
+    // the conversation row lock for the length of a spoken sentence is not something a claim
+    // transaction may do.
     const unreportedNonInterruptible = (conversationId: string) =>
       Effect.gen(function* () {
         const rows = yield* sql<{ turnId: string | null; channel: string; createdAt: Date; ttsAudioMs: number | null }>`
@@ -477,9 +370,8 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
             AND e.type = 'AGENT_TURN'
             AND e.payload->>'speak_mode' = 'non_interruptible'
             -- The opening is reported by the opening_played signal, never by an AGENT_TURN_PLAYOUT,
-            -- so it is permanently unreported and would hold the first real turn of every voice call
-            -- for evidence that never arrives. Found by running it: a live call took heldMs 4257 on
-            -- turn one, superseded the borrower payment offer, and ended NO_ANSWER with no promise.
+            -- so it is permanently unreported and would otherwise hold the first real turn of every
+            -- voice call waiting for evidence that never arrives.
             AND e.payload->>'turn_id' IS DISTINCT FROM 'opening'
             AND NOT EXISTS (
               SELECT 1 FROM conversation_events p
@@ -494,13 +386,6 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
         return { turnId: row.turnId, channel: row.channel, startedAtMs: row.createdAt.getTime(), ttsAudioMs: row.ttsAudioMs };
       });
 
-    /**
-     * What the control plane did about the previous turn (issue #1, D1).
-     *
-     * Read from `conversation_turns.result`, which is where `TurnResult` already lands — the ledger
-     * is the truth about the call (Q4), and a second consecutive `wait` has to be recognised from
-     * something durable rather than from process memory a replica would not share.
-     */
     const lastDisposition = (conversationId: string, excludingTurnId: string) =>
       Effect.gen(function* () {
         const rows = yield* sql<{ disposition: string | null }>`
@@ -527,8 +412,6 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
         ),
       );
 
-    /* ------------------------------ turns ------------------------------ */
-
     const insertTurn = (row: { conversationId: string; turnId: string; userText: string; startedAt: Date }) =>
       sql`INSERT INTO conversation_turns ${sql.insert({ ...row, status: "RUNNING" })}`.pipe(Effect.asVoid);
 
@@ -550,17 +433,6 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
       sql`UPDATE conversation_turns SET status = ${params.status}, result = ${sql.json(params.result)}, finished_at = ${params.finishedAt}
           WHERE conversation_id = ${params.conversationId} AND turn_id = ${params.turnId}`.pipe(Effect.asVoid);
 
-    /**
-     * The TTS shape the voice worker reported per turn (D5). Read back post-call by the EVALUATION
-     * job, which otherwise only sees events — these numbers arrive on the `turn_metrics` signal and
-     * live in the turn row, not in the ledger, because they are telemetry rather than something
-     * that happened on the call.
-     */
-    /**
-     * The four latency components per turn, for the per-call SLO verdict the EVALUATION job writes
-     * (O6). Separate from `turnTtsFacts` because they answer different questions and this one runs
-     * post-call, once, rather than on every page load.
-     */
     const turnLatencyFacts = SqlSchema.findAll({
       Request: Schema.String,
       Result: Schema.Struct({
@@ -593,11 +465,6 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
         ORDER BY started_at ASC`,
     });
 
-    /**
-     * Merge extra keys into a finished turn's `result` without disturbing what is already there.
-     * Used for the voice worker's latency numbers, which arrive after the turn has been written.
-     * `||` is jsonb concatenation, so this is a single statement and needs no read-modify-write.
-     */
     const mergeTurnResult = (params: { conversationId: string; turnId: string; patch: Record<string, unknown> }) =>
       sql`UPDATE conversation_turns SET result = COALESCE(result, '{}'::jsonb) || ${sql.json(params.patch)}
           WHERE conversation_id = ${params.conversationId} AND turn_id = ${params.turnId}`.pipe(Effect.asVoid);

@@ -1,17 +1,10 @@
-/**
- * DB test harness: one ManagedRuntime per test file over the real Postgres (docker-compose,
- * DATABASE_URL). Migrations run on first use; `truncateAll` resets data between files.
- */
 import { Effect, Layer, ManagedRuntime, Redacted } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import pg from "pg";
 import { AppConfigTest, DatabaseLive, Metrics, NoLlmClientLive, NoopTracingLive, Queries } from "../../src/index.js";
 import type { AppConfigShape } from "../../src/index.js";
 
-/**
- * Tests use their own database (`<db>_test`) so `pnpm test:db` never wipes dev/demo data.
- * The database is created on first use through the maintenance connection.
- */
+/** Tests use their own `<db>_test` database so a run never wipes dev or demo data. */
 const baseUrl = process.env["DATABASE_URL"] ?? "postgres://postgres:postgres@localhost:5434/feather_lite";
 const testUrl = /_test$/.test(baseUrl) ? baseUrl : `${baseUrl}_test`;
 const ensureTestDatabase = Effect.promise(async () => {
@@ -33,15 +26,9 @@ const ensureTestDatabase = Effect.promise(async () => {
 });
 
 /**
- * Infra every DB test needs: the test database, a no-op Tracing (the orchestrator traces every turn
- * now, and no test should be exporting spans anywhere) and one Metrics instance shared by every
- * service under test — the counters only add up if the decider and the orchestrator write to the
- * same one. A test that wants to assert on what was traced provides `RecordingTracing().layer` over
- * the top.
- *
- * The refusing LLM client is deliberate: the outbox needs one for the judge, and a test that has
- * not explicitly asked for a model must not be able to reach one. Judge tests provide
- * `RecordingLlmClient(...).layer` over the top.
+ * Metrics is merged once so every service under test writes to the same instance; the counters only
+ * add up if the decider and the orchestrator share one. The LLM client refuses by default so a test
+ * that has not explicitly asked for a model cannot reach one.
  */
 export const makeInfraLayer = (overrides: Partial<AppConfigShape> = {}) =>
   Layer.unwrapEffect(
@@ -63,12 +50,9 @@ export const truncateAll = Effect.gen(function* () {
 export const makeRuntime = <R, E>(layer: Layer.Layer<R, E, never>) => ManagedRuntime.make(layer);
 
 /**
- * What the voice worker reports after speaking an agent line: how much of it the borrower heard.
- *
- * A `voice` fixture that drives a promise to pay has to report this, because the fully-heard guard
- * (C1) refuses to record a promise whose read-back nothing says was heard — the absence of a report
- * is the absence of evidence, not a pass. The text is read back out of the ledger rather than
- * written into the fixture so the report says what the agent actually said.
+ * The fully-heard guard refuses to record a promise nothing reports as heard, so a fixture driving
+ * one must report playout. The text is read back out of the ledger rather than written into the
+ * fixture, so the report says what the agent actually said.
  */
 export const playoutOfAgentTurn = (conversationId: string, turnId: string) =>
   Effect.gen(function* () {

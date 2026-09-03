@@ -1,7 +1,3 @@
-/**
- * HttpApi implementation for `FeatherApi`. Thin: decode → service → encode; the domain error
- * channel is mapped to the API's typed errors here and nowhere else.
- */
 import { HttpApiBuilder, HttpServerRequest, HttpServerResponse } from "@effect/platform";
 import { DateTime, Effect, Option, Stream } from "effect";
 import { PgClient } from "@effect/sql-pg";
@@ -36,13 +32,7 @@ import { WorkflowService } from "../services/Workflow.js";
 import { Metrics } from "../services/Metrics.js";
 import { TurnRunner } from "./TurnRunner.js";
 
-/**
- * Reported by `/healthz`, and as the `version` label on `/metrics` build info. One constant so a
- * scraper's view of which build is running cannot drift from the health check's.
- */
 const SERVICE_VERSION = "2.0.0";
-
-/* --------------------------- error mapping --------------------------- */
 
 const mapNotFound = (e: NotFound) => new ApiNotFound({ entity: e.entity, id: e.id });
 const mapConflict = (e: ConversationCompleted | TurnInProgress | TurnSuperseded) =>
@@ -86,8 +76,6 @@ const sseBytes = (frames: Stream.Stream<TurnFrame>): Stream.Stream<Uint8Array> =
     Stream.map(([frame, i]) => encoder.encode(`id: ${i + 1}\nevent: ${frame.type}\ndata: ${JSON.stringify(encodeFrame(frame))}\n\n`)),
   );
 
-/* ------------------------------ groups ------------------------------ */
-
 export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) =>
   Effect.gen(function* () {
     const cfg = yield* AppConfig;
@@ -101,38 +89,18 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
       .handle("healthz", () => Effect.succeed({ status: "ok" as const, version: SERVICE_VERSION }))
       .handle("readyz", () =>
         Effect.gen(function* () {
-          /**
-           * Bounded, because the failure this probe exists to catch does not answer (C11).
-           *
-           * An unreachable Postgres fails the query and was always reported. A **pool** with no free
-           * connection does not fail: `SELECT 1` waits for one, so a process wedged by the exact
-           * problem readiness is for answered nothing at all and the probe hung with it — which a
-           * load balancer reads as a slow instance rather than an unready one. Two seconds is far
-           * longer than this query has ever taken and far shorter than any sensible probe timeout.
-           */
+          // Bounded because the failure this probe exists to catch does not answer: an exhausted
+          // pool does not fail `SELECT 1`, it waits, and an unbounded probe hangs with it.
           yield* sql`SELECT 1`.pipe(
             Effect.timeoutFail({ duration: "2 seconds", onTimeout: () => new ApiUnavailable({ message: "database probe timed out after 2s (pool exhausted?)" }) }),
             Effect.mapError(() => new ApiUnavailable({ message: "database not reachable" })),
           );
-          /**
-           * A loop that was never registered at all (C11). `staleLoops()` can only speak about loops
-           * it has heard of, so a process that fell over before starting its schedulers had an empty
-           * registry and read as ready: "no loops are late" and "there are no loops" are opposite
-           * facts that looked identical.
-           */
+          // `staleLoops()` can only speak about loops it has heard of, so an empty registry must
+          // not read as ready: "no loops are late" and "there are no loops" are opposite facts.
           const missing = yield* processMetrics.missingLoops();
           if (missing.length > 0) {
             return yield* Effect.fail(new ApiUnavailable({ message: `background loop(s) never started: ${missing.join(", ")}` }));
           }
-          /**
-           * Every background loop must have ticked recently (D3). A process that cannot reach
-           * Postgres is obviously not ready; a process whose outbox fiber died is *also* not ready,
-           * and it used to answer this endpoint with a cheerful "ready" because the only question
-           * asked was whether a `SELECT 1` came back.
-           *
-           * Three of a loop's own intervals, so one slow tick is not an outage and a genuinely
-           * stopped loop is caught within about half a minute.
-           */
           const stale = yield* processMetrics.staleLoops();
           if (stale.length > 0) {
             return yield* Effect.fail(
@@ -147,10 +115,6 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
           return { status: "ready" as const, database: "ok" as const, loops };
         }),
       )
-      /**
-       * Built from the same snapshot `/status` serves, so the two surfaces cannot disagree — see
-       * `prometheus.ts` for why the library's default metrics are deliberately not collected.
-       */
       .handle("metrics", () =>
         Effect.gen(function* () {
           const snapshot = yield* processMetrics.snapshot();
@@ -167,14 +131,7 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
           const beats = yield* queries.heartbeats().pipe(Effect.catchAll(() => Effect.succeed([])));
           const now = Date.now();
           const ledger = yield* queries.ledgerCountsForStatus().pipe(Effect.catchAll(() => Effect.succeed({ conversations_total: 0, outcomes: {}, guardrails: {}, reliability: {} })));
-          // Read once and reused below: the rate-limit block reports three of these by name, and
-          // taking a second snapshot could disagree with the first.
           const counters = yield* metrics.snapshot();
-          /**
-           * The snapshot is `{uptime_seconds, counters: {...}, histograms: {...}}`, so a named
-           * counter lives one level down. Read as `unknown` and coerced rather than cast: a missing
-           * counter is 0 requests, which is the truth before the first one is shed.
-           */
           const counted = (name: string): number => {
             const inner = (counters as { counters?: Record<string, unknown> }).counters ?? {};
             const v = inner[name];
@@ -186,11 +143,6 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
             agents: beats.map((b) => ({ ...b, online: now - Date.parse(b.last_seen_at) < 30_000 })),
             counters,
             ledger,
-            // The counters are already wire-shaped; the ring is internal camelCase, so it is
-            // mapped here rather than snake-casing the service's own type.
-            // D6 puts the SLO verdict on status, not only on the quality report: an operator
-            // glancing at health should see whether latency is meeting its target without opening
-            // a second page. Over the most recent 50 calls, which is what "right now" means here.
             slo: yield* quality.sloStatus(50),
             provider_events: yield* metrics
               .providerEvents()
@@ -205,21 +157,12 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
               })),
             ),
             rate_limiting: {
-              /**
-               * **Every count here is per process, since boot** (F5).
-               *
-               * They are in-memory counters and the buckets are an in-memory map, so a restart
-               * zeroes them and a second replica keeps its own. A reader who takes
-               * `rejected_daily_cap: 0` for "nobody hit the cap today" is reading it wrong, and the
-               * field says so rather than relying on them knowing.
-               */
               basis: "per process, since boot",
               per_minute: cfg.rateLimitPerMinute,
               daily_turn_cap: cfg.dailyTurnCap,
               rejected_start: counted("rate_limited_start"),
               rejected_turn: counted("rate_limited_turn"),
               rejected_daily_cap: counted("rate_limited_daily_cap"),
-              /** Requests exempted by `RATE_LIMIT_BYPASS_TOKEN` (O9) — a harness run, or a leak. */
               bypassed: counted("rate_limit_bypassed"),
               buckets: rateLimitBucketCount(),
             },
@@ -231,8 +174,8 @@ export const SystemLive = HttpApiBuilder.group(FeatherApi, "system", (handlers) 
         Effect.gen(function* () {
           const now = DateTime.toDateUtc(yield* DateTime.now);
           yield* sched.upsertHeartbeat(payload.agent_name, now, payload.meta ?? {}).pipe(Effect.orDie);
-          // Only the listed conversations are touched, never a replace: several job processes share
-          // one agent name, and each knows about only its own call.
+          // Only the listed conversations are touched, never a replace: several job processes
+          // share one agent name and each knows about only its own call.
           yield* sched.touchLiveness(payload.conversations ?? [], payload.agent_name, now).pipe(Effect.orDie);
           return { ok: true as const };
         }),
@@ -368,8 +311,6 @@ export const ConversationsLive = HttpApiBuilder.group(FeatherApi, "conversations
         ),
       )
       .handle("latency", ({ path }) =>
-        // 404 on an unknown conversation rather than an empty list, so the console can tell
-        // "no such call" from "this call has no turns yet".
         queries.conversationDetail(path.id).pipe(
           Effect.catchTag("NotFound", (e) => Effect.fail(mapNotFound(e))),
           Effect.flatMap(() => queries.turnLatencies(path.id)),
@@ -399,19 +340,7 @@ export const ConversationsLive = HttpApiBuilder.group(FeatherApi, "conversations
       )
       .handle("postScores", ({ path, payload }) =>
         Effect.gen(function* () {
-          // The conversation must exist: a score against a typo'd id would sit in the table forever
-          // with nothing to join it to. (The scenario suite's synthetic id is written server-side
-          // and does not come through here.)
           yield* queries.conversationDetail(path.id).pipe(Effect.catchTag("NotFound", (e) => Effect.fail(mapNotFound(e))), Effect.orDie);
-          /**
-           * A `turn_id` must name a turn *of this conversation* (O8).
-           *
-           * The conversation was checked and the turn was not, so a score could name anything and
-           * be accepted. The voice harness posted the scripted line it had spoken — `"BARGE-IN: I
-           * can pay 550 on Friday"` — as a turn id for weeks: the rows landed, joined nothing, and
-           * every one of them silently took the session-level fallback in `Tracing.score`. Nothing
-           * was lost and nothing said anything was wrong, which is the worst of both.
-           */
           const known = (yield* queries.turnLatencies(path.id).pipe(Effect.orDie)).map((t) => t.turn_id);
           const unknown = unknownTurnIds(known, payload.scores.map((s) => s.turn_id));
           if (unknown.length > 0) return yield* Effect.fail(new ApiBadRequest({ message: unknownTurnIdMessage(unknown) }));
@@ -425,10 +354,6 @@ export const ConversationsLive = HttpApiBuilder.group(FeatherApi, "conversations
             comment: s.comment ?? null,
             evidence: s.evidence ?? null,
           }));
-          // A caller gets told which of its scores were malformed and none are written. In-process
-          // producers take the other branch deliberately (`recordMany` logs and skips a bad record
-          // so one typo cannot cost a call its other measurements) — but a client that posted five
-          // scores and silently got three back has no way to learn which two went missing.
           const problems = records.map(scoreRecordProblem).filter((p): p is string => p !== null);
           if (problems.length > 0) return yield* Effect.fail(new ApiBadRequest({ message: problems.join("; ").slice(0, 300) }));
           const written = yield* scores.recordMany(records).pipe(Effect.orDie);
@@ -507,8 +432,6 @@ export const DemoLive = HttpApiBuilder.group(FeatherApi, "demo", (handlers) =>
       .handle("seed", () => seed.run().pipe(Effect.orDie))
       .handle("reset", () => seed.reset().pipe(Effect.orDie))
       .handle("loadFixtures", ({ payload }) =>
-        // Writes throwaway borrowers straight into the CRM tables: demo/dev only, never on a
-        // deployment that is serving anything real.
         cfg.demoMode
           ? seed.loadFixtures({ count: payload.count, prefix: payload.prefix }).pipe(
               Effect.catchIf(

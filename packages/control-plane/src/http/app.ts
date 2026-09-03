@@ -1,8 +1,3 @@
-/**
- * Composes the HttpApi implementation, security middleware (bearer token on mutating routes,
- * per-IP rate limits, daily turn cap — plan rev.2 R15), CORS, OpenAPI docs, and the runtime
- * layers. `HttpLive` needs an `HttpServer` (Node in apps/server; a web handler for the edge stretch).
- */
 import { HttpApiBuilder, HttpApiSwagger, HttpMiddleware, HttpServerRequest, HttpServerResponse } from "@effect/platform";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { Effect, Layer, Redacted } from "effect";
@@ -25,12 +20,10 @@ import { VoiceSessions } from "../services/VoiceSessions.js";
 import { WorkflowService } from "../services/Workflow.js";
 import { SchedulingRepo } from "../repos/scheduling.js";
 
-/** All groups implemented. Requires the service layers + AppConfig + PgClient. */
 export const ApiLive = HttpApiBuilder.api(FeatherApi).pipe(
   Layer.provide([SystemLive, CallsLive, ConversationsLive, TestingLive, VoiceLive, DemoLive]),
 );
 
-/** Service graph the API needs (everything but the DB client / config / decider). */
 export const ServicesLive = Layer.mergeAll(
   Orchestrator.Default,
   SchedulingService.Default,
@@ -47,61 +40,25 @@ export const ServicesLive = Layer.mergeAll(
   SchedulingRepo.Default,
 );
 
-/**
- * Constant-time comparison for the two secrets an request can present (C15).
- *
- * `===` on a string returns as soon as it finds a differing byte, so how long the comparison takes
- * is a function of how many leading bytes the caller got right. That is a byte-at-a-time oracle for
- * anyone who can time the response — slow to exploit over a network and not slow enough to be a
- * reason to keep it, since the fix is three lines.
- *
- * The digests are compared rather than the values, so `timingSafeEqual` always gets two buffers of
- * the same length: it throws on a length mismatch, and comparing raw values would otherwise leak
- * the secret's length through that throw. Hashing costs a few microseconds on strings this short.
- */
+// `===` returns on the first differing byte, a timing oracle for the secret. Digests are compared
+// rather than the values because `timingSafeEqual` throws on a length mismatch, leaking its length.
 const secretEquals = (presented: string, expected: string): boolean =>
   timingSafeEqual(createHash("sha256").update(presented).digest(), createHash("sha256").update(expected).digest());
 
 const RATE_LIMITED_PREFIXES = ["/api/calls/start", "/api/voice/sessions", "/api/conversations"];
 
-/**
- * Bearer auth for mutating requests when API_BEARER_TOKEN is set; simple per-IP token bucket;
- * daily cap on turn requests (each may spend LLM tokens). Health/docs/OPTIONS are always open.
- *
- * Both budgets are config (`RATE_LIMIT_PER_MINUTE`, `DAILY_TURN_CAP`) because a load run drives
- * hundreds of turns a minute from one IP; the public-demo defaults are unchanged.
- */
 export const securityMiddleware = HttpMiddleware.make((app) =>
   Effect.gen(function* () {
     const cfg = yield* AppConfig;
     const req = yield* HttpServerRequest.HttpServerRequest;
     const url = req.url;
     const method = req.method;
-    /**
-     * `/api/agents/heartbeat` is **not** here (C2). It reads like telemetry and is not: it upserts
-     * `conversation_liveness` for whatever conversation ids the caller names, which is the column
-     * the orphaned-call sweeper filters on, so an unauthenticated beat keeps any call un-swept and
-     * its borrower blocked behind an active call nobody is serving. The worker already presents the
-     * bearer on every request it makes, this one included.
-     *
-     * **And it is deliberately not in `RATE_LIMITED_PREFIXES` either**, though C2 names it as
-     * un-rate-limited. A budget is the wrong control for liveness: every job process beats its own
-     * conversation every 10 s and the main worker beats every 10 s, so ten concurrent calls are 66
-     * beats a minute from one container address against a default budget of 120 — and a *shed*
-     * beat is not a dropped metric, it is the sweeper finalizing a call somebody is serving. Auth
-     * is what this endpoint needed; a per-IP budget on it would turn load into orphaned calls.
-     */
+    // `/api/agents/heartbeat` is deliberately neither open nor rate-limited: it upserts the
+    // liveness column the orphan sweeper filters on, so a shed or unauthenticated beat lets the
+    // sweeper finalize a call somebody is still serving.
     const open = method === "GET" || method === "OPTIONS" || url.startsWith("/healthz") || url.startsWith("/readyz") || url.startsWith("/docs");
-    /**
-     * A blank token is not a token, checked here as well as in `config.ts` because this is where the
-     * decision is made and the guarantee should not depend on how the config was built.
-     *
-     * `API_BEARER_TOKEN=` reads as `Some("")`, which switched authentication **on** with an empty
-     * secret: every mutating request then had to present the literal header `Bearer `, and the
-     * worker — which sends no header when it has no token — got a 401 on every heartbeat, silently,
-     * because that call is fire-and-forget. An operator who writes the variable with no value to
-     * turn auth off would have turned it on and locked out their own fleet.
-     */
+    // A blank token is not a token: an empty `API_BEARER_TOKEN` must leave auth off, not switch it
+    // on with an empty secret that every caller then has to present.
     const bearer = cfg.apiBearerToken === null ? "" : Redacted.value(cfg.apiBearerToken);
     if (!open && bearer.length > 0) {
       const auth = req.headers["authorization"] ?? "";
@@ -111,31 +68,11 @@ export const securityMiddleware = HttpMiddleware.make((app) =>
     }
     if (!open && RATE_LIMITED_PREFIXES.some((p) => url.startsWith(p))) {
       const metrics = yield* Metrics;
-      /**
-       * The harness is not a stranger (O9).
-       *
-       * Its runs drive hundreds of turns a minute from one address and the per-IP budget sheds
-       * them, so the previous answer was to raise `RATE_LIMIT_PER_MINUTE` and `DAILY_TURN_CAP` in
-       * the server's environment for the duration — which measures a server configured differently
-       * from the one being described, and moves the knob a public demo depends on. A run that
-       * presents this secret is exempt instead, and is counted so an operator can see how much of
-       * the traffic was exempt rather than budgeted.
-       */
       const presented = req.headers["x-ratelimit-bypass"];
       if (cfg.rateLimitBypassToken !== null && presented !== undefined && secretEquals(presented, Redacted.value(cfg.rateLimitBypassToken))) {
         yield* metrics.increment("rate_limit_bypassed");
         return yield* app;
       }
-      /**
-       * A shed request is counted before it is refused (O9). A tier-1 run from one IP was 429ed 92
-       * times, reported "23/50 correct", and moved no counter anywhere - so the status page could
-       * not tell "the agent is broken" from "my own middleware is shedding load". The two prefixes
-       * are counted apart because they mean different things: a refused start is a call that never
-       * happened, a refused turn is a call that broke midway.
-       */
-      // Matched on the path's last segment, not on a substring of the whole URL: `includes("/turn")`
-      // is correct for today's five rate-limited routes and would silently miscount the first route
-      // that merely contains the word (a `/return`, a `/turnaround`).
       const bucketName = isTurnPath(url) ? "rate_limited_turn" : "rate_limited_start";
       const ip = (req.headers["cf-connecting-ip"] ?? req.headers["x-forwarded-for"] ?? req.remoteAddress.pipe((o) => (o._tag === "Some" ? o.value : "local"))).split(",")[0]!.trim();
       const ok = yield* rateLimit(ip, cfg.rateLimitPerMinute);
@@ -155,17 +92,12 @@ export const securityMiddleware = HttpMiddleware.make((app) =>
   }),
 );
 
-/**
- * Is this the turn-taking path? The two routes that consume the daily budget both end in a segment
- * named for a turn; anything else under the rate-limited prefixes is a call-level request.
- */
 const isTurnPath = (url: string): boolean => {
   const path = (url.split("?")[0] ?? "").replace(/\/+$/, "");
   const last = path.slice(path.lastIndexOf("/") + 1);
   return last === "turn" || last === "simulate_turn";
 };
 
-/** The per-IP budget; see `rateLimit.ts` for why it is a unit rather than six lines inline (O9). */
 const rateLimit = (ip: string, perMinute: number) => Effect.sync(() => limiter.check(ip, perMinute));
 const dailyRef = { day: "", count: 0 };
 const dailyTurnBudget = (cap: number) =>
@@ -179,7 +111,6 @@ const dailyTurnBudget = (cap: number) =>
     return dailyRef.count <= cap;
   });
 
-/** Serve the API with CORS, OpenAPI JSON at /docs/openapi.json and Swagger UI at /docs. */
 export const HttpLive = HttpApiBuilder.serve(securityMiddleware).pipe(
   Layer.provide(HttpApiSwagger.layer({ path: "/docs" })),
   Layer.provide(HttpApiBuilder.middlewareOpenApi({ path: "/docs/openapi.json" })),

@@ -1,13 +1,3 @@
-/**
- * The `/metrics` body (D3). What is under test is the *contract with a scraper*: the names a
- * dashboard or alert will be written against, and that a counter whose name a Prometheus metric
- * name cannot legally hold still arrives intact.
- *
- * There is no assertion here that the numbers are right — they come verbatim from the same
- * `ProcessSnapshot` `/status` serves, which `processMetrics.test.ts` covers. What this file exists
- * to catch is a rename, a dropped series, and the one thing the type checker cannot see: a counter
- * name with a dot in it silently colliding with another vendor's.
- */
 import { describe, expect, it } from "vitest";
 import { PROMETHEUS_CONTENT_TYPE, prometheusText } from "../../src/http/prometheus.js";
 import type { ProcessSnapshot } from "../../src/services/ProcessMetrics.js";
@@ -61,8 +51,6 @@ describe("prometheus exposition", () => {
     expect(text).toContain('process_cpu_seconds_total{mode="user"} 3.5');
     expect(text).toContain('process_cpu_seconds_total{mode="system"} 1.25');
     expect(text).toContain("process_resident_memory_bytes 168000000");
-    // Milliseconds on the JSON surface, seconds here: the exposition format's convention, and a
-    // dashboard that assumed seconds would otherwise read a 12 ms blip as three hours.
     expect(text).toContain('feather_lite_event_loop_delay_seconds{quantile="0.99"} 0.0125');
     expect(text).toContain("nodejs_gc_pause_seconds_total 0.03");
   });
@@ -87,8 +75,6 @@ describe("prometheus exposition", () => {
   });
 
   it("separates a loop that is failing from one that has stopped", async () => {
-    // A loop erroring on every tick used to be indistinguishable from a healthy one, because the
-    // stamp was written on the error path too. Fresh age, non-zero failures: alive and failing.
     const text = await render({ loops: [{ name: "outbox", lastTickAt: new Date(Date.now() - 1_000).toISOString(), intervalMs: 5_000, stale: false, consecutiveFailures: 4 }] });
     expect(text).toContain('feather_lite_loop_consecutive_failures{loop="outbox"} 4');
     expect(text).toContain('feather_lite_loop_stale{loop="outbox"} 0');

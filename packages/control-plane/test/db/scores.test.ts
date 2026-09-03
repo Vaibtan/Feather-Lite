@@ -1,12 +1,3 @@
-/**
- * The score store (spec 2026-08-26, D1): identity, upsert-on-re-run, the Langfuse mirror, and the
- * refusal to store a record that contradicts its own name's data type.
- *
- * Asserted on the external seams, not the SQL: what comes back out of `listForConversation`, and
- * what the recording `Tracing` was handed. A score reaching Postgres but not Langfuse (or the other
- * way round) is exactly the drift the one-writer design exists to prevent, so both are checked
- * together on every write.
- */
 import { Effect, Layer } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import { booleanScore, numericScore } from "@feather-lite/domain";
@@ -80,9 +71,7 @@ describe("conversation scores", () => {
         const conversationId = yield* seedConversation;
         const scores = yield* Scores;
         yield* scores.record(booleanScore(conversationId, "judge.overall_pass", false, "JUDGE", { comment: "no read-back" }));
-        // Same (conversation, turn, name, source): a re-judge corrects the verdict in place.
         yield* scores.record(booleanScore(conversationId, "judge.overall_pass", true, "JUDGE", { comment: "read-back was heard in full" }));
-        // A different source on the same name is a different score — this is what agreement compares.
         yield* scores.record(booleanScore(conversationId, "human.overall_pass", true, "HUMAN"));
         const rows = yield* scores.listForConversation(conversationId);
         return rows;
@@ -109,8 +98,8 @@ describe("conversation scores", () => {
         return yield* scores.listForConversation(conversationId);
       }),
     );
-    // NULLS NOT DISTINCT on the identity index: the call-level row is one row, not merged with the
-    // turn-level ones and not duplicated by them.
+    // NULLS NOT DISTINCT on the identity index: the call-level row is one row, neither merged with
+    // the turn-level ones nor duplicated by them.
     expect(out.map((r) => [r.turnId, r.value])).toEqual([
       [null, 0.1],
       ["turn-1", 0.2],

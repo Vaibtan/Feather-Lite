@@ -1,11 +1,6 @@
 /**
- * Reading a WAV whose header is not the canonical 44 bytes (issue #4, H10).
- *
- * The reader took channels from byte 22, the sample rate from 24, the data length from 40 and the
- * samples from 44 — the layout of a canonical RIFF header and only that. Anything between `fmt ` and
- * `data` (a `LIST`/`INFO` chunk naming the encoder, a `fact` chunk, a pad byte) shifts every one of
- * those, and the failure is not a throw: it is samples read out of the middle of a metadata string,
- * which the borrower then speaks as noise.
+ * A positional reader that assumes the canonical 44-byte header does not throw on a file with an
+ * extra chunk: it reads samples out of the middle of a metadata string, which plays as noise.
  */
 import { describe, expect, it } from "vitest";
 import { parseWav } from "../src/tracer/line-cache.js";
@@ -58,7 +53,6 @@ describe("parseWav", () => {
   it("reads a file with a LIST chunk between fmt and data — the case that produced noise", () => {
     const list = Buffer.concat([Buffer.from("INFO", "ascii"), chunk("ISFT", Buffer.from("Lavf60.16.100\0", "ascii"))]);
     const r = parseWav(wav(chunk("fmt ", fmtChunk(1, 24_000)), chunk("LIST", list), chunk("data", pcmChunk(SAMPLES))));
-    // Positionally, byte 44 lands inside "INFO"/"ISFT" and the samples come out as text.
     expect(r.sampleRate).toBe(24_000);
     expect([...r.pcm]).toEqual(SAMPLES);
   });
@@ -71,7 +65,7 @@ describe("parseWav", () => {
   });
 
   it("reads a file whose data chunk comes before fmt", () => {
-    // Unusual and legal; a walker gets it for free and a positional reader cannot.
+    // Unusual and legal.
     const r = parseWav(wav(chunk("data", pcmChunk(SAMPLES)), chunk("fmt ", fmtChunk(1, 16_000))));
     expect(r.sampleRate).toBe(16_000);
     expect([...r.pcm]).toEqual(SAMPLES);
@@ -88,8 +82,8 @@ describe("parseWav", () => {
   it("keeps what was complete when a file is truncated mid-chunk", () => {
     const full = wav(chunk("fmt ", fmtChunk(1, 24_000)), chunk("data", pcmChunk(SAMPLES)));
     const cut = full.subarray(0, full.length - 4);
-    // The data chunk's declared size overruns the buffer, so it is dropped rather than read past the
-    // end — and a file with no usable data chunk is a refusal, not silence.
+    // The data chunk's declared size overruns the buffer, so it is dropped rather than read past
+    // the end.
     expect(() => parseWav(cut)).toThrow(/no data chunk/);
   });
 });

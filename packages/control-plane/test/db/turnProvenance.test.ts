@@ -1,14 +1,3 @@
-/**
- * Which arm decided a turn, and how the turn ended, are facts the ledger keeps (F3).
- *
- * The decide phase has more than one arm — a deterministic override, the model, and D2's fast path
- * when it lands — and until now the ledger could not tell them apart. A call's `conversations.decider`
- * says which decider *service* was configured for the whole call, which is a different question:
- * every turn of an `openai` call reads `openai` whether the model was consulted or a regex answered
- * in a microsecond. Mixing those in one latency window is how a fast path flatters a p95.
- *
- * `TurnResult` is serialised whole into `conversation_turns.result`, so this needs no migration.
- */
 import { Effect, Layer, Stream } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -46,7 +35,6 @@ const seed = Effect.gen(function* () {
   return yield* (yield* WorkflowService).startCall({ borrowerId, contactPointId: cpId, channel: "simulated", now: FROZEN_NOW });
 });
 
-/** What the ledger kept for one turn, which is the only place these facts are asserted. */
 const resultOf = (conversationId: string, turnId: string) =>
   Effect.gen(function* () {
     const sql = yield* PgClient.PgClient;
@@ -55,7 +43,7 @@ const resultOf = (conversationId: string, turnId: string) =>
     return rows[0]?.result ?? {};
   });
 
-describe("the ledger records which arm decided a turn (F3)", () => {
+describe("the ledger records which arm decided a turn", () => {
   it("names the model when the decider was consulted", async () => {
     const out = await rt.runPromise(
       Effect.gen(function* () {
@@ -66,14 +54,12 @@ describe("the ledger records which arm decided a turn (F3)", () => {
       }),
     );
     expect(out["decider"]).toBe("scripted");
-    // `resolution` is how it came out; `disposition` is what the control plane decided to do (D1).
+    // `resolution` is how the turn came out; `disposition` is what the control plane decided to do.
     expect(out["resolution"]).toBe("tool");
     expect(out["disposition"]).toBe("respond");
   });
 
   it("names the override when a deterministic rule answered without the model", async () => {
-    // The point of the field: this turn never reached the decider, so a latency window that treats
-    // it as a model turn is averaging a regex into the number the product's claim is made from.
     const out = await rt.runPromise(
       Effect.gen(function* () {
         const started = yield* seed;
@@ -100,15 +86,8 @@ describe("the ledger records which arm decided a turn (F3)", () => {
   });
 });
 
-describe("the SLO window can select turns by which arm decided them (F4)", () => {
-  it("separates override turns from model turns of the same call", async () => {
-    /**
-     * The defect this exists to prevent, one level down from O2's. A fast path that answers in a
-     * microsecond and a model turn that takes two seconds are both turns of one `voice`/`openai`
-     * call, so no conversation-level facet can part them — and mixing them moves the p95 the
-     * product's latency claim is made from without anything getting faster. D2's fast path is what
-     * makes this urgent; the override arm is the same shape and exists today.
-     */
+describe("the SLO window can select turns by which arm decided them", () => {
+  it("separates override turns from model turns of the same call, so a fast path cannot flatter the model p95", async () => {
     const out = await rt.runPromise(
       Effect.gen(function* () {
         const started = yield* seed;

@@ -1,17 +1,3 @@
-/**
- * A turn re-sent under its own id while it is still running (C5).
- *
- * The voice worker re-sends a turn after a reconnect, and `TurnRunner` attaches such a request to
- * the copy already in flight — but only in this process, and only while the entry survives
- * (`TURN_MAX_LIFETIME_SECONDS`, 300 s). Past that, or from a second replica, the request reached
- * the orchestrator, where T1's own guard treats `activeTurnId === turnId` as *not* a conflict and
- * `claimTurn` then refused it anyway on `active_turn_id IS NULL` — so the caller was told its own
- * turn was blocking it.
- *
- * What it must not do is run the turn twice: the borrower's line and the agent's would both be
- * appended a second time. So the re-send waits for the copy that is running and replays its result,
- * which is what the `DONE` branch already gives a reconnect that arrives a moment later.
- */
 import { Deferred, Effect, Fiber, Layer, Stream } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -21,7 +7,6 @@ import { makeInfraLayer, makeRuntime, truncateAll } from "./harness.js";
 
 /** Held so the first copy of `t1` is still in flight when the re-send arrives. */
 const gate = await Effect.runPromise(Deferred.make<void>());
-/** The supersede test releases its own deciders through this one. */
 const gate2 = await Effect.runPromise(Deferred.make<void>());
 /** Counted for `t1` only: the supersede test below shares this decider and has its own turns. */
 let deciderCalls = 0;
@@ -47,11 +32,8 @@ afterAll(async () => {
 });
 
 describe("a turn still in flight when the process stops", () => {
-  it("does not leave active_turn_id set on the conversation (C10)", async () => {
-    // A separate runtime, because the thing under test is what happens when its scope closes. The
-    // turn is left blocked in the decider — the shape of a process stopped mid-turn — and on a
-    // `simulated` call nothing else would ever release it: no worker reconnects, no sweeper touches
-    // `active_turn_id`, so every later turn on that conversation would 409 forever.
+  it("does not leave active_turn_id set on the conversation", async () => {
+    // A separate runtime, because the thing under test is what happens when its scope closes.
     const shutdownRt = makeRuntime(layer);
     const conversationId = await shutdownRt.runPromise(
       Effect.gen(function* () {
@@ -65,7 +47,6 @@ describe("a turn still in flight when the process stops", () => {
         yield* sql`INSERT INTO loans ${sql.insert({ id: yield* ids.next(), borrowerId, principal: "1000.00", balanceDue: "550.00", dueDate: "2026-08-01", status: "DELINQUENT", delinquencyDays: 10 })}`;
         const started = yield* (yield* WorkflowService).startCall({ borrowerId, contactPointId: cpId, channel: "simulated", now: FROZEN_NOW });
         const runner = yield* TurnRunner;
-        // `run` returns once `turn_start` is emitted; the turn behind it is blocked in the decider.
         yield* runner.run({ conversationId: started.conversationId, turnId: "x1", userText: "hello" });
         let tries = 0;
         while (tries < 200) {
@@ -77,8 +58,6 @@ describe("a turn still in flight when the process stops", () => {
         return started.conversationId;
       }),
     );
-
-    // The process stops with that turn still held.
     await shutdownRt.dispose();
 
     const after = await rt.runPromise(
@@ -92,7 +71,7 @@ describe("a turn still in flight when the process stops", () => {
 });
 
 describe("a turn id that was superseded", () => {
-  it("is refused rather than run again (C9)", async () => {
+  it("is refused rather than run again", async () => {
     const out = await rt.runPromise(
       Effect.gen(function* () {
         const sql = yield* PgClient.PgClient;
@@ -105,8 +84,6 @@ describe("a turn id that was superseded", () => {
         yield* sql`INSERT INTO loans ${sql.insert({ id: yield* ids.next(), borrowerId, principal: "1000.00", balanceDue: "550.00", dueDate: "2026-08-01", status: "DELINQUENT", delinquencyDays: 10 })}`;
         const started = yield* (yield* WorkflowService).startCall({ borrowerId, contactPointId: cpId, channel: "simulated", now: FROZEN_NOW });
         const orch = yield* Orchestrator;
-
-        // `s1` goes in flight and is superseded by the barge-in `s2`, exactly as a real one is.
         const s1 = yield* Effect.fork(orch.processTurn({ conversationId: started.conversationId, turnId: "s1", userText: "hello" }, () => Effect.void));
         let tries = 0;
         while (tries < 200) {
@@ -120,8 +97,6 @@ describe("a turn id that was superseded", () => {
         yield* Deferred.succeed(gate2, void 0);
         yield* Fiber.join(s1).pipe(Effect.either);
         yield* Fiber.join(s2).pipe(Effect.either);
-
-        // The worker reconnects and re-sends the turn it never saw an answer for.
         const resend = yield* orch.processTurn({ conversationId: started.conversationId, turnId: "s1", userText: "hello" }, () => Effect.void).pipe(Effect.either);
         const detail = yield* (yield* Queries).conversationDetail(started.conversationId);
         return {
@@ -131,12 +106,8 @@ describe("a turn id that was superseded", () => {
         };
       }),
     );
-
-    // Explicitly refused, rather than quietly re-run.
     expect(out.resend._tag).toBe("Left");
     if (out.resend._tag === "Left") expect(out.resend.left._tag).toBe("TurnSuperseded");
-    // The ledger still holds one borrower line for that turn and no agent line: the turn was
-    // superseded before it committed one, and re-running it would have written both.
     expect(out.userLines).toBe(1);
     expect(out.agentLines).toBe(0);
   });
@@ -157,10 +128,8 @@ describe("the same turn id, sent twice while the first is still running", () => 
         const wf = yield* WorkflowService;
         const orch = yield* Orchestrator;
         const started = yield* wf.startCall({ borrowerId, contactPointId: cpId, channel: "simulated", now: FROZEN_NOW });
-
-        // The first copy claims the turn and blocks in the decider.
         const first = yield* Effect.fork(orch.processTurn({ conversationId: started.conversationId, turnId: "t1", userText: "hello" }, () => Effect.void));
-        // Wait until T1 has committed, so the re-send genuinely races a RUNNING turn.
+        // Wait until the first copy has committed, so the re-send genuinely races a RUNNING turn.
         let tries = 0;
         while (tries < 200) {
           const row = yield* (yield* ConversationRepo).findConversation(started.conversationId);
@@ -168,8 +137,6 @@ describe("the same turn id, sent twice while the first is still running", () => 
           tries += 1;
           yield* Effect.sleep("20 millis");
         }
-
-        // The re-send. It must not fail, and it must not start a second copy.
         const resend = yield* Effect.fork(orch.processTurn({ conversationId: started.conversationId, turnId: "t1", userText: "hello" }, () => Effect.void));
         yield* Effect.sleep("300 millis");
         yield* Deferred.succeed(gate, void 0);
@@ -186,13 +153,8 @@ describe("the same turn id, sent twice while the first is still running", () => 
         };
       }),
     );
-
-    // It attached rather than 409ing...
     expect(out.resend._tag).toBe("Right");
-    // ...and got the same answer the running copy produced.
     if (out.resend._tag === "Right") expect(out.resend.right.agentText).toBe(out.first.agentText);
-    // The turn ran once. Two USER_TURN_FINALs would put the borrower's line in the transcript twice,
-    // which is the failure the obvious fix (relaxing `claimTurn`) would have introduced.
     expect(out.userLines).toBe(1);
     expect(out.agentLines).toBe(1);
     expect(out.deciderCalls).toBe(1);

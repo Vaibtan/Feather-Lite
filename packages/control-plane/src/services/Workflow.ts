@@ -1,8 +1,3 @@
-/**
- * Workflow orchestrator (SPEC §5.2, §14): pre-call policy, workflow reuse, attempt
- * creation, conversation bootstrap. `startCall` is the single entry point for both the
- * API and the scheduled-action worker.
- */
 import { DateTime, Effect, Option } from "effect";
 import { PgClient } from "@effect/sql-pg";
 import type { Channel, WorkflowType } from "@feather-lite/domain";
@@ -18,25 +13,10 @@ export interface StartCallInput {
   readonly borrowerId: string;
   readonly contactPointId: string;
   readonly channel: Channel;
-  /**
-   * How the voice leg is established (C4). `browser` is a WebRTC session in a tab — which is what
-   * the load harness places — and it has no phone leg, so it is never re-dialled. `sip` is an
-   * outbound PSTN dial. Defaults to `browser` for a voice call, because the callers that do not say
-   * are the browser-facing ones; a `simulated` call has no leg at all.
-   */
   readonly origin?: "browser" | "sip" | undefined;
-  /**
-   * Which harness placed this call (issue #1, D4). `"sim"` is the tier-3 simulator.
-   *
-   * Recorded so the SLO's default segment can exclude it: a simulator call is `channel: "voice"`
-   * served by the real decider, which is exactly what that segment selects, and its audio is
-   * deliberately harder than a real call's. Undefined — a real caller — is every row so far.
-   */
   readonly harness?: string | undefined;
-  /** Reuse an existing workflow (scheduled callback / retry). */
   readonly workflowExecutionId?: string | undefined;
   readonly workflowType?: WorkflowType | undefined;
-  /** Demo-mode clock override; ignored unless `demoMode`. */
   readonly now?: DateTime.Utc | undefined;
 }
 
@@ -83,7 +63,7 @@ export class WorkflowService extends Effect.Service<WorkflowService>()("@feather
           });
           const active = yield* conv.hasActiveConversation(borrower.id);
           const conflicts = yield* sched.countPendingConflicts(borrower.id);
-          // A scheduled action re-entering startCall has already been CLAIMED, so it never conflicts with itself.
+          // A scheduled action re-entering here has already been CLAIMED, so it never conflicts with itself.
 
           const failures = evaluatePreCall({
             now,
@@ -100,8 +80,6 @@ export class WorkflowService extends Effect.Service<WorkflowService>()("@feather
           });
           if (failures.length > 0) return yield* Effect.fail(new PreCallRejected({ failures }));
 
-          // A manual/API start supersedes any pending system retry for this borrower (SPEC §14.2 intent:
-          // never double-dial; a scheduled action re-entering here is already CLAIMED, so it is unaffected).
           if (!input.workflowExecutionId) yield* sched.cancelPendingRetriesForBorrower(borrower.id, "superseded_by_new_call");
 
           const agentVersion = yield* crm.ensureActiveAgentVersion(yield* ids.next(), "collections-v2", "v2-bootstrap");
@@ -133,9 +111,6 @@ export class WorkflowService extends Effect.Service<WorkflowService>()("@feather
             channel: input.channel,
             origin: input.channel === "voice" ? (input.origin ?? "browser") : "simulated",
             harness: input.harness ?? null,
-            // Recorded now, from the config that will actually serve it, rather than inferred later:
-            // the SLO window has to be able to exclude scripted turns, and by the time the report is
-            // built nothing on the row says which decider ran (O2).
             decider: cfg.turnDecider,
           });
           yield* conv.lockConversation(conversationId);
@@ -169,8 +144,8 @@ export class WorkflowService extends Effect.Service<WorkflowService>()("@feather
             local_time_description: "",
             borrower_first_name: firstName(borrower.name),
           });
-          // Simulated calls "speak" the opening immediately. Voice calls record it only when the
-          // runtime reports it was actually played (`opening_played` signal) — never into a voicemail.
+          // A voice call records its opening only when the runtime reports it was actually played,
+          // so the opening is never recorded into a voicemail.
           if (input.channel === "simulated") {
             yield* conv.appendEvent({
               id: yield* ids.next(),

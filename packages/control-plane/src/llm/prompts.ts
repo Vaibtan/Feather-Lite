@@ -1,16 +1,9 @@
-/**
- * Prompt construction for the LLM decider. Pure: (DeciderInput) -> messages + tools.
- * The gate is applied upstream (`visibleContext`); this module renders ONLY what it is given,
- * and the leak test asserts on the rendered request. Copy is tuned for TTS: short sentences,
- * one question at a time, no markup.
- */
 import { JSONSchema, type Schema } from "effect";
 import type { ConversationState, ToolName } from "@feather-lite/domain";
 import { TOOL_ARG_SCHEMAS, TOOL_DESCRIPTIONS } from "@feather-lite/domain";
 import type { DeciderInput } from "../services/types.js";
 import type { ChatMessage, ToolSpec } from "./LlmClient.js";
 
-/** Pseudo-tools that only suggest a state change; the orchestrator validates them like any suggestion. */
 export const PSEUDO_TOOLS = {
   end_call: { description: "End the call politely when nothing else can be done (borrower must go, refuses to continue, or the conversation is complete). Do not use to record outcomes.", nextState: "ENDING" as ConversationState },
   request_human: { description: "The borrower asks for a human agent or supervisor, or the situation needs a person. Transfers the call.", nextState: "WARM_TRANSFER_PENDING" as ConversationState },
@@ -35,7 +28,6 @@ const PSEUDO_BY_STATE: Readonly<Record<ConversationState, ReadonlyArray<PseudoTo
 
 const toolSpec = (name: ToolName): ToolSpec => {
   const schema = JSONSchema.make(TOOL_ARG_SCHEMAS[name] as unknown as Schema.Schema<unknown>) as unknown as Record<string, unknown>;
-  // Strip Effect's envelope; empty structs become an explicit empty object schema.
   const { $schema: _s, $id: _i, ...rest } = schema;
   const parameters = "properties" in rest ? rest : { type: "object", properties: {}, additionalProperties: false };
   return { name, description: TOOL_DESCRIPTIONS[name], parameters };
@@ -97,35 +89,14 @@ const stateGuidance = (input: DeciderInput): string => {
 const joinLines = (lines: ReadonlyArray<string>): string => lines.filter((line, i, arr) => !(line === "" && arr[i - 1] === "")).join("\n");
 
 /**
- * Message layout, and why it is in this order:
- *
- *   [0] system   persona + phone manner + RULES  -- identical on every turn
- *   [1..n]       the transcript so far           -- append-only as the call proceeds
- *   [n+1] system state, guidance, time, account  -- rewritten every turn
- *   [n+2] user   what the borrower just said
- *
- * OpenAI caches on exact prefix matches and instructs callers to "place static content like
- * instructions and examples at the beginning of your prompt, and put variable content, such as
- * user-specific information, at the end"
- * (<https://developers.openai.com/api/docs/guides/prompt-caching>). The volatile block used to be
- * message #0: it carries CURRENT STATE and a local time rendered down to the minute, so the
- * cacheable prefix collapsed to nothing every time the minute rolled over. Moving it behind the
- * history makes everything before it append-only, which is exactly the shape a prefix cache wants.
- *
- * Two things not to fight: caching needs >=1,024 tokens of prefix (same page), so short calls will
- * not cache at all; and `tools` are part of the prefix and change per state via `toolSpecsFor`, so
- * the cache re-warms at each state transition. Both are expected -- measure `cached_tokens` rather
- * than assuming a hit.
+ * The volatile block (state, local time to the minute) sits after the transcript, not before it,
+ * so everything ahead of it is append-only and OpenAI's prefix cache can match it.
  */
 export const buildMessages = (input: DeciderInput): ReadonlyArray<ChatMessage> => {
   const pc = input.context.publicContext;
   const prot = input.context.protectedContext;
   const mem = input.context.memory;
 
-  // Everything in this block is state-independent on purpose: together with `tools` it forms the
-  // prompt prefix OpenAI's cache matches on, and it is sized to put that prefix past the ~1,024
-  // token floor below which `cached_tokens` stays 0 for an entire short call (measured: a 4-turn
-  // call peaked at 979 prompt tokens and never cached). The content is real guidance, not padding.
   const persona = joinLines([
     `You are ${pc.agent_name}, a voice agent for ${pc.company}, on a live phone call. This is a debt-collection call in the United States; you must be respectful, calm and truthful (FDCPA/UDAAP).`,
     `Speak for a phone: one or two short sentences, one question at a time, no lists, no markdown, no emojis, no phone-tree tone. Never invent numbers, dates, fees or policies.`,
@@ -169,8 +140,6 @@ export const buildMessages = (input: DeciderInput): ReadonlyArray<ChatMessage> =
     mem
       ? joinLines([
           `HISTORY: ${mem.prior_conversation_count} prior call(s)${mem.last_promise_to_pay ? `; last promise ${mem.last_promise_to_pay.amount} by ${mem.last_promise_to_pay.date}` : ""}${mem.last_callback_requested_at ? `; last callback requested for ${mem.last_callback_requested_at}` : ""}.`,
-          // One deterministic line per prior call (newest first), from the ledger wrap-up — what
-          // they said and committed to, not just the outcome enum (research 2026-08-22 §3.3).
           ...mem.prior_calls.map((c) => `- ${c.ended_at ? c.ended_at.slice(0, 10) : "(unknown date)"}: ${c.note}`),
         ])
       : ``,
@@ -178,8 +147,6 @@ export const buildMessages = (input: DeciderInput): ReadonlyArray<ChatMessage> =
   ]);
 
   const history: ChatMessage[] = input.recentTranscript.map((t) => ({ role: t.speaker === "AGENT" ? "assistant" : "user", content: t.text }));
-  // The current turn's borrower line is already the last transcript entry; it is spoken once, at the
-  // very end, after the volatile block -- so it must not also sit inside the append-only history.
   const last = history.at(-1);
   if (last && last.role === "user" && last.content === input.userText) history.pop();
 

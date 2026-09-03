@@ -1,10 +1,3 @@
-/**
- * Entity error rate: did the transcript keep the numbers that decide the call? (issue #1, D3.)
- *
- * WER treats every word alike, and it should not. A transcript that turns "Friday" into "Friday,"
- * costs the same as one that turns "550" into "515", and only one of those is a wrong promise. D3
- * makes the amounts a gate (`--max-amount-errors 0`) and reports dates and names beside them.
- */
 import { describe, expect, it } from "vitest";
 import { entityErrors, entitiesIn } from "../src/entityError.js";
 
@@ -18,10 +11,8 @@ describe("entitiesIn", () => {
 
   it("does NOT read a bare number as an amount", () => {
     /**
-     * Deliberate, and the safer half of the rule. "September 4" and "one moment" both contain bare
-     * numbers, and a false amount error fails a run over a transcript that was correct — which is
-     * the one thing a gate set at zero must never do. An amount is a number the speaker attached
-     * "dollars" to, and after normalisation "$550" already reads that way.
+     * Deliberate: "September 4" and "one moment" carry bare numbers, and a false amount error would
+     * fail a run whose transcript was correct — the one thing a gate set at zero must never do.
      */
     expect(entitiesIn("pay 1200.50").filter((e) => e.kind === "amount")).toEqual([]);
     expect(entitiesIn("by September 4").filter((e) => e.kind === "amount")).toEqual([]);
@@ -59,15 +50,11 @@ describe("entityErrors", () => {
   it("catches a dropped date without calling it an amount error", () => {
     const r = entityErrors("I can pay 550 dollars on Friday", "I can pay 550 dollars");
     expect(r.errors.map((e) => e.kind)).toEqual(["date"]);
-    // D3 gates amounts at zero and reports dates; conflating them would gate the wrong thing.
     expect(r.amountErrors).toBe(0);
   });
 
   it("is null when the line carried no entities, rather than a flattering zero", () => {
-    /**
-     * The same rule `wordErrorRate` uses for an empty reference: there is nothing to be wrong
-     * about, and calling that 0 would quietly improve every average it was folded into.
-     */
+    /** Scoring an entity-free line as 0 would quietly improve every average it was folded into. */
     const r = entityErrors("yes, that's correct", "yes that's correct");
     expect(r.rate).toBeNull();
     expect(r.errors).toEqual([]);

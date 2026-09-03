@@ -1,8 +1,3 @@
-/**
- * Workflow across attempts (SPEC §14): scheduled-action worker re-enters startCall for retries and
- * callbacks, reschedules to the next contact window on TCPA failure, and the outbox worker
- * processes post-call jobs with OUTBOX_PROCESSED events.
- */
 import { DateTime, Effect, Layer, Option, Redacted } from "effect";
 import { localIsoDate, nextLocalHour } from "@feather-lite/domain";
 import { PgClient } from "@effect/sql-pg";
@@ -22,7 +17,6 @@ import {
 } from "../../src/index.js";
 import { makeInfraLayer, makeRuntime, truncateAll } from "./harness.js";
 
-/** One service graph; the two runtimes below differ only in how the media plane is configured. */
 const services = Layer.mergeAll(
   Orchestrator.Default,
   WorkflowService.Default,
@@ -37,11 +31,8 @@ const services = Layer.mergeAll(
 const rt = makeRuntime(services.pipe(Layer.provideMerge(makeInfraLayer())));
 
 /**
- * The same graph against a media plane that is configured and will not answer (review #11).
- *
- * Port 1 refuses immediately, so this is the "LiveKit exists and did not answer" case rather than
- * the "nothing is configured" one — the branch that now runs in its own second transaction, after
- * the first has committed and released the conversation row.
+ * Port 1 refuses immediately, which is the "LiveKit exists and did not answer" case rather than the
+ * "nothing is configured" one.
  */
 const rtNoAnswer = makeRuntime(
   services.pipe(
@@ -86,9 +77,7 @@ describe("scheduled-action worker", () => {
         yield* orch.processSignal(first.conversationId, { kind: "no_answer" });
         const pending = (yield* repo.listForWorkflow(first.workflowExecutionId)).filter((a) => a.status === "PENDING");
         const due = DateTime.unsafeMake(pending[0]!.dueAt);
-        // One minute before it is due -> nothing processed
         const nothing = yield* sched.runOnce(20, DateTime.subtract(due, { minutes: 1 }));
-        // At the next 14:00 borrower-local at/after the due time (inside the TCPA window) -> processed
         const later = nextLocalHour(due, "America/New_York", 14);
         const processed = yield* sched.runOnce(20, later);
         const wfRow = yield* conv.findWorkflow(first.workflowExecutionId);
@@ -103,12 +92,7 @@ describe("scheduled-action worker", () => {
     expect(Option.isSome(out.wfRow) && out.wfRow.value.status).toBe("RUNNING");
   });
 
-  it("fails a scheduled voice re-dial with no media plane instead of leaving a call nobody serves (O4)", async () => {
-    // `startCall({channel:'voice'})` opens a conversation and dispatches nothing. On a deployment
-    // with no LiveKit configured that produced a call no worker could ever claim, which the sweeper
-    // later booked as an orphan on the five-minute unconfirmed window — measured, unprompted:
-    // conversation `ae312a15…` from attempt 4, `system.orphan_detect_ms` 308 860 ms, taking the
-    // fleet's p95 with it. The action must fail and leave no conversation behind.
+  it("fails a scheduled voice re-dial with no media plane instead of leaving a call nobody serves", async () => {
     const out = await rt.runPromise(
       Effect.gen(function* () {
           const sql = yield* PgClient.PgClient;
@@ -117,12 +101,11 @@ describe("scheduled-action worker", () => {
           const repo = yield* SchedulingRepo;
           const sched = yield* SchedulingService;
           const orch = yield* Orchestrator;
-          // A first call that goes unanswered, exactly as the retry path is reached in production —
-          // the workflow and its attempt counter come from the real thing rather than a fixture.
+          // The workflow and its attempt counter come from a real unanswered call rather than a
+          // fixture.
           const first = yield* (yield* WorkflowService).startCall({ borrowerId, contactPointId: cpId, channel: "voice", now: FROZEN_NOW });
           yield* orch.processSignal(first.conversationId, { kind: "no_answer" });
           const wfId = first.workflowExecutionId;
-          // Whatever the no-answer path scheduled is cancelled; this test drives its own action.
           for (const a of (yield* repo.listForWorkflow(wfId)).filter((x) => x.status === "PENDING")) {
             yield* repo.setActionStatus(a.id, "CANCELED", { canceled_reason: "test" });
           }
@@ -144,18 +127,13 @@ describe("scheduled-action worker", () => {
     expect(out.processed).toHaveLength(1);
     expect(out.processed[0]?.status).toBe("FAILED");
     expect(out.processed[0]?.detail).toMatchObject({ reason: "NO_MEDIA_PLANE" });
-    // FAILED, not CANCELED: the system tried and could not, rather than a policy deciding not to.
     expect(out.actions[0]?.status).toBe("FAILED");
-    // And - the point - no phantom conversation for the sweeper to find later.
     expect(out.after).toBe(out.before);
   });
 
-  it("records a dispatch that the media plane refused, in a transaction of its own (review #11)", async () => {
-    // The other side of the case above: LiveKit *is* configured and does not answer. That branch now
-    // runs after the first transaction has committed and released the conversation row, because
-    // `dispatchAgent` is an HTTP call and ADR 0003 forbids one under a lock. So the end state is a
-    // conversation that exists with no agent dispatched to it - which the sweeper books as
-    // NEVER_SERVED - and an action recorded FAILED by a second, short transaction.
+  it("records a dispatch that the media plane refused, in a transaction of its own", async () => {
+    // `dispatchAgent` is an HTTP call and must not be made under a lock, so the refusal is
+    // recorded by a second, short transaction after the first has released the conversation row.
     const out = await rtNoAnswer.runPromise(
       Effect.gen(function* () {
         const sql = yield* PgClient.PgClient;
@@ -201,16 +179,13 @@ describe("scheduled-action worker", () => {
         const orch = yield* Orchestrator;
         const sched = yield* SchedulingService;
         const repo = yield* SchedulingRepo;
-        // 14:00 EDT == 11:00 PDT: fine to start.
         const first = yield* wf.startCall({ borrowerId, contactPointId: cpId, channel: "simulated", now: FROZEN_NOW });
         yield* orch.processTurn({ conversationId: first.conversationId, turnId: "t1", userText: "yes speaking" }, () => Effect.void);
         yield* orch.processTurn({ conversationId: first.conversationId, turnId: "t2", userText: "call me back tomorrow at 10pm" }, () => Effect.void);
         const cb = (yield* repo.listForWorkflow(first.workflowExecutionId)).find((a) => a.actionType === "CALLBACK");
-        // Worker runs at exactly the callback time: 22:00 PDT is outside 8-21 -> reschedule to 08:00 PDT next day
         const at = DateTime.unsafeMake(cb!.dueAt);
         const processed = yield* sched.runOnce(20, at);
         const after = yield* repo.findScheduledAction(cb!.id);
-        // Expectations computed from the wall clock the orchestrator used (borrower-local "tomorrow").
         const realNow = yield* DateTime.now;
         const today = Option.getOrThrow(localIsoDate(realNow, "America/Los_Angeles"));
         return { cb, processed, after, today };
@@ -231,27 +206,6 @@ describe("scheduled-action worker", () => {
 });
 
 describe("outbox worker", () => {
-  /**
-   * Fixed 2026-09-02 (issue #3, C14 — the user approved the second candidate).
-   *
-   * It used to pin two clocks and not the third. `now` governed `startCall` and `outbox.runOnce`,
-   * but `processTurn` takes none — and the opt-out it sends finalizes the call, which is where
-   * `Outbox.enqueuePostCall` stamps `available_at` from the **service clock**, i.e. real wall-clock
-   * time. The claim query is `available_at <= ${now}`, so the jobs were available today while
-   * `runOnce` was asked for work available in August 2026, and it correctly claimed nothing:
-   * `expected 0 to be greater than or equal to 3`. It passed only while real time was before the
-   * pinned instant, and stopped on 2026-08-16.
-   *
-   * So the fix is not to unpin the date — the instant is load-bearing, `09:00Z == 14:30 IST` being
-   * inside this borrower's TCPA window where 14:00 EDT is not — but to give the whole test **one**
-   * clock. `withFrozenClock` is the seam the scenario runner already uses; under it the explicit
-   * `now` arguments are redundant and are dropped, which is the point: there is now nothing to keep
-   * in step, because there is only one clock to read.
-   *
-   * The `available_at` assertion below is the guard. It is the value that diverged, and asserting
-   * it makes a future divergence fail on the cause rather than on a count of claimed jobs three
-   * layers away.
-   */
   it("processes SUMMARY / EVALUATION / VECTOR_INDEX for a completed call and records OUTBOX_PROCESSED", async () => {
     // 14:00 EDT == 23:30 IST -> outside window; 09:00Z == 14:30 IST is inside it.
     const FROZEN = DateTime.unsafeMake("2026-08-16T09:00:00Z");
@@ -271,7 +225,6 @@ describe("outbox worker", () => {
         return { results, again, detail, jobs, frozen: DateTime.toDateUtc(FROZEN) };
       })),
     );
-    // Earlier tests in this file left jobs too; every claimed job must be DONE and none may remain.
     expect(out.results.length).toBeGreaterThanOrEqual(3);
     expect(out.results.every((r) => r.status === "DONE")).toBe(true);
     expect(out.again).toEqual([]);
@@ -280,9 +233,8 @@ describe("outbox worker", () => {
     expect(processed).toHaveLength(3);
     const evaluation = out.jobs.find((j) => j.jobType === "EVALUATION");
     expect(evaluation?.result["compliance_ok"]).toBe(true);
-    // The value that diverged, asserted directly: every job was stamped from the same instant the
-    // claim asks about. Without this, a third clock creeping back in would fail as "0 jobs claimed"
-    // and send the next reader looking at the claim query.
+    // Every job must be stamped from the same instant the claim query asks about: a second clock
+    // creeping in fails here rather than as "0 jobs claimed" three layers away.
     expect(out.jobs.map((j) => j.availableAt.toISOString())).toEqual(out.jobs.map(() => out.frozen.toISOString()));
   });
 });

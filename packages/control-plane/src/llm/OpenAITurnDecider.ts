@@ -1,16 +1,3 @@
-/**
- * The LLM conversationalist (PRD §5.2.3, Phase 4). Adapts a streaming chat completion into
- * the normalized `TurnChunk` protocol with two-mode streaming (plan rev.2 R1):
- *
- *   - chat mode  : the first delta is content -> stream TextDeltas as they arrive
- *   - tool mode  : the first delta is a tool call -> buffer nothing, emit only the Decision
- *                  (any model text alongside a tool call is discarded; the orchestrator speaks
- *                  deterministic confirmations)
- *
- * Domain tools map to `ToolCall`; pseudo-tools (end_call / request_human / renegotiate) map to
- * `suggestedNextState`. Malformed arguments, unknown tools, empty output and provider failures are
- * distinct, named errors that the orchestrator turns into a safe fallback + event.
- */
 import { Effect, Layer, Schedule, Stream } from "effect";
 import type { ToolName, TurnChunk, TurnDecision } from "@feather-lite/domain";
 import { TOOL_NAMES, decision, textDelta } from "@feather-lite/domain";
@@ -53,40 +40,28 @@ export const OpenAITurnDeciderLive: Layer.Layer<TurnDecider, never, AppConfig | 
           tools: toolSpecsFor(input.state, input.allowedTools),
           temperature: 0.3,
           maxTokens: 220,
-          // Keyed by state, not conversation. The key only routes requests to a cache shard; the
-          // match is by prefix. Same-state requests share their whole prefix up to where the calls'
-          // transcripts diverge (tools + persona + the deterministic opening ≈ the 1,024-token
-          // floor), so one shard per state means call N+1's GREETING turn reuses call N's prefix.
-          // The old per-conversation key scattered byte-identical prefixes across shards: measured
-          // cached_tokens=0 on two identical 1,221-token GREETING prompts 57s apart, versus a hit
-          // (1,280 cached) the one time two same-conversation requests raced to the same shard.
+          // Keyed by state, not conversation: the key only routes to a cache shard, the match is
+          // by prefix, and same-state requests share their prefix up to where transcripts diverge.
           cacheKey: `decider:${input.state}`,
           metadata: { conversation_id: input.conversationId, turn_id: input.turnId, state: input.state },
         };
         const acc: Acc = { content: "", mode: "unknown", toolName: null, toolId: null, toolArgs: "", finished: false, usage: null };
         const startedAt = Date.now();
-        /** First byte of model output, whatever kind — the generation's completion-start. */
         let firstChunkAt: number | null = null;
 
-        /** Nothing has reached the caller yet, so restarting the stream is still safe. */
         const beforeAnyOutput = () => acc.mode === "unknown" && acc.content.length === 0;
 
         const deltas = llm.stream(request).pipe(
-          // Every provider failure is counted, whether or not the retry below rescues it, so the
-          // status page shows OpenAI degrading before it shows calls degrading. The same predicate
-          // decides the label and the retry, so a "retry" is counted exactly when one will happen.
           Stream.tapError((e) =>
             metrics.providerEvent({
               provider: `openai:${llm.name}`,
               kind: beforeAnyOutput() ? "retry" : "error",
               stage: "llm",
-              // `String()` on a tagged error yields only its tag; the detail is the part that
-              // tells an operator which vendor failure this was.
               message: `${e._tag}: ${e.detail}`.slice(0, 300),
               conversationId: input.conversationId,
             }),
           ),
-          // One retry on transport failure BEFORE any output was produced (never mid-stream).
+          // One retry on transport failure BEFORE any output was produced, never mid-stream.
           Stream.retry(Schedule.recurs(1).pipe(Schedule.whileInput(beforeAnyOutput))),
         );
 
@@ -120,7 +95,6 @@ export const OpenAITurnDeciderLive: Layer.Layer<TurnDecider, never, AppConfig | 
               }
             }
           }),
-          // Append the final Decision once the provider stream ends.
           Stream.concat(
             Stream.unwrap(
               Effect.gen(function* () {

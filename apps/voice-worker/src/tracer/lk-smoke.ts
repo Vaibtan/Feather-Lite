@@ -1,10 +1,4 @@
-/**
- * LiveKit server smoke test: proves LIVEKIT_URL/KEY/SECRET can mint a token and drive the server
- * API (create room -> list -> agent dispatch list -> delete). Works against LiveKit Cloud and the
- * self-hosted container (`pnpm lk:up`) unchanged — that portability is the point of ADR 0006.
- *
- * Run: pnpm --filter @feather-lite/voice-worker lk-smoke
- */
+/** Run: pnpm --filter @feather-lite/voice-worker lk-smoke */
 import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
 import { AccessToken, AgentDispatchClient, RoomServiceClient } from "livekit-server-sdk";
@@ -27,7 +21,6 @@ const listed = await rooms.listRooms([roomName]);
 if (listed.length !== 1 || listed[0]?.name !== roomName) throw new Error(`listRooms did not return ${roomName}: ${JSON.stringify(listed.map((r) => r.name))}`);
 console.log(`[lk-smoke] listRooms -> ${listed.map((r) => r.name).join(", ")}`);
 
-// Explicit agent dispatch is an OSS-server feature too; the control plane relies on it.
 const dispatchClient = new AgentDispatchClient(url, key, secret);
 const dispatches = await dispatchClient.listDispatch(roomName);
 console.log(`[lk-smoke] listDispatch -> ${dispatches.length} dispatch(es)`);

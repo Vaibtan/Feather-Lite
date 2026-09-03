@@ -12,7 +12,7 @@ import {
   validateToolCall,
 } from "../src/index.js";
 
-describe("tool-state matrix (SPEC §10.6)", () => {
+describe("tool-state matrix", () => {
   it("record_promise_to_pay is only callable in CONFIRMING_OUTCOME", () => {
     for (const s of CONVERSATION_STATES) {
       expect(toolAllowed("record_promise_to_pay", s)).toBe(s === "CONFIRMING_OUTCOME");

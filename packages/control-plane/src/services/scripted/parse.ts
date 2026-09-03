@@ -1,8 +1,3 @@
-/**
- * Small deterministic parsers used by the scripted decider (and by tests) to turn borrower
- * phrases into tool arguments: relative dates in the borrower's local calendar and money.
- * The real LLM does this itself; these exist so the scenario suite never touches a model.
- */
 import { DateTime, Option } from "effect";
 
 const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"] as const;
@@ -27,10 +22,6 @@ const weekdayOf = (isoDate: string): number => {
   return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
 };
 
-/**
- * Parse a payment date from free text, relative to the borrower's local `today` (YYYY-MM-DD).
- * Returns null when nothing recognisable is present.
- */
 export const parseRelativeDate = (text: string, today: string): string | null => {
   const t = text.toLowerCase();
   const iso = /\b(\d{4}-\d{2}-\d{2})\b/.exec(t);
@@ -70,14 +61,12 @@ export const parseRelativeDate = (text: string, today: string): string | null =>
   return null;
 };
 
-/** Parse a money amount: "$1,200", "1200", "550 dollars", "five hundred fifty". Returns "1200.00" or null. */
 export const parseAmount = (text: string): string | null => {
   const t = text.toLowerCase().replace(/,/g, "");
   const numeric = /(?:\$\s*)?(\d+(?:\.\d{1,2})?)\s*(?:dollars?|bucks|usd)?\b/.exec(t);
   const wordsMatch = /\b((?:(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|and)\s*)+)(?:dollars?|bucks)?\b/.exec(t);
   let value: number | null = null;
   if (numeric?.[1] && !/\b(?:the )?\d{1,2}(?:st|nd|rd|th)\b/.test(numeric[0])) {
-    // ignore ordinals like "the 15th" and bare small day numbers followed by "th"
     const n = Number(numeric[1]);
     if (n > 0 && !(n <= 31 && /\b(?:on|by) (?:the )?\d{1,2}\b/.test(t) && !/\$|dollars?/.test(numeric[0]))) value = n;
   }
@@ -101,7 +90,6 @@ export const parseAmount = (text: string): string | null => {
   return value.toFixed(2);
 };
 
-/** Parse a callback time: "tomorrow at 3pm", "at 10", "in the morning". Returns {isoDate, hour, minute}. */
 export const parseCallbackTime = (
   text: string,
   today: string,
@@ -127,7 +115,6 @@ export const parseCallbackTime = (
   return { isoDate, hour, minute };
 };
 
-/** Combine a local date/time in a zone into an ISO-8601 UTC instant string. */
 export const localToUtcIso = (isoDate: string, hour: number, minute: number, timeZone: string): string => {
   const [year, month, day] = isoDate.split("-").map(Number) as [number, number, number];
   const zoned = DateTime.makeZoned(

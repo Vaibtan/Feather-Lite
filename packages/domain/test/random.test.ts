@@ -1,9 +1,3 @@
-/**
- * The seeded generator (issue #4, H7).
- *
- * The property that matters is not "looks random" — it is that two runs at the same seed draw the
- * same sequence, because that is what makes a tier-3 regression a diff rather than an argument.
- */
 import { describe, expect, it } from "vitest";
 import { makeRng, seedFrom } from "../src/random.js";
 
@@ -22,9 +16,7 @@ describe("makeRng", () => {
   });
 
   it("is pinned to a known sequence, so a change of algorithm cannot pass silently", () => {
-    // A table test in the literal sense: these are `mulberry32(1)`'s first draws. If an
-    // "improvement" to the generator lands, every seeded run ever recorded stops reproducing — so
-    // the sequence itself is the contract, not just its determinism.
+    /** `mulberry32(1)`'s first draws: the sequence itself is the contract, since changing it stops every recorded run reproducing. */
     expect(draws(1, 5).map((d) => Number(d.toFixed(10)))).toEqual([0.6270739406, 0.0027357212, 0.52744704, 0.9810509675, 0.9683778982]);
   });
 
@@ -49,8 +41,6 @@ describe("int", () => {
       expect(n).toBeLessThanOrEqual(6);
       seen.add(n);
     }
-    // Inclusive at both ends: an off-by-one here silently removes a persona or an offset from every
-    // seeded table that uses it.
     expect([...seen].sort((a, b) => a - b)).toEqual([3, 4, 5, 6]);
   });
 
@@ -62,15 +52,12 @@ describe("int", () => {
 });
 
 describe("chance", () => {
-  it("is never and always at the ends, without consuming a draw", () => {
+  it("is never and always at the ends, without consuming a draw, so disabling a feature does not reshuffle every draw after it", () => {
     const rng = makeRng(11);
     expect(rng.chance(0)).toBe(false);
     expect(rng.chance(-1)).toBe(false);
     expect(rng.chance(1)).toBe(true);
     expect(rng.chance(2)).toBe(true);
-    // The sequence is untouched by the degenerate cases, so turning a feature off does not reshuffle
-    // every draw after it — which would make two runs that differ only in a disabled option
-    // incomparable.
     expect(rng.next()).toBe(makeRng(11).next());
   });
 

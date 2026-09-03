@@ -1,7 +1,6 @@
 /**
- * Placeholder `LLM` so the framework's `generateReply` guard is satisfied.
- * `Agent.llmNode` is overridden to stream the control-plane turn, so `chat()`
- * must never be reached — if it is, that is a bug and we fail loudly.
+ * A placeholder only so the framework's `generateReply` guard is satisfied; `Agent.llmNode` is
+ * overridden to stream the control-plane turn, so `chat()` must never be reached.
  */
 import { llm } from "@livekit/agents";
 
