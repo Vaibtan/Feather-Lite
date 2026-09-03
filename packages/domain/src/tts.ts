@@ -46,9 +46,7 @@ import { booleanScore, numericScore, type ScoreRecord } from "./scores.js";
  * optional on `AGENT_TURN`, and a genuine zero-audio turn missed because of a missing id would be
  * a false negative on a compliance-adjacent counter — the expensive direction to be wrong in.
  *
- * This function takes the whole event list rather than one event because the exclusion cannot be
- * decided from the playout alone. The same predicate is expressed in SQL by
- * `ConversationRepo.reliabilityCounts` and `Queries.turnLatencies`; change one, change those.
+ * The SQL twin is `repos/silentPlayout.ts` in the control plane; a DB test asserts the two agree.
  */
 export const silentPlayoutTurnIds = (events: ReadonlyArray<EventRecord>): ReadonlySet<string> => {
   const superseded = new Set<string>();

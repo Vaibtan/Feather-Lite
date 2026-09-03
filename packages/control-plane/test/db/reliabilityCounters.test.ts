@@ -27,7 +27,7 @@ import {
   WorkflowService,
   withFrozenClock,
 } from "../../src/index.js";
-import { READBACK_UNCONFIRMED_DETAIL } from "@feather-lite/domain";
+import { READBACK_UNCONFIRMED_DETAIL, silentPlayoutTurnIds } from "@feather-lite/domain";
 import { makeInfraLayer, makeRuntime, truncateAll } from "./harness.js";
 
 const NOW = DateTime.unsafeMake("2026-08-16T14:00:00Z");
@@ -95,13 +95,19 @@ describe("reliability counts (from the ledger)", () => {
           // Two strikes close the call.
           yield* orch.processNoInput(started.conversationId);
           yield* orch.processNoInput(started.conversationId);
-          return { before, after: yield* reliability };
+          const q = yield* Queries;
+          const detail = yield* q.conversationDetail(started.conversationId);
+          const scoped = yield* q.reliabilityCountsFor([started.conversationId]);
+          return { before, after: yield* reliability, sqlSilent: scoped.tts_silent_playouts, domainSilent: [...silentPlayoutTurnIds(detail.events)] };
         }),
       ),
     );
     const delta = (k: string) => (out.after[k] ?? 0) - (out.before[k] ?? 0);
     expect(delta("tts_silent_playouts")).toBe(1);
     expect(delta("no_input_closes")).toBe(1);
+    // The SQL predicate and the domain predicate are two spellings of one rule.
+    expect(out.domainSilent).toEqual(["t1"]);
+    expect(out.sqlSilent).toBe(out.domainSilent.length);
   });
 
   it("counts a read-back repeated because the borrower heard silence", async () => {

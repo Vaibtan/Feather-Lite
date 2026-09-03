@@ -21,6 +21,7 @@
     "idle": "tsx src/idle-sample.ts"
   },
   "dependencies": {
+    "@feather-lite/domain": "workspace:*",
     "postgres": "^3.4.7"
   },
   "devDependencies": {

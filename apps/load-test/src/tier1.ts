@@ -33,6 +33,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
+import { percentile } from "@feather-lite/domain";
 import { harnessBypassConfigured, harnessJsonHeaders } from "./harness-http.js";
 import { formatResourceReport, perCoreBudget, SERVER_CONTAINERS, SERVER_ROLES, startResourceSampler, validateReport } from "./resources.js";
 
@@ -182,15 +183,14 @@ const runConversation = async (index: number, fixture: { borrower_id: string; co
 
 /* ------------------------------ statistics ----------------------------- */
 
-const percentile = (sorted: ReadonlyArray<number>, p: number): number => {
-  if (sorted.length === 0) return 0;
-  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
-  return sorted[idx]!;
-};
-const summarize = (values: ReadonlyArray<number>) => {
-  const s = [...values].sort((a, b) => a - b);
-  return { n: s.length, p50: percentile(s, 50), p95: percentile(s, 95), p99: percentile(s, 99), max: s.at(-1) ?? 0, mean: s.length ? Math.round(s.reduce((a, b) => a + b, 0) / s.length) : 0 };
-};
+const summarize = (values: ReadonlyArray<number>) => ({
+  n: values.length,
+  p50: percentile(values, 50),
+  p95: percentile(values, 95),
+  p99: percentile(values, 99),
+  max: values.length ? Math.max(...values) : null,
+  mean: values.length ? Math.round(values.reduce((a, b) => a + b, 0) / values.length) : null,
+});
 
 /* -------------------------------- main --------------------------------- */
 

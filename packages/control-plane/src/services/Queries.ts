@@ -9,6 +9,7 @@ import type { EventRecord, ReplaySnapshot, TimelineEntry, TranscriptEntry, TurnT
 import { buildTimeline, buildTranscript, charsPerSecond, isWithinContactWindow, percentile, replay } from "@feather-lite/domain";
 import { NotFound } from "../errors.js";
 import { ConversationRepo } from "../repos/conversation.js";
+import { silentPlayoutSql } from "../repos/silentPlayout.js";
 import { CrmRepo } from "../repos/crm.js";
 import { SchedulingRepo } from "../repos/scheduling.js";
 
@@ -218,6 +219,7 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
         // about — a fresh database, or a range with no calls in it.
         if (conversationIds.length === 0) return { rows: [], dropped: 0 };
         const sql = yield* PgClient.PgClient;
+        const { unheardPlayout, notSuperseded } = silentPlayoutSql(sql);
         // The client camel-cases result keys, so `turn_id` arrives as `turnId`.
         const rows = yield* sql<{
           turnId: string;
@@ -244,25 +246,12 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
                  (t.result->>'tts_ttfb_ms')::float8                AS tts_ttfb_ms,
                  (t.result->>'tts_audio_ms')::float8               AS tts_audio_ms,
                  (t.result->>'tts_chars')::float8                  AS tts_chars,
-                 -- The SQL twin of the domain's silentPlayoutTurnIds: nothing heard *and* cut short,
-                 -- which is how the worker reports a zero-audio turn (ADR 0008), *and* not a turn the
-                 -- borrower superseded before the agent ever replied -- that reports the same shape
-                 -- and is not a TTS failure. Change one, change both.
                  (
                    EXISTS (
                      SELECT 1 FROM conversation_events e
-                     WHERE e.conversation_id = t.conversation_id
-                       AND e.type = 'AGENT_TURN_PLAYOUT'
-                       AND e.payload->>'turn_id' = t.turn_id
-                       AND e.payload->>'interrupted' = 'true'
-                       AND e.payload->>'heard_text' = ''
+                     WHERE e.conversation_id = t.conversation_id AND e.payload->>'turn_id' = t.turn_id AND ${unheardPlayout("e")}
                    )
-                   AND NOT EXISTS (
-                     SELECT 1 FROM conversation_events s
-                     WHERE s.conversation_id = t.conversation_id
-                       AND s.type = 'TURN_SUPERSEDED'
-                       AND s.payload->>'turn_id' = t.turn_id
-                   )
+                   AND ${notSuperseded("t.conversation_id", "t.turn_id")}
                  )                                                 AS tts_silent
           FROM conversation_turns t
           WHERE t.conversation_id IN ${sql.in(conversationIds)}

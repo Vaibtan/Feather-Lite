@@ -8,8 +8,9 @@
  *   - one conversation per call attempt (unique constraint).
  */
 import { Effect, Schema } from "effect";
-import { SqlSchema } from "@effect/sql";
+import { SqlSchema, type Statement } from "@effect/sql";
 import { PgClient } from "@effect/sql-pg";
+import { silentPlayoutSql } from "./silentPlayout.js";
 import type {
   CallAttemptStatus,
   ConversationEvent,
@@ -271,83 +272,49 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
      *
      * Same predicates, same SQL twins of the domain's rules — only the scope differs.
      */
-    const reliabilityCountsFor = (conversationIds: ReadonlyArray<string>) =>
-      conversationIds.length === 0
-        ? Effect.succeed({ turnsSuperseded: 0, noInputCloses: 0, deciderUnavailable: 0, ttsSilentPlayouts: 0, readbacksRepeatedUnheard: 0, callsOrphaned: 0 })
-        : sql<{
-            turnsSuperseded: string;
-            noInputCloses: string;
-            deciderUnavailable: string;
-            ttsSilentPlayouts: string;
-            readbacksRepeatedUnheard: string;
-            callsOrphaned: string;
-          }>`
+    const { unheardPlayout, notSuperseded } = silentPlayoutSql(sql);
+    const EMPTY_COUNTS = { turnsSuperseded: 0, noInputCloses: 0, deciderUnavailable: 0, ttsSilentPlayouts: 0, readbacksRepeatedUnheard: 0, callsOrphaned: 0 };
+    const countReliability = (scope: Statement.Fragment) =>
+      sql<{
+        turnsSuperseded: string;
+        noInputCloses: string;
+        deciderUnavailable: string;
+        ttsSilentPlayouts: string;
+        readbacksRepeatedUnheard: string;
+        callsOrphaned: string;
+      }>`
         SELECT
           count(*) FILTER (WHERE type = 'TURN_SUPERSEDED')::text AS turns_superseded,
           count(*) FILTER (WHERE type = 'CALL_CONTROL' AND payload->>'action' = 'NO_INPUT_CLOSE')::text AS no_input_closes,
           count(*) FILTER (WHERE type = 'TURN_DECISION_REJECTED' AND payload->>'reason' = 'DECIDER_UNAVAILABLE')::text AS decider_unavailable,
-          -- The SQL twin of the domain's silentPlayoutTurnIds, and the third copy of it. The NOT
-          -- EXISTS is load-bearing: a turn the borrower superseded before the agent replied reports
-          -- the same shape and is not a TTS failure. **Change this, change the all-time query below
-          -- and the domain predicate.**
           count(*) FILTER (
-            WHERE type = 'AGENT_TURN_PLAYOUT' AND payload->>'interrupted' = 'true' AND payload->>'heard_text' = ''
-              AND NOT EXISTS (
-                SELECT 1 FROM conversation_events s
-                WHERE s.conversation_id = conversation_events.conversation_id
-                  AND s.type = 'TURN_SUPERSEDED' AND s.payload->>'turn_id' = conversation_events.payload->>'turn_id'
-              )
+            WHERE ${unheardPlayout("conversation_events")}
+              AND ${notSuperseded("conversation_events.conversation_id", "conversation_events.payload->>'turn_id'")}
           )::text AS tts_silent_playouts,
           count(*) FILTER (WHERE type = 'TOOL_REJECTED' AND payload->>'name' = 'record_promise_to_pay'
                              AND payload->>'reason' = 'INVALID_ARGS' AND payload->>'detail' IN ${sql.in(READBACK_UNHEARD_DETAILS)})::text AS readbacks_repeated_unheard,
           count(*) FILTER (WHERE type = 'CALL_CONTROL' AND payload->>'action' = 'HANGUP' AND payload->>'reason' = ${ORPHANED_REASON})::text AS calls_orphaned
         FROM conversation_events
-        WHERE conversation_id IN ${sql.in(conversationIds)}`.pipe(
-            Effect.map((rows) => {
-              const r = rows[0];
-              const n = (v: string | undefined) => Number(v ?? 0);
-              return {
-                turnsSuperseded: n(r?.turnsSuperseded),
-                noInputCloses: n(r?.noInputCloses),
-                deciderUnavailable: n(r?.deciderUnavailable),
-                ttsSilentPlayouts: n(r?.ttsSilentPlayouts),
-                readbacksRepeatedUnheard: n(r?.readbacksRepeatedUnheard),
-                callsOrphaned: n(r?.callsOrphaned),
-              };
-            }),
-          );
+        WHERE ${scope}`.pipe(
+        Effect.map((rows) => {
+          const r = rows[0];
+          const n = (v: string | undefined) => Number(v ?? 0);
+          return {
+            turnsSuperseded: n(r?.turnsSuperseded),
+            noInputCloses: n(r?.noInputCloses),
+            deciderUnavailable: n(r?.deciderUnavailable),
+            ttsSilentPlayouts: n(r?.ttsSilentPlayouts),
+            readbacksRepeatedUnheard: n(r?.readbacksRepeatedUnheard),
+            callsOrphaned: n(r?.callsOrphaned),
+          };
+        }),
+      );
 
-    const reliabilityCounts = SqlSchema.single({
-      Request: Schema.Void,
-      Result: Schema.Struct({
-        turnsSuperseded: Schema.NumberFromString,
-        noInputCloses: Schema.NumberFromString,
-        deciderUnavailable: Schema.NumberFromString,
-        ttsSilentPlayouts: Schema.NumberFromString,
-        readbacksRepeatedUnheard: Schema.NumberFromString,
-        callsOrphaned: Schema.NumberFromString,
-      }),
-      execute: () => sql`
-        SELECT
-          count(*) FILTER (WHERE type = 'TURN_SUPERSEDED')::text AS turns_superseded,
-          count(*) FILTER (WHERE type = 'CALL_CONTROL' AND payload->>'action' = 'NO_INPUT_CLOSE')::text AS no_input_closes,
-          count(*) FILTER (WHERE type = 'TURN_DECISION_REJECTED' AND payload->>'reason' = 'DECIDER_UNAVAILABLE')::text AS decider_unavailable,
-          -- The SQL twin of the domain's silentPlayoutTurnIds. The NOT EXISTS is load-bearing: a
-          -- turn the borrower superseded before the agent replied reports the same shape and is not
-          -- a TTS failure. Change one, change both.
-          count(*) FILTER (
-            WHERE type = 'AGENT_TURN_PLAYOUT' AND payload->>'interrupted' = 'true' AND payload->>'heard_text' = ''
-              AND NOT EXISTS (
-                SELECT 1 FROM conversation_events s
-                WHERE s.conversation_id = conversation_events.conversation_id
-                  AND s.type = 'TURN_SUPERSEDED' AND s.payload->>'turn_id' = conversation_events.payload->>'turn_id'
-              )
-          )::text AS tts_silent_playouts,
-          count(*) FILTER (WHERE type = 'TOOL_REJECTED' AND payload->>'name' = 'record_promise_to_pay'
-                             AND payload->>'reason' = 'INVALID_ARGS' AND payload->>'detail' IN ${sql.in(READBACK_UNHEARD_DETAILS)})::text AS readbacks_repeated_unheard,
-          count(*) FILTER (WHERE type = 'CALL_CONTROL' AND payload->>'action' = 'HANGUP' AND payload->>'reason' = ${ORPHANED_REASON})::text AS calls_orphaned
-        FROM conversation_events`,
-    });
+    const reliabilityCountsFor = (conversationIds: ReadonlyArray<string>) =>
+      conversationIds.length === 0 ? Effect.succeed(EMPTY_COUNTS) : countReliability(sql`conversation_id IN ${sql.in(conversationIds)}`);
+
+    /** All-time. A full scan with a correlated NOT EXISTS: ~0.29 s on 14 000 conversations. */
+    const reliabilityCounts = () => countReliability(sql`true`);
 
     /** Prior completed conversations for cross-call memory (newest first). */
     const priorConversations = SqlSchema.findAll({

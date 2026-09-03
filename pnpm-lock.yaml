@@ -52,6 +52,9 @@ importers:
 
   apps/load-test:
     dependencies:
+      '@feather-lite/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
       postgres:
         specifier: ^3.4.7
         version: 3.4.9
