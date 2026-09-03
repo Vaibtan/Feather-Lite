@@ -121,10 +121,4 @@ export class ControlPlaneClient {
       body: JSON.stringify({ agent_name: agentName, ...(meta === undefined ? {} : { meta }), conversations }),
     }).catch(() => undefined);
   }
-
-  async conversation(conversationId: string): Promise<{ conversation: { current_state: string; final_outcome: string | null } }> {
-    const res = await fetch(`${this.cfg.baseUrl}/api/conversations/${conversationId}`, { headers: this.headers() });
-    if (!res.ok) throw new Error(`detail ${res.status}`);
-    return (await res.json()) as { conversation: { current_state: string; final_outcome: string | null } };
-  }
 }

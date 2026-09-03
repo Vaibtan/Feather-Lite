@@ -115,9 +115,6 @@ export type CallAttemptStatus = typeof CallAttemptStatus.Type;
 export const BorrowerStatus = Schema.Literal("ACTIVE", "OPT_OUT", "DECEASED");
 export type BorrowerStatus = typeof BorrowerStatus.Type;
 
-export const ContactPointType = Schema.Literal("PHONE");
-export type ContactPointType = typeof ContactPointType.Type;
-
 export const ConsentStatus = Schema.Literal("ALLOWED", "OPTED_OUT", "UNKNOWN");
 export type ConsentStatus = typeof ConsentStatus.Type;
 

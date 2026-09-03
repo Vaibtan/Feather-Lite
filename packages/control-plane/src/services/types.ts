@@ -36,9 +36,9 @@ export type { TurnChunk };
  * Distinct from `conversations.decider`, which names the decider *service* configured for the whole
  * call. Every turn of an `openai` call reads `openai` there whether the model was consulted or a
  * regex answered in a microsecond, and averaging those into one latency window is how a fast path
- * flatters a p95. `fast-path` is reserved for D2 and is not produced yet.
+ * flatters a p95.
  */
-export type TurnDecisionSource = "override" | "fast-path" | "model" | "scripted" | "none";
+export type TurnDecisionSource = "override" | "model" | "scripted" | "none";
 
 /**
  * What the control plane did about this turn (issue #1, D1).

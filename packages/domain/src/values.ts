@@ -70,24 +70,3 @@ export const MoneyAmount = Schema.transformOrFail(
   },
 );
 export type MoneyAmount = typeof MoneyAmount.Type;
-
-/** E.164 phone number. */
-export const E164 = Schema.String.pipe(Schema.pattern(/^\+[1-9]\d{6,14}$/), Schema.brand("E164"));
-export type E164 = typeof E164.Type;
-
-/** IANA timezone name, validated with the runtime's Intl data. */
-export const TimeZone = Schema.String.pipe(
-  Schema.filter(
-    (tz) => {
-      try {
-        new Intl.DateTimeFormat("en-US", { timeZone: tz });
-        return true;
-      } catch {
-        return false;
-      }
-    },
-    { message: () => "expected an IANA timezone name" },
-  ),
-  Schema.brand("TimeZone"),
-);
-export type TimeZone = typeof TimeZone.Type;

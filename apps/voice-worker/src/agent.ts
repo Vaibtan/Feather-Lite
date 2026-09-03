@@ -33,7 +33,7 @@ import { ControlPlaneClient } from "./control-plane-client.js";
 import { resumeIfBackchannel } from "./resume-backchannel.js";
 import { FeatherAgent } from "./feather-agent.js";
 import { buildSpeechStack } from "./speech.js";
-import { RemoteOrchestratorLLM } from "./tracer/remote-orchestrator-llm.js";
+import { RemoteOrchestratorLLM } from "./remote-orchestrator-llm.js";
 
 loadEnv({ path: fileURLToPath(new URL("../../../.env", import.meta.url)) });
 

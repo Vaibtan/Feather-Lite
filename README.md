@@ -25,7 +25,7 @@ v1 came first and was rewritten after the review in `docs/reviews/`; it is gone 
 |---|---|---|
 | Pure domain (`packages/domain`): states, adjacency, overrides, tool matrix, event union, replay reducer, pre-call policy, scripts, percentiles, redaction, turn-taking metrics | done | 274 unit tests. The turn-taking metrics carry a segment: they are **VAD-interruption** numbers from the tier-3 simulator, `harness: "sim"`, excluded from the real-call SLO window (user story 35) |
 | Control plane (`packages/control-plane`): Effect services, Postgres via `@effect/sql-pg`, three-phase turn, tools with idempotency, scheduled-action + outbox workers, scripted + OpenAI deciders, Langfuse tracing | done | 89 unit + 99 DB tests (99 pass, 0 skipped — issue #3 closed by C14), incl. **20/20 scenarios** on real Postgres |
-| HTTP API (`packages/contracts` + `apps/server`): Effect HttpApi, 25 routes, OpenAPI at `/docs`, SSE turn stream, bearer/rate-limit middleware with counted rejections | done | live smoke: start / turn(SSE) / replay / 409 / 422 / scenarios |
+| HTTP API (`packages/contracts` + `apps/server`): Effect HttpApi, 26 routes, OpenAPI at `/docs`, SSE turn stream, bearer/rate-limit middleware with counted rejections | done | live smoke: start / turn(SSE) / replay / 409 / 422 / scenarios |
 | Voice worker (`apps/voice-worker`): LiveKit Agents 1.6 `llmNode` → `/turn`, barge-in heard-text, interruptible read-back guard, AMD-gated SIP path, heartbeats | done (browser path) | automated real voice call on LiveKit Cloud with GPT-4.1; scripted voice call == simulation scenario (state path, tools, outcome) |
 | Operator console (`apps/console`): conversations, transcript + timeline + replay, simulate (streaming), **call me in the browser**, scenario matrix, status/seed | done | headless run: 20/20 matrix, PTP simulation, browser call joined LiveKit Cloud with live transcript |
 | Deployment on free tiers (Neon + Cloudflare Tunnel + Pages + LiveKit Build) | documented, needs your accounts | `docs/deploy/free-tier-live-demo.md` |
@@ -101,10 +101,10 @@ Same stream for the console (`Simulate`) and the voice worker; `turn_id` idempot
 
 ```
 packages/domain/         pure: enums, ids, values, stateMachine, overrides, tools, events, replay, transcript, preCall, context, scripts, turn
-packages/contracts/      HttpApi definition (18 routes) + SSE turn frames
+packages/contracts/      HttpApi definition (26 routes) + SSE turn frames
 packages/control-plane/  config, db (migrations, repos), services (Orchestrator, Workflow, Scheduling, Outbox, Scenarios, Seed, VoiceSessions, Tracing, VirtualClock), llm (LlmClient, prompts, OpenAITurnDecider), http (handlers, TurnRunner, app)
 apps/server/             Node entry: API + in-process schedulers
-apps/voice-worker/       LiveKit Agents worker (+ tracer/ harnesses: fake borrower, fleet, equivalence, lk-smoke, text-run)
+apps/voice-worker/       LiveKit Agents worker (+ tracer/ harnesses: fleet, sim-borrower, chaos, shed-probe, lk-smoke)
 apps/console/            Vite + TS operator console (no framework), deploys to Pages
 apps/load-test/          tier-1 control-plane load harness (plain tsx)
 deploy/livekit/          livekit-server config for the self-hosted compose profile
@@ -254,12 +254,11 @@ set it before a tier-1 load run, which would otherwise export a span per scripte
 ### Tests
 
 ```bash
-pnpm check                       # typecheck + unit tests (domain 274, control-plane 89, voice-worker 94, load-test 48)
-pnpm test:db                     # 99 DB tests on Postgres: 20 scenarios, repos, concurrency, superseded transcript, workers, LLM leak, SLO segments
-pnpm --filter @feather-lite/voice-worker text-run      # LiveKit text-mode harness against the fake control plane
-pnpm --filter @feather-lite/voice-worker fake-borrower # automated real voice call + SPEC §10.5 equivalence assertion
+pnpm check                       # typecheck + unit tests (domain 387, control-plane 101, voice-worker 114, load-test 48)
+pnpm test:db                     # 120 DB tests on Postgres: 20 scenarios, repos, concurrency, superseded transcript, workers, LLM leak, SLO segments
+pnpm --filter @feather-lite/voice-worker fake-borrower-fleet -- --calls 1 --in-proc --label one   # one real voice call + SPEC §10.5 equivalence assertion
 pnpm loadtest:tier1 -- --concurrency 100 --ramp 2      # control-plane load: 100 concurrent conversations
-pnpm loadtest:tier2 -- --calls 5                       # voice load: 5 concurrent real calls, each equivalence-checked
+pnpm loadtest:tier2 -- --calls 5 --label n5            # voice load: 5 concurrent real calls, each equivalence-checked (--label is required)
 ```
 
 CI (`.github/workflows/ci.yml`) runs typecheck, unit tests and the DB suite against a Postgres

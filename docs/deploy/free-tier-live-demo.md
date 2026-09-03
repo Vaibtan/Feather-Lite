@@ -90,7 +90,7 @@ CARTESIA_API_KEY=...
 ```
 
 Rehearse the path you will demo, whichever you pick: `pnpm --filter @feather-lite/voice-worker
-fake-borrower` runs a real call end to end and exits non-zero unless the ledger matches the
+fake-borrower-fleet -- --calls 1 --in-proc --label smoke` runs a real call end to end and exits non-zero unless the ledger matches the
 simulation scenario. It is the fastest way to find out that the media path is degraded *before* an
 interviewer is watching.
 
@@ -156,6 +156,6 @@ Then open the console URL: **Scenarios → Run all** (20/20), **Simulate**, **Li
   → speech is reaching the SFU but transcripts are arriving after the 12 s away-timeout. Check the
   worker log for `eou_metrics` and read `transcriptionDelayMs`: healthy is 200–500 ms. If it is
   seconds, the STT provider is the problem, not the call logic — switch `STT_TTS_PROVIDER=plugins`
-  (or back to `inference`) and re-run `fake-borrower`. Diagnosed in ADR 0006.
+  (or back to `inference`) and re-run the fleet at `--calls 1`. Diagnosed in ADR 0006.
 - 401 on POSTs from the console → token missing; open `…/?api=<url>#token=<token>` again.
 - 429 → per-IP rate limit or daily turn budget (both only in `DEMO_MODE`).
