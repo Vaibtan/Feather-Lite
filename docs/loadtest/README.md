@@ -1750,3 +1750,30 @@ proposal, the decline transition and the finalisation correctly). Two things for
 - The read-back's playout report was booked to the *next* turn in `cleanup-gate` call01 (event 19
   carries turn `db3d…` with the read-back's text), the attribution race the worker's
   `reportTurnPlayout` ordering exists to prevent. Worth a look before Phase 2 is called closed.
+
+## 2026-09-03 — the wait ladder's N=5 gate
+
+Run after the wait ladder (`a307d95..HEAD`: `holdRequest` returns a phrase and a kind, the
+discourse markers join the filler, and the worker owns the only silence clock). `stack:quiet`
+green, Langfuse down, TTS timeouts 0. `server` and `worker` rebuilt first — `loadtest:tier2:docker`
+rebuilds only `harness`, so without that the run measures the previous tree.
+
+| run | equivalent | silent | WER p50/p95 | failures |
+|---|---:|---:|---:|---|
+| `wait-ladder` | 3/5 | 1/14 | 0 / 1.000 | call03: the payment half arrived first and a late "Actually, wait." superseded it → no proposal, then the ladder closed the call, NO_ANSWER. call04: the read-back's playout was booked to the *next* turn, so the fully-heard guard rejected `record_promise_to_pay` and repeated the read-back, FAILED |
+
+Both failures are the two shapes the previous gate already recorded, one per run there and both in
+this one; N=5 does not separate that from the underlying defect count. What did change is visible
+in call04's ledger: `"Actually, wait."` no longer produces `USER_DECLINED`. It takes the `wait`, and
+the confirmation that follows reaches `record_promise_to_pay` — where the playout attribution race
+rejects it. The lexicon half of the split-final defect is closed; the ordering half is not.
+
+The ladder itself was verified separately, because the fleet's failures do not exercise its timings:
+
+- `tier3-hold-request-clock-diag`: PROMISE_TO_PAY, ledger shape as expected, and the worker logged
+  `turn_end … extendAwayMs 15000` followed by the clock arming on 15 000 for the errand hold, so the
+  errand window is applied and the borrower is not nudged while fetching a card.
+- call03's first strike landed 12.0 s after the borrower's final rather than the bare hold's 5 s.
+  That is not the window: the clock arms only when the agent returns to `listening`, and that turn
+  had superseded one still in flight. The second strike followed 20.0 s later and closed the call,
+  which is the ladder behaving as specified.
