@@ -1915,3 +1915,41 @@ because the silence clock's nudge is an interruptible speech belonging to no tur
 turn before it would have asserted `resume` about a turn whose speech was never paused. Seen live
 on `backchannel-mid-line` seed 12: `speechId: speech_a6a2e2fa-52d`, `resumed_ms: [314]`, on the turn
 that spoke it.
+
+## 2026-09-06 — D5.2 answered from the VAD's own accounting, not from another sweep
+
+D5.2 measured `interruption.minDuration` at 700 ms against 500 and found it cut the agent as often,
+which made no sense for a backchannel that is ~300–400 ms of speech. The retrospective offered two
+hypotheses: the VAD's speech span is longer than the word, or the interruption check keys on
+something other than speech duration. **Both are true, and the source says so** (pinned
+`@livekit/agents@1.6.4` dist):
+
+1. **The gate reads a speech duration that is still counting the trailing silence.**
+   `inference/vad.js:260` is `if (pubSpeaking) pubSpeechDurationMs += windowDurationMs`, and
+   `pubSpeaking` stays true until `silenceThresholdDurationMs >= minSilenceDuration`
+   (`:307`) — 550 ms on this worker. So the `INFERENCE_DONE` events published through the
+   borrower's pause keep growing `speechDuration` by a window at a time, and a 350 ms "mm-hm"
+   reaches ~900 ms before the speech is declared over. `END_OF_SPEECH` corrects it —
+   `speechDuration: Math.max(0, pubSpeechDurationMs - silenceThresholdDurationMs)` (`:315`) — but
+   the interruption gate does not read that event.
+
+2. **The interruption gate is on `INFERENCE_DONE`, and the interruption decision itself never looks
+   at duration.** `agent_activity.js:1114` is
+   `if (ev.speechDuration >= interruption.minDuration) this.interruptByAudioActivity()`, and
+   `interruptByAudioActivity` (`:1128`) gates only on `interruption.minWords` against the current
+   transcript — which this worker does not set, so that gate is inert.
+
+So `minDuration` has to exceed roughly `the word + minSilenceDuration` before a backchannel stops
+crossing it: with `WORKER_VAD_MIN_SILENCE_MS` at 550, that is ~900 ms and above. Neither 500 nor 700
+is anywhere near it, which is exactly the null result D5.2 recorded. And a `minDuration` set high
+enough to exclude a backchannel would let a real interruption run most of a second into the agent's
+line, which is the trade the number was chosen to avoid.
+
+**What this changes.** The lever is `minSilenceDuration`, not `minDuration` — or the `resume` path,
+which is what this project actually uses and which does not depend on either. The Phase 1.3
+instrument is still worth building to confirm this on a call rather than in a reading, but it is now
+a confirmation rather than an investigation, and `interruption.minDuration` should not be swept
+again on its own.
+
+Still owed: one `backchannel-mid-line` run with the VAD speech duration and the following transcript
+logged at each interruption, to put a measured number beside the two source citations above.
