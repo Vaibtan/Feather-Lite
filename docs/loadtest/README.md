@@ -1841,3 +1841,49 @@ scenario whose evidence is already in.
 `depends_on: worker`, and `docker compose run --build` builds the dependencies too: with no build
 command of our own running, the `server` and `worker` images were created at the moment the fleet
 command started. Rebuilding them first is belt-and-braces, not a requirement.
+
+## 2026-09-05 — the end-of-turn prediction recorded, and three attribution repairs
+
+Run on `be77686`. `stack:quiet` green, Langfuse down, TTS timeouts 0.
+
+| run | equivalent | silent playouts | turn p50/p95 | WER p50/p95 | entity errors | stretches without playout |
+|---|---:|---:|---:|---:|---:|---:|
+| `phase0-gate-a` | 5/5 | 0/7 | 2183 / 6249 ms | 0.000 / 0.000 | 0 | 7 |
+| `phase0-gate-b` | 5/5 | 0/9 | 2106 / 4484 ms | 0.000 / 0.111 | 0 | 6 |
+| `phase1-eot-instrument` | 5/5 | 0/10 | 2043 / 2149 ms | 0.000 / 0.000 | 0 | 5 |
+
+The instrument is a listener, and the latency is unchanged at p50. Five stretches without playout
+over five calls is one each: the opening, which `opening_played` reports and a playout never does.
+
+**15 of 15 turns carry `eou_probability`, `eou_threshold` and `eou_inference_ms`**, which is what
+this phase was for: the `unlikelyThreshold` sweep (issue #1, D5.3) is now an offline replay over
+recorded values rather than three more fleet runs. Probabilities on the clean persona sit at
+0.55–0.84 against a threshold of 0.36, with inference at 82–198 ms.
+
+### Three repairs the first live run of the instrument exposed
+
+Recording the prediction meant reading a turn's whole row for the first time, and the row was wrong.
+All three are corrections to the segment-attribution commit, and all three are in `be77686`:
+
+- **the end-of-utterance reading was one turn late.** The framework emits `eou_metrics` *after*
+  `llmNode` runs, so snapshotting it when a turn began gave every turn the previous turn's number
+  and the last turn of a call none. Before: `579.17` on turn 2, which is turn 1's reading, and
+  nothing on turn 3. After: `581.07 / 1080.19 / 576.33`, each against its own turn.
+- **a call the borrower ended lost its last turn's numbers entirely.** They are completed by the
+  next turn, and a hangup raises the SDK's `Close` event rather than a control-plane `end_call`.
+- **a turn the borrower talked over was reported as a voice failure.** On a barge-in the framework
+  aborts the TTS stream, so that segment's `tts_metrics` arrive after its truncated item and the
+  segment they name has closed; the turn then looked as though nothing had been synthesised.
+
+None of them reached the fleet's own gates — equivalence reads the ledger's shape, and the
+silent-playout rate reads the playout row rather than the worker's flag — which is why the
+`phase0-gate-a`/`-b` numbers above stand as recorded.
+
+### A discarded run, and the reason
+
+The first attempt at `phase1-eot-instrument` came back 3/5 with WER p95 1.000 and call durations of
+727–788 s against the usual 113–128 s. That is a starved box, not a tree: Windows Defender had
+accumulated 6 196 s of CPU scanning four back-to-back image builds, and `livekit` then exited 255
+under the memory pressure, which is why the next attempt produced no report at all. Restarting the
+stack and re-running on an idle box gave the numbers above. `stack:quiet` passes on memory and does
+not see CPU contention — a 6× wall-clock stretch on call duration is the signal that does.
