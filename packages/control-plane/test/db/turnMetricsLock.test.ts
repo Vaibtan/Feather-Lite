@@ -41,7 +41,7 @@ describe("a turn_metrics signal arriving while the conversation row is locked", 
         // The bound is well under the lock's lifetime: taking `FOR UPDATE` on the same row would
         // time out here.
         const signalled = yield* orch
-          .processSignal(started.conversationId, { kind: "turn_metrics", turnId: "t1", eouDelayMs: 578, transcriptionDelayMs: 522, ttsTtfbMs: 385 })
+          .processSignal(started.conversationId, { kind: "turn_metrics", turnId: "t1", eouDelayMs: 578, transcriptionDelayMs: 522, ttsTtfbMs: 385, eouProbability: 0.87, eouThreshold: 0.15, eouInferenceMs: 21 })
           .pipe(Effect.timeout("1500 millis"), Effect.either);
 
         yield* Fiber.join(holder);
@@ -55,5 +55,9 @@ describe("a turn_metrics signal arriving while the conversation row is locked", 
     expect(out.result["eou_delay_ms"]).toBe(578);
     expect(out.result["transcription_delay_ms"]).toBe(522);
     expect(out.result["tts_ttfb_ms"]).toBe(385);
+    // The detector's own decision at the pause, so the `unlikelyThreshold` sweep can replay it.
+    expect(out.result["eou_probability"]).toBe(0.87);
+    expect(out.result["eou_threshold"]).toBe(0.15);
+    expect(out.result["eou_inference_ms"]).toBe(21);
   }, 30_000);
 });

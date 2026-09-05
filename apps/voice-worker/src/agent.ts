@@ -235,6 +235,9 @@ export default defineAgent({
       const activity = (session as unknown as { _activity?: { currentSpeech?: { id?: string } } })._activity;
       return activity?.currentSpeech?.id ?? null;
     };
+    session.on(voice.AgentSessionEventTypes.EotPrediction, (ev) => {
+      agent.onEotPrediction({ probability: ev.probability, threshold: ev.threshold, inferenceMs: ev.inferenceDurationMs });
+    });
     session.on(voice.AgentSessionEventTypes.SpeechCreated, (ev) => {
       agent.noteSpeechCreated(ev.source, ev.speechHandle);
     });
@@ -279,7 +282,9 @@ export default defineAgent({
       }
       const num = (v: unknown) => (typeof v === "number" ? v : undefined);
       if (m["type"] === "eou_metrics") {
-        agent.onEouMetrics({ eouDelayMs: num(m["endOfUtteranceDelayMs"]), transcriptionDelayMs: num(m["transcriptionDelayMs"]) });
+        // The reading names the reply speech the framework created for the turn it measures, which
+        // is the same speech `SpeechCreated` announced before `llmNode` ran.
+        agent.onEouMetrics(typeof m["speechId"] === "string" ? m["speechId"] : null, { eouDelayMs: num(m["endOfUtteranceDelayMs"]), transcriptionDelayMs: num(m["transcriptionDelayMs"]) });
       } else if (m["type"] === "tts_metrics") {
         // `speechId` is stamped by the framework from the speech the synthesis ran under, so a
         // nudge's or the opening's audio is never counted against a control-plane turn.
@@ -302,9 +307,13 @@ export default defineAgent({
     });
     session.on(voice.AgentSessionEventTypes.Close, (ev) => {
       log("session closed", { reason: String(ev.reason) });
-      if (!agent.ended && !ended) {
-        void client.signal(conversationId, { kind: "hangup", reason: String(ev.reason) }).catch(() => undefined).then(() => hangup("session_closed"));
-      }
+      if (agent.ended || ended) return;
+      // A turn's numbers are completed by the next turn, and on this path there is no next turn.
+      // They go out before the hangup signal, which finalises the call.
+      void agent
+        .reportPendingTurns()
+        .then(() => client.signal(conversationId, { kind: "hangup", reason: String(ev.reason) }).catch(() => undefined))
+        .then(() => hangup("session_closed"));
     });
 
     await session.start({ agent, room: ctx.room });

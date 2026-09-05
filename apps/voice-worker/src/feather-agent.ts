@@ -3,7 +3,7 @@ import { type llm, voice } from "@livekit/agents";
 import type { TurnFrame } from "@feather-lite/contracts";
 import { safeFallback, SILENCE_WINDOW_MS } from "@feather-lite/domain";
 import type { ControlPlaneClient } from "./control-plane-client.js";
-import { SegmentLedger, type Closed } from "./segment-ledger.js";
+import { SegmentLedger, type Closed, type EotPrediction } from "./segment-ledger.js";
 
 export interface FeatherAgentDeps {
   readonly client: ControlPlaneClient;
@@ -84,9 +84,6 @@ export class FeatherAgent extends voice.Agent {
     });
     this.pendingSpeech.push(tracked);
   }
-  /** EOU metrics arrive before `llmNode` runs, so before the turn they belong to has an id. */
-  private pendingEou: { eouDelayMs?: number | undefined; transcriptionDelayMs?: number | undefined } | null = null;
-
   constructor(private readonly deps: FeatherAgentDeps) {
     super({ instructions: "Feather-Lite voice runtime. Spoken text is supplied by the control plane; the model is never called here." });
   }
@@ -162,9 +159,20 @@ export class FeatherAgent extends voice.Agent {
     }
   }
 
-  onEouMetrics(m: { eouDelayMs?: number | undefined; transcriptionDelayMs?: number | undefined }): void {
-    this.pendingEou = m;
+  onEouMetrics(speechId: string | null, m: { eouDelayMs?: number | undefined; transcriptionDelayMs?: number | undefined }): void {
+    this.segments.noteEou(speechId, m);
   }
+
+  /**
+   * The detector predicts at every pause, including pauses that do not end the turn, and the event
+   * carries no turn of its own. The last one before the turn was committed is therefore the closest
+   * the contract gets: a pause whose own inference timed out inherits the one before it.
+   */
+  onEotPrediction(p: EotPrediction): void {
+    this.pendingEot = p;
+  }
+
+  private pendingEot: EotPrediction | null = null;
 
   onResumed(pausedForMs: number | null): void {
     // Null means the agent was never observed to stop speaking, so there is no duration to report
@@ -209,7 +217,7 @@ export class FeatherAgent extends voice.Agent {
           { provider: `tts:${process.env["STT_TTS_PROVIDER"] === "plugins" ? "deepgram" : "livekit-inference"}`, kind: "timeout", stage: "tts", message: `no audio produced for turn ${t.turnId}`, conversation_id: this.deps.conversationId },
         ]);
       }
-      const measured = t.eouDelayMs !== undefined || t.transcriptionDelayMs !== undefined || t.ttfbMs !== undefined || t.audioMs > 0 || t.chars > 0;
+      const measured = t.eouDelayMs !== undefined || t.transcriptionDelayMs !== undefined || t.eot !== undefined || t.ttfbMs !== undefined || t.audioMs > 0 || t.chars > 0;
       const resumes = this.resumes;
       if (!measured && resumes.length === 0) continue;
       this.resumes = [];
@@ -222,10 +230,20 @@ export class FeatherAgent extends voice.Agent {
           ...(t.ttfbMs !== undefined ? { tts_ttfb_ms: t.ttfbMs } : {}),
           ...(t.audioMs > 0 ? { tts_audio_ms: t.audioMs } : {}),
           ...(t.chars > 0 ? { tts_chars: t.chars } : {}),
+          ...(t.eot === undefined ? {} : { eou_probability: t.eot.probability, eou_threshold: t.eot.threshold, eou_inference_ms: t.eot.inferenceMs }),
           ...(resumes.length > 0 ? { resumed_ms: resumes } : {}),
         })
         .catch((e) => this.deps.log("turn_metrics signal failed", { error: String(e) }));
     }
+  }
+
+  /**
+   * The numbers of every turn still open, for a call that ends without the control plane saying so:
+   * a borrower hangs up, the room goes away, the session gives up on a provider. Nothing will speak
+   * again, so the turn each of them belongs to is over even though no next turn will complete it.
+   */
+  async reportPendingTurns(): Promise<void> {
+    await this.publish(this.segments.drainTurns());
   }
 
   async endCall(reason: string): Promise<void> {
@@ -255,8 +273,10 @@ export class FeatherAgent extends voice.Agent {
     const turnId = randomUUID();
     const replySpeechId = this.pendingReplySpeechId;
     this.pendingReplySpeechId = null;
-    this.segments.beginTurn(turnId, this.pendingEou);
-    this.pendingEou = null;
+    // Not awaited: the previous turn's numbers go out ahead of this turn's request rather than
+    // delaying it, which is what the old report-on-the-next-turn path cost every turn.
+    void this.publish(this.segments.beginTurn(turnId, replySpeechId, this.pendingEot));
+    this.pendingEot = null;
 
     this.deps.log("turn", { turnId, userText });
     const frames = this.deps.client.turn(this.deps.conversationId, { turn_id: turnId, user_text: userText, supersede: true });
@@ -280,7 +300,6 @@ export class FeatherAgent extends voice.Agent {
           this.deps.biasRecogniser?.(end.bias_terms);
         }
         if (end.extend_away_ms !== undefined) this.setSilenceWindow(end.extend_away_ms);
-        void this.publish(this.segments.endTurn(turnId));
         if (end.end_call) void this.endCall(end.outcome ?? "completed");
       },
       (err) => {
@@ -291,7 +310,6 @@ export class FeatherAgent extends voice.Agent {
           this.segments.open({ segmentId: `${turnId}:fallback`, turnId, speechId: handle.id });
           this.trackSpeech(handle.waitForPlayout());
         }
-        void this.publish(this.segments.endTurn(turnId));
       },
     );
   }

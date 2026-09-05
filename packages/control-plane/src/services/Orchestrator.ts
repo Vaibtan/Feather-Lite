@@ -92,6 +92,9 @@ export type Signal =
       readonly ttsAudioMs?: number | undefined;
       readonly ttsChars?: number | undefined;
       readonly resumedMs?: ReadonlyArray<number> | undefined;
+      readonly eouProbability?: number | undefined;
+      readonly eouThreshold?: number | undefined;
+      readonly eouInferenceMs?: number | undefined;
     };
 
 export type Emit = (frame: TurnFrame) => Effect.Effect<void>;
@@ -642,12 +645,19 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           transcription_delay_ms: signal.transcriptionDelayMs ?? null,
           tts_ttfb_ms: signal.ttsTtfbMs ?? null,
         };
+        // The detector's own decision at the pause this turn was committed on, recorded so the
+        // `unlikelyThreshold` sweep is an offline replay rather than three more fleet runs.
+        const eot = {
+          ...(signal.eouProbability !== undefined ? { eou_probability: signal.eouProbability } : {}),
+          ...(signal.eouThreshold !== undefined ? { eou_threshold: signal.eouThreshold } : {}),
+          ...(signal.eouInferenceMs !== undefined ? { eou_inference_ms: signal.eouInferenceMs } : {}),
+        };
         const ttsShape = {
           ...(signal.resumedMs !== undefined && signal.resumedMs.length > 0 ? { resumed_ms: [...signal.resumedMs] } : {}),
           ...(signal.ttsAudioMs !== undefined ? { tts_audio_ms: signal.ttsAudioMs } : {}),
           ...(signal.ttsChars !== undefined ? { tts_chars: signal.ttsChars } : {}),
         };
-        yield* conv.mergeTurnResult({ conversationId: row.id, turnId: signal.turnId, patch: { ...latency, ...ttsShape } });
+        yield* conv.mergeTurnResult({ conversationId: row.id, turnId: signal.turnId, patch: { ...latency, ...ttsShape, ...eot } });
         yield* tracing.turnLatency(row.id, signal.turnId, {
           eouDelayMs: latency.eou_delay_ms,
           transcriptionDelayMs: latency.transcription_delay_ms,

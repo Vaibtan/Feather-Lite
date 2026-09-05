@@ -183,6 +183,14 @@ export const SignalRequest = Schema.Union(
     tts_audio_ms: Schema.optional(Schema.Number),
     tts_chars: Schema.optional(Schema.Number),
     /**
+     * The end-of-turn decision the detector already made at the pause this turn was committed on
+     * (issue #1, D5.3). Per pause, not per 600 ms: the detector runs when VAD sees silence.
+     * `eou_probability` against `eou_threshold` is the "unlikely" branch the sweep would move.
+     */
+    eou_probability: Schema.optional(Schema.Number),
+    eou_threshold: Schema.optional(Schema.Number),
+    eou_inference_ms: Schema.optional(Schema.Number),
+    /**
      * Pauses this turn recovered from without cutting the agent's line (issue #1, D1's `resume`).
      *
      * One entry per resume, each the milliseconds the audio was paused. Absent on almost every turn;

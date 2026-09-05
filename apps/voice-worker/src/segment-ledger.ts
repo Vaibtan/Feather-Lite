@@ -31,10 +31,16 @@ export interface TurnMetrics {
   readonly turnId: string;
   readonly eouDelayMs: number | undefined;
   readonly transcriptionDelayMs: number | undefined;
+  readonly eot: EotPrediction | undefined;
   readonly ttfbMs: number | undefined;
   readonly audioMs: number;
   readonly chars: number;
-  /** No audio was synthesised for any segment of this turn. */
+  /**
+   * No audio was synthesised for any segment of this turn. Never true for a turn the borrower talked
+   * over: the framework aborts the stream on a barge-in, so that segment's `tts_metrics` arrive after
+   * its truncated item and the segment they belong to has already closed. The item's own text is the
+   * audio truth there.
+   */
   readonly silent: boolean;
 }
 
@@ -46,6 +52,13 @@ export interface Closed {
 export interface EouReading {
   readonly eouDelayMs?: number | undefined;
   readonly transcriptionDelayMs?: number | undefined;
+}
+
+/** The detector's own end-of-turn decision at the pause this turn was committed on. */
+export interface EotPrediction {
+  readonly probability: number;
+  readonly threshold: number;
+  readonly inferenceMs: number;
 }
 
 export interface TtsReading {
@@ -65,37 +78,65 @@ interface Segment {
 }
 
 interface Turn {
+  /** The framework's id for the speech that answers this turn; the EOU reading names it. */
+  replySpeechId: string | null;
   eouDelayMs: number | undefined;
   transcriptionDelayMs: number | undefined;
+  eot: EotPrediction | undefined;
   ttfbMs: number | undefined;
   audioMs: number;
   chars: number;
   producedAudio: boolean;
-  open: number;
-  ended: boolean;
+  interrupted: boolean;
 }
 
 export class SegmentLedger {
   private readonly segments = new Map<string, Segment>();
   private readonly turns = new Map<string, Turn>();
   private sequence = 0;
+  private currentTurnId: string | null = null;
 
   /**
-   * The end-of-utterance numbers arrive before the turn they belong to has an id, so they are stamped
-   * on when it gets one. A turn that never speaks — a `wait` — still reports them.
+   * The detector's prediction is made at the pause that ends the borrower's turn, so it is already in
+   * hand when the turn gets an id; the end-of-utterance numbers are emitted afterwards, against the
+   * reply speech, and arrive through `noteEou`. A turn that never speaks — a `wait` — still reports
+   * both.
    */
-  beginTurn(turnId: string, eou: EouReading | null): void {
+  beginTurn(turnId: string, replySpeechId: string | null, eot: EotPrediction | null): Closed {
     const turn = this.turnOf(turnId);
-    turn.eouDelayMs = eou?.eouDelayMs;
-    turn.transcriptionDelayMs = eou?.transcriptionDelayMs;
+    turn.replySpeechId = replySpeechId;
+    turn.eot = eot ?? undefined;
+    this.currentTurnId = turnId;
+    // A turn's own numbers are complete once another turn has started, and not before: the
+    // end-of-utterance reading arrives after the reply does, and a turn that never spoke — a
+    // `wait` — has no segment whose report could stand for the turn being over.
+    return { segments: [], turns: [...this.turns.keys()].filter((t) => t !== turnId).flatMap((t) => this.closeTurn(t).turns) };
+  }
+
+  /**
+   * Measured on the borrower turn that has just been committed and emitted a moment after the reply
+   * speech was created, naming that speech. Only one turn is open at a time, so today the speech id
+   * and the open turn agree; the id is used because it is the framework's own answer rather than an
+   * inference, and it stays right if that ever stops being true.
+   */
+  noteEou(speechId: string | null, m: EouReading): void {
+    const turn = this.turnForReply(speechId);
+    if (turn === undefined) return;
+    turn.eouDelayMs = m.eouDelayMs;
+    turn.transcriptionDelayMs = m.transcriptionDelayMs;
+  }
+
+  private turnForReply(speechId: string | null): Turn | undefined {
+    if (speechId !== null) {
+      for (const turn of this.turns.values()) if (turn.replySpeechId === speechId) return turn;
+    }
+    return this.currentTurnId === null ? undefined : this.turns.get(this.currentTurnId);
   }
 
   open(segment: OpenSegment): void {
     if (this.segments.has(segment.segmentId)) return;
     this.sequence += 1;
     this.segments.set(segment.segmentId, { ...segment, openedAt: this.sequence, producedAudio: false });
-    const turn = this.turnOf(segment.turnId);
-    turn.open += 1;
   }
 
   /**
@@ -107,7 +148,12 @@ export class SegmentLedger {
     const segment = this.resolve(speechId);
     if (segment === undefined) return;
     segment.producedAudio = true;
-    const turn = this.turnOf(segment.turnId);
+    // A segment can outlive its turn — a queued or interrupted one still reports its own playout —
+    // and a turn that has already been reported must not be recreated to hold a late reading. The
+    // control plane merges a `turn_metrics` patch key by key, so a second report for the same turn
+    // would overwrite that turn's delays with nulls.
+    const turn = this.turns.get(segment.turnId);
+    if (turn === undefined) return;
     turn.producedAudio = true;
     // First one wins: `ttfbMs` is per segment, and the turn's is its first segment's.
     if (turn.ttfbMs === undefined && m.ttfbMs !== undefined && m.ttfbMs >= 0) turn.ttfbMs = m.ttfbMs;
@@ -115,7 +161,7 @@ export class SegmentLedger {
     turn.chars += m.charactersCount ?? 0;
   }
 
-  /** The framework delivered a spoken item: that segment is over. */
+  /** The framework delivered a spoken item: that segment is over and is reported on its own. */
   deliver(speechId: string | null, item: { readonly text: string; readonly interrupted: boolean }): Closed {
     const segment = this.resolve(speechId);
     if (segment === undefined) return NOTHING;
@@ -127,31 +173,35 @@ export class SegmentLedger {
      * text is already the audio truth.
      */
     const silent = !item.interrupted && !segment.producedAudio;
-    const playout = this.close(segment, silent ? { text: "", interrupted: true } : item);
-    return { segments: [playout], turns: this.closeTurnIfDone(segment.turnId).turns };
-  }
-
-  /** `turn_end` has been seen: this turn will not name any more segments. */
-  endTurn(turnId: string): Closed {
-    this.turnOf(turnId).ended = true;
-    return this.closeTurnIfDone(turnId);
+    return { segments: [this.close(segment, silent ? { text: "", interrupted: true } : item)], turns: [] };
   }
 
   /**
    * Everything still open is over, whether or not the framework ever delivered its item. An
    * undelivered segment is reported unheard, which is the same fail-closed report a stalled one gets.
    */
-  drain(exceptTurnId?: string): Closed {
-    const stale = [...this.segments.values()].filter((s) => s.turnId !== exceptTurnId).sort((a, b) => a.openedAt - b.openedAt);
+  /**
+   * Every turn's numbers, without touching its segments. What an abrupt close can honestly report:
+   * a segment nobody delivered an item for is unheard because the call ended, not because the
+   * synthesis failed, and reporting it as unheard would read as a TTS failure on the rate that
+   * exists to catch those.
+   */
+  drainTurns(): Closed {
+    return { segments: [], turns: [...this.turns.keys()].flatMap((t) => this.closeTurn(t).turns) };
+  }
+
+  drain(): Closed {
+    const stale = [...this.segments.values()].sort((a, b) => a.openedAt - b.openedAt);
     const segments = stale.map((s) => this.close(s, { text: "", interrupted: true }));
-    const turns = [...this.turns.keys()].filter((t) => t !== exceptTurnId).flatMap((t) => this.closeTurn(t).turns);
+    const turns = [...this.turns.keys()].flatMap((t) => this.closeTurn(t).turns);
+    this.currentTurnId = null;
     return { segments, turns };
   }
 
   private turnOf(turnId: string): Turn {
     const existing = this.turns.get(turnId);
     if (existing !== undefined) return existing;
-    const fresh: Turn = { eouDelayMs: undefined, transcriptionDelayMs: undefined, ttfbMs: undefined, audioMs: 0, chars: 0, producedAudio: false, open: 0, ended: false };
+    const fresh: Turn = { replySpeechId: null, eouDelayMs: undefined, transcriptionDelayMs: undefined, eot: undefined, ttfbMs: undefined, audioMs: 0, chars: 0, producedAudio: false, interrupted: false };
     this.turns.set(turnId, fresh);
     return fresh;
   }
@@ -172,15 +222,9 @@ export class SegmentLedger {
 
   private close(segment: Segment, heard: { readonly text: string; readonly interrupted: boolean }): SegmentPlayout {
     this.segments.delete(segment.segmentId);
-    const turn = this.turnOf(segment.turnId);
-    turn.open = Math.max(0, turn.open - 1);
+    const turn = this.turns.get(segment.turnId);
+    if (turn !== undefined && heard.interrupted) turn.interrupted = true;
     return { turnId: segment.turnId, segmentId: segment.segmentId, heardText: heard.text, interrupted: heard.interrupted };
-  }
-
-  private closeTurnIfDone(turnId: string): Closed {
-    const turn = this.turns.get(turnId);
-    if (turn === undefined || !turn.ended || turn.open > 0) return NOTHING;
-    return this.closeTurn(turnId);
   }
 
   private closeTurn(turnId: string): Closed {
@@ -189,7 +233,7 @@ export class SegmentLedger {
     this.turns.delete(turnId);
     return {
       segments: [],
-      turns: [{ turnId, eouDelayMs: turn.eouDelayMs, transcriptionDelayMs: turn.transcriptionDelayMs, ttfbMs: turn.ttfbMs, audioMs: turn.audioMs, chars: turn.chars, silent: !turn.producedAudio }],
+      turns: [{ turnId, eouDelayMs: turn.eouDelayMs, transcriptionDelayMs: turn.transcriptionDelayMs, eot: turn.eot, ttfbMs: turn.ttfbMs, audioMs: turn.audioMs, chars: turn.chars, silent: !turn.producedAudio && !turn.interrupted }],
     };
   }
 }
