@@ -168,11 +168,14 @@ export const TIER3_SCENARIOS: ReadonlyArray<Tier3Scenario> = [
     },
     expectedToFail: {
       reason: "VAD stops the agent for a backchannel, which is the false interruption D4 named",
-      until: "D5's `interruption.minDuration` sweep (issue #1, Phase 2)",
+      until: "a backchannel stops cutting the line — whichever knob the D5.2 diagnostic points at",
       /** Only the truncation is excused; any other failure still fails the run. */
       matches: /agent line\(s\) were cut off|no playout evidence/,
     },
-    notYetAsserted: ["a recorded `resume` decision (D4) — `resume` is issue #1's D2 and does not exist yet"],
+    notYetAsserted: [
+      "the VAD speech duration and the transcript behind each interruption, which is what would say whether the cut was a backchannel",
+      "a `resume` disposition: it is recorded now, but this scenario produces one on some seeds and not others, and an assertion that flaky would say nothing",
+    ],
     script: (rng) => ({
       name: "backchannel-mid-line",
       run: async (ctx) => {
@@ -209,9 +212,7 @@ export const TIER3_SCENARIOS: ReadonlyArray<Tier3Scenario> = [
      * Deliberately not `expectedToFail`: it was, on a single observation, and the next run of the
      * same seed passed and the tripwire refused it. A scenario is only known-red when reliably red.
      */
-    notYetAsserted: [
-      "a recorded `wait` decision, and no agent speech until the next borrower line (D4) — `wait` is issue #1's D1/D2 and does not exist yet",
-    ],
+    notYetAsserted: ["no agent speech until the next borrower line: the harness sees the agent's audio but not the ledger's silence, so the run asserts the `wait` and not its quiet"],
     script: (rng) => ({
       name: "hold-request",
       run: async (ctx) => {

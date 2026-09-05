@@ -261,7 +261,9 @@ export default defineAgent({
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (ev) => {
       // If `_activity` or its timer is gone, `resumeIfBackchannel` returns false and the call keeps
       // the SDK's ordinary resume path.
-      const activity = (session as unknown as { _activity?: { pausedSpeech?: unknown; startFalseInterruptionTimer?: (ms: number) => void } })._activity;
+      const activity = (session as unknown as { _activity?: { pausedSpeech?: { handle?: { id?: string } }; startFalseInterruptionTimer?: (ms: number) => void } })._activity;
+      // Read before resuming: the framework clears the paused speech as the speech loop picks it up.
+      const pausedSpeechId = activity?.pausedSpeech?.handle?.id ?? null;
       if (!resumeIfBackchannel(ev.transcript, activity)) {
         if (ev.isFinal) pausedAtMs = null;
         return;
@@ -269,8 +271,8 @@ export default defineAgent({
       // Null means the agent was not observed to stop, so there is no honest duration to report.
       const pausedFor = pausedAtMs === null ? null : Date.now() - pausedAtMs;
       pausedAtMs = null;
-      log("resumed on backchannel", { transcript: ev.transcript, pausedForMs: pausedFor });
-      agent.onResumed(pausedFor);
+      log("resumed on backchannel", { transcript: ev.transcript, pausedForMs: pausedFor, speechId: pausedSpeechId });
+      agent.onResumed(pausedSpeechId, pausedFor);
     });
     session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev) => {
       agent.noteUserListening(ev.newState === "listening");

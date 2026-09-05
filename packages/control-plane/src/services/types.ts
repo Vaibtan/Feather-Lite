@@ -29,6 +29,15 @@ export type { TurnChunk };
 
 export type TurnDecisionSource = "override" | "model" | "scripted" | "none";
 
+/**
+ * The two names for one decider. `conversations.decider` records which implementation served the
+ * call, in the words an operator sets `TURN_DECIDER` to; a turn records what decided that turn,
+ * which is a wider set — an override or a fallback decided some turns and no implementation did.
+ * They are not the same question, and this is the one place where the answers are paired, so a new
+ * decider cannot be added to one vocabulary and forgotten in the other.
+ */
+export const deciderSourceFor = (turnDecider: "scripted" | "openai"): TurnDecisionSource => (turnDecider === "scripted" ? "scripted" : "model");
+
 export type TurnDisposition = "respond" | "wait" | "resume" | "held";
 
 export type TurnResolution = "spoke" | "tool" | "rejected" | "degraded" | "superseded" | "none";

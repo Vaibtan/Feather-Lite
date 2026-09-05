@@ -158,9 +158,9 @@ export class Queries extends Effect.Service<Queries>()("@feather-lite/Queries", 
     // the first scan instead of each running their own.
     const ledgerCountsForStatus = yield* Effect.cachedWithTTL(ledgerCounts(), Duration.seconds(5));
 
-    // Conversation-level facets cannot separate two turns of one call, and the fast path makes them
-    // different populations: a regex answering in a microsecond and a model turn taking two seconds
-    // are both `voice`/`openai`.
+    // Conversation-level facets cannot separate two turns of one call, and the fast path will make
+    // them different populations: a regex answering in a microsecond and a model turn taking two
+    // seconds are both `voice`/`openai`. The `decider` facet is here for it; it is built in Phase 3.
     const turnRowsForMany = (
       conversationIds: ReadonlyArray<string>,
       turns?: { readonly decider?: string | null | undefined } | undefined,

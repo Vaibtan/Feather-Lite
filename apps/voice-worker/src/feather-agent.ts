@@ -174,13 +174,11 @@ export class FeatherAgent extends voice.Agent {
 
   private pendingEot: EotPrediction | null = null;
 
-  onResumed(pausedForMs: number | null): void {
+  onResumed(speechId: string | null, pausedForMs: number | null): void {
     // Null means the agent was never observed to stop speaking, so there is no duration to report
     // and a zero would be a claim rather than a measurement.
-    if (pausedForMs !== null) this.resumes.push(pausedForMs);
+    if (pausedForMs !== null) this.segments.noteResume(speechId, pausedForMs);
   }
-
-  private resumes: number[] = [];
 
   /** The reply speech for the turn about to run; `say` speeches are bound where they are created. */
   noteSpeechCreated(source: string, speech: { readonly id: string; readonly waitForPlayout: () => Promise<void> }): void {
@@ -218,9 +216,7 @@ export class FeatherAgent extends voice.Agent {
         ]);
       }
       const measured = t.eouDelayMs !== undefined || t.transcriptionDelayMs !== undefined || t.eot !== undefined || t.ttfbMs !== undefined || t.audioMs > 0 || t.chars > 0;
-      const resumes = this.resumes;
-      if (!measured && resumes.length === 0) continue;
-      this.resumes = [];
+      if (!measured && t.resumedMs.length === 0) continue;
       await this.deps.client
         .signal(this.deps.conversationId, {
           kind: "turn_metrics",
@@ -231,7 +227,7 @@ export class FeatherAgent extends voice.Agent {
           ...(t.audioMs > 0 ? { tts_audio_ms: t.audioMs } : {}),
           ...(t.chars > 0 ? { tts_chars: t.chars } : {}),
           ...(t.eot === undefined ? {} : { eou_probability: t.eot.probability, eou_threshold: t.eot.threshold, eou_inference_ms: t.eot.inferenceMs }),
-          ...(resumes.length > 0 ? { resumed_ms: resumes } : {}),
+          ...(t.resumedMs.length > 0 ? { resumed_ms: [...t.resumedMs] } : {}),
         })
         .catch((e) => this.deps.log("turn_metrics signal failed", { error: String(e) }));
     }

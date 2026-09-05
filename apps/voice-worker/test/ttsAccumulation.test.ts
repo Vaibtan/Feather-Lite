@@ -266,6 +266,24 @@ describe("turn_metrics across a multi-segment turn", () => {
     expect(providerEvents).toHaveLength(0);
   });
 
+  it("gives a resume to the turn whose speech was paused, and drops one from a speech no turn owns", async () => {
+    // The silence clock's nudge is an interruptible speech that belongs to no turn. A backchannel
+    // answering it pauses and resumes real audio, and booking that to the turn before it would
+    // assert a control-plane fact about a turn whose speech was never paused.
+    const { agent, signals, speechSaying } = makeAgent([[say("s1", "One."), turnEnd()]]);
+    await runTurn(agent, "first", "speech_reply_1");
+    agent.onEouMetrics("speech_reply_1", { eouDelayMs: 500 });
+    agent.onResumed(speechSaying("One."), 288);
+    agent.onResumed("speech_nudge", 412);
+    agent.reportPlayout(speechSaying("One."), { textContent: "One.", interrupted: false } as never);
+    await agent.endCall("completed");
+    await settle();
+
+    const m = metrics(signals);
+    expect(m).toHaveLength(1);
+    expect(m[0]?.["resumed_ms"]).toEqual([288]);
+  });
+
   it("does not count a nudge's audio against the turn before it", async () => {
     const { agent, signals, speechSaying } = makeAgent([[say("s1", "Thank you."), turnEnd()]]);
     await runTurn(agent, "yes", "speech_reply_1");

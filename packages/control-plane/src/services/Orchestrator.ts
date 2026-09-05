@@ -62,7 +62,7 @@ import { Tracing } from "./Tracing.js";
 import { ToolExecutor, type SaySegment } from "./ToolExecutor.js";
 import { CallFinalizer } from "./CallFinalizer.js";
 import { TurnDecider } from "./TurnDecider.js";
-import type { DeciderInput, TurnDecisionSource, TurnResult } from "./types.js";
+import { deciderSourceFor, type DeciderInput, type TurnDecisionSource, type TurnResult } from "./types.js";
 
 export interface TurnParams {
   readonly conversationId: string;
@@ -318,7 +318,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
             Effect.either,
           );
           const degraded = Either.isLeft(consumed) ? `${consumed.left._tag}: ${consumed.left.detail}` : decision === null ? "TurnDeciderInvalidOutput: stream ended without a decision" : null;
-          decisionResult = { decision, decider: cfg.turnDecider === "scripted" ? "scripted" : "model", streamedText: streamed, degraded, ttftMs: ttft };
+          decisionResult = { decision, decider: deciderSourceFor(cfg.turnDecider), streamedText: streamed, degraded, ttftMs: ttft };
         }
 
         const t2 = yield* sql.withTransaction(
@@ -652,7 +652,20 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           ...(signal.eouThreshold !== undefined ? { eou_threshold: signal.eouThreshold } : {}),
           ...(signal.eouInferenceMs !== undefined ? { eou_inference_ms: signal.eouInferenceMs } : {}),
         };
+        /**
+         * The agent was paused and carried on speaking, which is the sixth turn-taking outcome and
+         * until now was only legible as an array of durations. It narrows `respond` and nothing
+         * else: `wait` and `held` are decisions the control plane made, and a resume is an
+         * observation about the speech that followed one.
+         */
+        const resumed = signal.resumedMs !== undefined && signal.resumedMs.length > 0;
+        const priorDisposition = resumed
+          ? yield* conv.findTurn({ conversationId: row.id, turnId: signal.turnId }).pipe(
+              Effect.map(Option.match({ onNone: () => null, onSome: (t) => ((t.result as { disposition?: string } | null)?.disposition ?? null) })),
+            )
+          : null;
         const ttsShape = {
+          ...(resumed && priorDisposition === "respond" ? { disposition: "resume" } : {}),
           ...(signal.resumedMs !== undefined && signal.resumedMs.length > 0 ? { resumed_ms: [...signal.resumedMs] } : {}),
           ...(signal.ttsAudioMs !== undefined ? { tts_audio_ms: signal.ttsAudioMs } : {}),
           ...(signal.ttsChars !== undefined ? { tts_chars: signal.ttsChars } : {}),

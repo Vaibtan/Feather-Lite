@@ -35,6 +35,8 @@ export interface TurnMetrics {
   readonly ttfbMs: number | undefined;
   readonly audioMs: number;
   readonly chars: number;
+  /** Pauses this turn's speech recovered from without the agent being cut off. */
+  readonly resumedMs: ReadonlyArray<number>;
   /**
    * No audio was synthesised for any segment of this turn. Never true for a turn the borrower talked
    * over: the framework aborts the stream on a barge-in, so that segment's `tts_metrics` arrive after
@@ -88,6 +90,7 @@ interface Turn {
   chars: number;
   producedAudio: boolean;
   interrupted: boolean;
+  resumedMs: number[];
 }
 
 export class SegmentLedger {
@@ -161,6 +164,19 @@ export class SegmentLedger {
     turn.chars += m.charactersCount ?? 0;
   }
 
+  /**
+   * The agent's speech was paused by a backchannel and carried on. Attributed by the speech that was
+   * paused, because the opening and the silence clock's nudge are speeches too and neither belongs to
+   * a turn — a pause recovered from during one of those is not a fact about the turn before it.
+   */
+  noteResume(speechId: string | null, pausedForMs: number): void {
+    const segment = this.resolve(speechId);
+    if (segment === undefined) return;
+    const turn = this.turns.get(segment.turnId);
+    if (turn === undefined) return;
+    turn.resumedMs.push(pausedForMs);
+  }
+
   /** The framework delivered a spoken item: that segment is over and is reported on its own. */
   deliver(speechId: string | null, item: { readonly text: string; readonly interrupted: boolean }): Closed {
     const segment = this.resolve(speechId);
@@ -201,7 +217,7 @@ export class SegmentLedger {
   private turnOf(turnId: string): Turn {
     const existing = this.turns.get(turnId);
     if (existing !== undefined) return existing;
-    const fresh: Turn = { replySpeechId: null, eouDelayMs: undefined, transcriptionDelayMs: undefined, eot: undefined, ttfbMs: undefined, audioMs: 0, chars: 0, producedAudio: false, interrupted: false };
+    const fresh: Turn = { replySpeechId: null, eouDelayMs: undefined, transcriptionDelayMs: undefined, eot: undefined, ttfbMs: undefined, audioMs: 0, chars: 0, producedAudio: false, interrupted: false, resumedMs: [] };
     this.turns.set(turnId, fresh);
     return fresh;
   }
@@ -233,7 +249,7 @@ export class SegmentLedger {
     this.turns.delete(turnId);
     return {
       segments: [],
-      turns: [{ turnId, eouDelayMs: turn.eouDelayMs, transcriptionDelayMs: turn.transcriptionDelayMs, eot: turn.eot, ttfbMs: turn.ttfbMs, audioMs: turn.audioMs, chars: turn.chars, silent: !turn.producedAudio && !turn.interrupted }],
+      turns: [{ turnId, eouDelayMs: turn.eouDelayMs, transcriptionDelayMs: turn.transcriptionDelayMs, eot: turn.eot, ttfbMs: turn.ttfbMs, audioMs: turn.audioMs, chars: turn.chars, resumedMs: turn.resumedMs, silent: !turn.producedAudio && !turn.interrupted }],
     };
   }
 }

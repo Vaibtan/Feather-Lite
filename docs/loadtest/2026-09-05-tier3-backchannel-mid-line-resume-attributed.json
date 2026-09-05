@@ -1,0 +1,121 @@
+{
+  "tier": "3-sim",
+  "scenario": "backchannel-mid-line",
+  "seed": {
+    "given": "12",
+    "resolved": 12
+  },
+  "persona": {
+    "id": "street",
+    "voice": "aura-2-luna-en",
+    "requested": null,
+    "degradation": {
+      "snrDb": 15,
+      "lossRate": 0.01,
+      "burstiness": 4,
+      "muLaw": true
+    }
+  },
+  "interruption_mode": "vad",
+  "label": "resume-attributed",
+  "conversation_id": "bdabea7c-369d-4d9a-afa4-776444b13e8e",
+  "harness": "sim",
+  "expected": {
+    "failures": [
+      "2 agent line(s) were cut off, expected none"
+    ],
+    "verdict": "failed as expected — VAD stops the agent for a backchannel, which is the false interruption D4 named; a backchannel stops cutting the line — whichever knob the D5.2 diagnostic points at is what changes it",
+    "exit_code": 0,
+    "expected_to_fail": {
+      "reason": "VAD stops the agent for a backchannel, which is the false interruption D4 named",
+      "until": "a backchannel stops cutting the line — whichever knob the D5.2 diagnostic points at",
+      "matches": {}
+    },
+    "outcome": "PROMISE_TO_PAY",
+    "tools": [
+      "confirm_right_party",
+      "propose_promise_to_pay",
+      "record_promise_to_pay"
+    ],
+    "not_yet_asserted": [
+      "the VAD speech duration and the transcript behind each interruption, which is what would say whether the cut was a backchannel",
+      "a `resume` disposition: it is recorded now, but this scenario produces one on some seeds and not others, and an assertion that flaky would say nothing"
+    ]
+  },
+  "turn_taking": {
+    "response_rate": 0.5,
+    "yield_rate": 0.5,
+    "yield_latency_ms": 683,
+    "false_interrupt_rate": null,
+    "agent_interrupt_rate": 0,
+    "selectivity": null,
+    "counts": {
+      "lines": 4,
+      "interruptions": 2,
+      "non_directed": 0,
+      "non_directed_during_agent_speech": 0,
+      "unknown_truncation": 1
+    }
+  },
+  "dispositions": [
+    "resume",
+    "respond",
+    "respond",
+    "respond"
+  ],
+  "slo": {
+    "verdict": "breach",
+    "segment": {
+      "channel": null,
+      "decider": null,
+      "calls_requested": 50,
+      "calls_found": 50
+    },
+    "breaches": [
+      "total_ms",
+      "eou_delay_ms",
+      "transcription_delay_ms",
+      "ttft_ms"
+    ],
+    "insufficient": [],
+    "window_conversations": 50,
+    "excluded_by_rule": "harness IS NOT DISTINCT FROM null (Queries.latencyAggregateForSegment)"
+  },
+  "compliance": {
+    "checks": {
+      "compliance.mini_miranda_first": true,
+      "compliance.no_promise_without_readback": true,
+      "compliance.no_protected_before_rpc": true
+    },
+    "failed": [],
+    "count": 3
+  },
+  "entities": {
+    "measured": false,
+    "entity_er": null,
+    "note": "stt.entity_er is D3 (Phase 3); not measured"
+  },
+  "agent_stretches": {
+    "live": 4,
+    "post_hoc": 4
+  },
+  "stt_wer": [
+    {
+      "turn": "yes this is the borrower",
+      "wer": 0
+    },
+    {
+      "turn": "mm-hm (backchannel)",
+      "wer": 1
+    },
+    {
+      "turn": "I can pay 550 on Friday",
+      "wer": 0
+    },
+    {
+      "turn": "yes, that's correct",
+      "wer": 0
+    }
+  ],
+  "duration_ms": 89220
+}
