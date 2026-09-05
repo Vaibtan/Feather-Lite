@@ -1887,3 +1887,31 @@ accumulated 6 196 s of CPU scanning four back-to-back image builds, and `livekit
 under the memory pressure, which is why the next attempt produced no report at all. Restarting the
 stack and re-running on an idle box gave the numbers above. `stack:quiet` passes on memory and does
 not see CPU contention — a 6× wall-clock stretch on call duration is the signal that does.
+
+## 2026-09-06 — `resume` assigned, and the fourth consecutive clean gate
+
+Run on `2c73560`. `stack:quiet` green, Langfuse down, TTS timeouts 0.
+
+| run | equivalent | silent playouts | turn p50/p95 | WER p50/p95 | entity errors |
+|---|---:|---:|---:|---:|---:|
+| `phase0-gate-a` | 5/5 | 0/7 | 2183 / 6249 ms | 0.000 / 0.000 | 0 |
+| `phase0-gate-b` | 5/5 | 0/9 | 2106 / 4484 ms | 0.000 / 0.111 | 0 |
+| `phase1-eot-instrument` | 5/5 | 0/10 | 2043 / 2149 ms | 0.000 / 0.000 | 0 |
+| `phase1-vocabulary` | 5/5 | 0/12 | 2175 / 4384 ms | 0.000 / 0.000 | 0 |
+
+The last of these adds one indexed turn read to the lock-free `turn_metrics` path — the one the
+`resume` narrowing needs to see a turn's committed disposition — and p50 moves 2043 → 2175 ms
+against 2106 and 2183 on the two runs before the instrument existed. That is the spread of the four
+runs, not a cost.
+
+**The turn vocabulary is populated on real calls for the first time.** Over the fifteen turns of
+this run: `respond` 17, `resume` 2, `wait` 1 (the count exceeds fifteen because the no-input path
+records turns of its own). `resume` had been a declared disposition nothing assigned since D1
+landed; its only trace was `resumed_ms` on the turn's metrics.
+
+Attribution is by the speech that was paused, not by whichever turn closed next. That matters
+because the silence clock's nudge is an interruptible speech belonging to no turn, and
+"Are you still there?" answered with "mhm" is the ordinary way it gets paused — booking that to the
+turn before it would have asserted `resume` about a turn whose speech was never paused. Seen live
+on `backchannel-mid-line` seed 12: `speechId: speech_a6a2e2fa-52d`, `resumed_ms: [314]`, on the turn
+that spoke it.
