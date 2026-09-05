@@ -5,7 +5,7 @@ import { Orchestrator, type TurnParams } from "../../src/services/Orchestrator.j
 import { TurnRunner } from "../../src/http/TurnRunner.js";
 import { Gauges } from "../../src/services/Gauges.js";
 
-type Segment = { turnId: string; channel: string; startedAtMs: number; ttsAudioMs: number | null } | null;
+type Segment = { segmentId: string; turnId: string; channel: string; startedAtMs: number; ttsAudioMs: number | null } | null;
 
 const fakeOrchestrator = (segments: () => Segment, seen: TurnParams[]) =>
   Layer.succeed(
@@ -18,7 +18,7 @@ const fakeOrchestrator = (segments: () => Segment, seen: TurnParams[]) =>
           return {
             turnId: params.turnId,
             decider: "model" as const,
-            disposition: params.heldMs === undefined ? ("respond" as const) : ("held" as const),
+            disposition: params.held === true ? ("held" as const) : ("respond" as const),
             resolution: "spoke" as const,
             ...(params.heldMs === undefined ? {} : { heldMs: params.heldMs }),
             agentText: "ok",
@@ -58,12 +58,13 @@ describe("the held phase", () => {
     );
     expect(seen).toHaveLength(1);
     expect(seen[0]?.heldMs).toBeUndefined();
+    expect(seen[0]?.held).toBe(false);
   });
 
   it("does not hold a simulated call, which never reports playout", async () => {
     const seen: TurnParams[] = [];
     await withRunner(
-      fakeOrchestrator(() => ({ turnId: "rb-1", channel: "simulated", startedAtMs: 0, ttsAudioMs: 8000 }), seen),
+      fakeOrchestrator(() => ({ segmentId: "s-1", turnId: "rb-1", channel: "simulated", startedAtMs: 0, ttsAudioMs: 8000 }), seen),
       Effect.gen(function* () {
         yield* Stream.runDrain(yield* (yield* TurnRunner).run(turn("t1")));
         yield* TestClock.adjust("1 second");
@@ -74,7 +75,7 @@ describe("the held phase", () => {
 
   it("stops the moment the playout report lands, rather than waiting out the budget", async () => {
     const seen: TurnParams[] = [];
-    let playing: Segment = { turnId: "rb-1", channel: "voice", startedAtMs: 0, ttsAudioMs: null };
+    let playing: Segment = { segmentId: "s-1", turnId: "rb-1", channel: "voice", startedAtMs: 0, ttsAudioMs: null };
     await withRunner(
       fakeOrchestrator(() => playing, seen),
       Effect.gen(function* () {
@@ -86,14 +87,34 @@ describe("the held phase", () => {
       }),
     );
     expect(seen).toHaveLength(1);
+    expect(seen[0]?.held).toBe(true);
     expect(seen[0]?.heldMs).toBeGreaterThan(0);
     expect(seen[0]?.heldMs ?? 0).toBeLessThan(HOLD_DEFAULT_MS);
+  });
+
+  it("waits for the segment it is holding on, not for any playout the same turn reports", async () => {
+    const seen: TurnParams[] = [];
+    // The turn spoke twice and the read-back is the second segment; the first reporting its playout
+    // leaves the query answering with the read-back, which is the whole point of keying by segment.
+    let playing: Segment = { segmentId: "read-back", turnId: "rb-1", channel: "voice", startedAtMs: 0, ttsAudioMs: null };
+    await withRunner(
+      fakeOrchestrator(() => playing, seen),
+      Effect.gen(function* () {
+        const fiber = yield* Effect.fork(Effect.flatMap((yield* TurnRunner).run(turn("t1")), Stream.runDrain));
+        yield* TestClock.adjust("600 millis");
+        playing = null;
+        yield* TestClock.adjust("300 millis");
+        yield* Fiber.join(fiber);
+      }),
+    );
+    expect(seen[0]?.held).toBe(true);
+    expect(seen[0]?.heldMs ?? 0).toBeGreaterThanOrEqual(600);
   });
 
   it("gives up at the budget rather than holding the turn open forever", async () => {
     const seen: TurnParams[] = [];
     await withRunner(
-      fakeOrchestrator(() => ({ turnId: "rb-1", channel: "voice", startedAtMs: 0, ttsAudioMs: 1000 }), seen),
+      fakeOrchestrator(() => ({ segmentId: "s-1", turnId: "rb-1", channel: "voice", startedAtMs: 0, ttsAudioMs: 1000 }), seen),
       Effect.gen(function* () {
         const fiber = yield* Effect.fork(Effect.flatMap((yield* TurnRunner).run(turn("t1")), Stream.runDrain));
         yield* TestClock.adjust(Duration.millis(1000 + HOLD_MARGIN_MS + 1000));
@@ -101,6 +122,7 @@ describe("the held phase", () => {
       }),
     );
     expect(seen).toHaveLength(1);
+    expect(seen[0]?.held).toBe(true);
     expect(seen[0]?.heldMs ?? 0).toBeGreaterThanOrEqual(1000);
   });
 });

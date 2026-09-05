@@ -3,6 +3,7 @@ import { type llm, voice } from "@livekit/agents";
 import type { TurnFrame } from "@feather-lite/contracts";
 import { safeFallback, SILENCE_WINDOW_MS } from "@feather-lite/domain";
 import type { ControlPlaneClient } from "./control-plane-client.js";
+import { SegmentLedger, type Closed } from "./segment-ledger.js";
 
 export interface FeatherAgentDeps {
   readonly client: ControlPlaneClient;
@@ -16,7 +17,8 @@ export interface FeatherAgentDeps {
 
 const streamFrames = (
   frames: AsyncGenerator<TurnFrame>,
-  onSay: (text: string, allowInterruptions: boolean) => void,
+  onDelta: () => void,
+  onSay: (segmentId: string, text: string, allowInterruptions: boolean) => void,
   onEnd: (frame: Extract<TurnFrame, { type: "turn_end" }>) => void,
   onError: (frame: Extract<TurnFrame, { type: "error" }>) => void,
 ): ReadableStream<string> =>
@@ -38,10 +40,11 @@ const streamFrames = (
         const f = next.value;
         switch (f.type) {
           case "delta":
+            onDelta();
             controller.enqueue(f.text);
             return;
           case "say":
-            onSay(f.text, f.allow_interruptions);
+            onSay(f.segment_id, f.text, f.allow_interruptions);
             continue;
           case "turn_end":
             onEnd(f);
@@ -60,43 +63,29 @@ const streamFrames = (
   });
 
 export class FeatherAgent extends voice.Agent {
-  private currentTurnId: string | null = null;
-  private lastReportedTurnId: string | null = null;
   private endRequested = false;
-  private pendingSays: Promise<void>[] = [];
+  private pendingSpeech: Promise<void>[] = [];
+  private readonly segments = new SegmentLedger();
+  /**
+   * The reply speech the framework creates for a turn, seen on `SpeechCreated` before `llmNode` runs
+   * (`agent_activity.js:1647` emits it, `:2154` calls `llmNode`). Its item is the turn's implicit
+   * segment, and this is the only way to learn its id: `currentSpeech` is not yet set that early.
+   */
+  private pendingReplySpeechId: string | null = null;
 
   /**
-   * `_addItemAddedCallback` is an internal of the pinned 1.6.4, used deliberately because the
-   * framework resolves the item-to-turn binding and does not expose it. If a future version drops
-   * it, the map stays empty and attribution falls back to `currentTurnId` rather than crashing.
+   * Every speech a turn owns, so `endCall` can let the framework deliver its item before the call is
+   * torn down. Speech is played one at a time, so waiting on the last one waits on all of them.
    */
-  private stampItemsOf(handle: { _addItemAddedCallback?: (cb: (item: { id: string }) => void) => void }, turnId: string): void {
-    handle._addItemAddedCallback?.((item) => {
-      this.itemTurn.set(item.id, turnId);
-    });
-  }
-
-  private trackSay(wait: Promise<void>): void {
+  private trackSpeech(wait: Promise<void>): void {
     const tracked = wait.finally(() => {
-      const i = this.pendingSays.indexOf(tracked);
-      if (i >= 0) this.pendingSays.splice(i, 1);
+      const i = this.pendingSpeech.indexOf(tracked);
+      if (i >= 0) this.pendingSpeech.splice(i, 1);
     });
-    this.pendingSays.push(tracked);
+    this.pendingSpeech.push(tracked);
   }
-  /**
-   * EOU metrics arrive before `llmNode` runs, so before the turn they belong to has an id. Held
-   * here until the turn is created.
-   */
+  /** EOU metrics arrive before `llmNode` runs, so before the turn they belong to has an id. */
   private pendingEou: { eouDelayMs?: number | undefined; transcriptionDelayMs?: number | undefined } | null = null;
-  /**
-   * Turns for which TTS actually produced audio. A stalled TTS stream produces zero frames and the
-   * framework's watchdog force-closes the speech, so the chat item arrives looking fully played.
-   *
-   * `tts_metrics` fires when a synthesised chunk arrives with `audio.final` — the end of a
-   * segment's synthesis, not its first byte — which is still before that segment has finished
-   * playing, so its absence at report time means nothing was synthesised at all.
-   */
-  private ttsProducedAudio = new Set<string>();
 
   constructor(private readonly deps: FeatherAgentDeps) {
     super({ instructions: "Feather-Lite voice runtime. Spoken text is supplied by the control plane; the model is never called here." });
@@ -177,132 +166,75 @@ export class FeatherAgent extends voice.Agent {
     this.pendingEou = m;
   }
 
-  onResumed(pausedForMs: number): void {
-    // -1 means the agent was never observed to stop speaking, so there is no duration to report and
-    // a zero would be a claim rather than a measurement.
-    if (pausedForMs >= 0) this.resumes.push(pausedForMs);
+  onResumed(pausedForMs: number | null): void {
+    // Null means the agent was never observed to stop speaking, so there is no duration to report
+    // and a zero would be a claim rather than a measurement.
+    if (pausedForMs !== null) this.resumes.push(pausedForMs);
   }
 
   private resumes: number[] = [];
 
-  protected drainResumes(): ReadonlyArray<number> {
-    const out = this.resumes;
-    this.resumes = [];
-    return out;
+  /** The reply speech for the turn about to run; `say` speeches are bound where they are created. */
+  noteSpeechCreated(source: string, speech: { readonly id: string; readonly waitForPlayout: () => Promise<void> }): void {
+    if (source === "say") return;
+    this.pendingReplySpeechId = speech.id;
+    this.trackSpeech(speech.waitForPlayout().catch(() => undefined));
+  }
+
+  onTtsMetrics(speechId: string | null, m: { ttfbMs?: number | undefined; audioDurationMs?: number | undefined; charactersCount?: number | undefined }): void {
+    this.segments.noteTts(speechId, m);
+  }
+
+  /** A spoken item was delivered: the segment that produced it is over and is reported now. */
+  reportPlayout(speechId: string | null, item: llm.ChatMessage): void {
+    void this.publish(this.segments.deliver(speechId, { text: item.textContent ?? "", interrupted: item.interrupted }));
   }
 
   /**
-   * Accumulated per turn, not posted per segment: `tts_metrics` fires once per synthesised segment
-   * and the control plane merges each signal into the same turn row, so a per-event post left the
-   * last sentence's numbers standing for the whole turn.
+   * One post per closed segment and one per closed turn. Segments go out first: the fully-heard guard
+   * reads the read-back's playout, and the next turn's `held` phase waits for it.
    */
-  private ttsAccum = new Map<string, { ttfbMs?: number; audioMs: number; chars: number }>();
-
-  onTtsMetrics(m: { ttfbMs?: number | undefined; audioDurationMs?: number | undefined; charactersCount?: number | undefined }): void {
-    const turnId = this.currentTurnId;
-    if (!turnId) return; // the opening and other say()s are not control-plane turns
-    this.ttsProducedAudio.add(turnId);
-    const acc = this.ttsAccum.get(turnId) ?? { audioMs: 0, chars: 0 };
-    // First one wins: `ttfbMs` is per segment, and the turn's is the first segment's.
-    if (acc.ttfbMs === undefined && m.ttfbMs !== undefined && m.ttfbMs >= 0) acc.ttfbMs = m.ttfbMs;
-    acc.audioMs += m.audioDurationMs ?? 0;
-    acc.chars += m.charactersCount ?? 0;
-    this.ttsAccum.set(turnId, acc);
-  }
-
-  /**
-   * Called when the turn's playout is reported, which is after its speech is over, so the sums are
-   * complete. A turn that produced no TTS at all still posts its EOU numbers.
-   */
-  private async flushTurnMetrics(turnId: string): Promise<void> {
-    const acc = this.ttsAccum.get(turnId);
-    this.ttsAccum.delete(turnId);
-    const eou = this.pendingEou;
-    this.pendingEou = null;
-    const resumes = this.drainResumes();
-    if (!acc && !eou && resumes.length === 0) return;
-    await this.deps.client
-      .signal(this.deps.conversationId, {
-        kind: "turn_metrics",
-        turn_id: turnId,
-        ...(eou?.eouDelayMs !== undefined ? { eou_delay_ms: eou.eouDelayMs } : {}),
-        ...(eou?.transcriptionDelayMs !== undefined ? { transcription_delay_ms: eou.transcriptionDelayMs } : {}),
-        ...(acc?.ttfbMs !== undefined ? { tts_ttfb_ms: acc.ttfbMs } : {}),
-        ...(acc && acc.audioMs > 0 ? { tts_audio_ms: acc.audioMs } : {}),
-        ...(acc && acc.chars > 0 ? { tts_chars: acc.chars } : {}),
-        ...(resumes.length > 0 ? { resumed_ms: resumes } : {}),
-      })
-      .catch((e) => this.deps.log("turn_metrics signal failed", { error: String(e) }));
-  }
-
-  /**
-   * One turn can produce several assistant items — the reply built from `delta` frames plus one per
-   * `say` — so items accumulate into the turn that owns them and the turn reports once, when it is
-   * over. The owning turn comes from the stamp, because `currentTurnId` has moved on by the time a
-   * late item is delivered.
-   */
-  private recordItem(item: llm.ChatMessage): void {
-    const turnId = this.itemTurn.get(item.id) ?? this.currentTurnId;
-    if (!turnId) return; // the opening and other say()s are not control-plane turns
-    this.itemTurn.delete(item.id);
-    const rec = this.spoken.get(turnId) ?? { parts: [], interrupted: false };
-    rec.parts.push(item.textContent ?? "");
-    rec.interrupted = rec.interrupted || item.interrupted;
-    this.spoken.set(turnId, rec);
-  }
-
-  private spoken = new Map<string, { parts: string[]; interrupted: boolean }>();
-  /** Which turn asked for a given item, stamped when the speech was created rather than delivered. */
-  private itemTurn = new Map<string, string>();
-
-  reportPlayout(item: llm.ChatMessage): void {
-    this.recordItem(item);
-  }
-
-  /**
-   * Called when the next turn begins and at `endCall`, which is what "the turn is over" means for a
-   * turn that can speak several times. It must run before the next turn's `/turn` request goes out,
-   * so the ledger holds this playout before the fully-heard guard reads it.
-   */
-  private async reportTurnPlayout(turnId: string): Promise<void> {
-    if (turnId === this.lastReportedTurnId) return;
-    const rec = this.spoken.get(turnId);
-    this.spoken.delete(turnId);
-    if (!rec) return;
-    this.lastReportedTurnId = turnId;
-
-    // `interrupted: true` with empty heard_text makes the fully-heard guard treat the segment as
-    // unheard, so a read-back is repeated rather than silently confirmed. Only un-interrupted turns
-    // are checked: on a barge-in the framework aborts the TTS stream, so `tts_metrics` arrives after
-    // the truncated item, and that item's own text is already the audio truth.
-    const silent = !rec.interrupted && !this.ttsProducedAudio.has(turnId);
-    this.ttsProducedAudio.delete(turnId);
-    if (silent) {
-      this.deps.log("tts produced no audio for this turn; reporting empty playout", { turnId });
-      // A stall the framework force-closes as "played in full" raises no session Error event, so
-      // this is the only place it can be counted.
-      void this.deps.client.providerEvents([
-        { provider: `tts:${process.env["STT_TTS_PROVIDER"] === "plugins" ? "deepgram" : "livekit-inference"}`, kind: "timeout", stage: "tts", message: `no audio produced for turn ${turnId}`, conversation_id: this.deps.conversationId },
-      ]);
+  private async publish(closed: Closed): Promise<void> {
+    for (const s of closed.segments) {
+      await this.deps.client
+        .signal(this.deps.conversationId, { kind: "playout", turn_id: s.turnId, segment_id: s.segmentId, heard_text: s.heardText, interrupted: s.interrupted })
+        .catch((e) => this.deps.log("playout signal failed", { error: String(e) }));
     }
-    await this.flushTurnMetrics(turnId);
-    await this.deps.client
-      .signal(this.deps.conversationId, {
-        kind: "playout",
-        turn_id: turnId,
-        heard_text: silent ? "" : rec.parts.filter((p) => p.length > 0).join(" "),
-        interrupted: silent ? true : rec.interrupted,
-      })
-      .catch((e) => this.deps.log("playout signal failed", { error: String(e) }));
+    for (const t of closed.turns) {
+      if (t.silent) {
+        this.deps.log("tts produced no audio for this turn; reported unheard", { turnId: t.turnId });
+        // A stall the framework force-closes as "played in full" raises no session Error event, so
+        // this is the only place it can be counted.
+        void this.deps.client.providerEvents([
+          { provider: `tts:${process.env["STT_TTS_PROVIDER"] === "plugins" ? "deepgram" : "livekit-inference"}`, kind: "timeout", stage: "tts", message: `no audio produced for turn ${t.turnId}`, conversation_id: this.deps.conversationId },
+        ]);
+      }
+      const measured = t.eouDelayMs !== undefined || t.transcriptionDelayMs !== undefined || t.ttfbMs !== undefined || t.audioMs > 0 || t.chars > 0;
+      const resumes = this.resumes;
+      if (!measured && resumes.length === 0) continue;
+      this.resumes = [];
+      await this.deps.client
+        .signal(this.deps.conversationId, {
+          kind: "turn_metrics",
+          turn_id: t.turnId,
+          ...(t.eouDelayMs !== undefined ? { eou_delay_ms: t.eouDelayMs } : {}),
+          ...(t.transcriptionDelayMs !== undefined ? { transcription_delay_ms: t.transcriptionDelayMs } : {}),
+          ...(t.ttfbMs !== undefined ? { tts_ttfb_ms: t.ttfbMs } : {}),
+          ...(t.audioMs > 0 ? { tts_audio_ms: t.audioMs } : {}),
+          ...(t.chars > 0 ? { tts_chars: t.chars } : {}),
+          ...(resumes.length > 0 ? { resumed_ms: resumes } : {}),
+        })
+        .catch((e) => this.deps.log("turn_metrics signal failed", { error: String(e) }));
+    }
   }
 
   async endCall(reason: string): Promise<void> {
     if (this.endRequested) return;
     this.endRequested = true;
     this.cancelSilenceClock();
-    await Promise.allSettled(this.pendingSays);
-    // The last turn of the call has no next turn to report it.
-    if (this.currentTurnId) await this.reportTurnPlayout(this.currentTurnId);
+    await Promise.allSettled(this.pendingSpeech);
+    // Nothing will speak again, so a segment the framework never delivered an item for is over too.
+    await this.publish(this.segments.drain());
     await this.deps.onEndCall(reason);
   }
 
@@ -311,54 +243,33 @@ export class FeatherAgent extends voice.Agent {
   }
 
   override async llmNode(chatCtx: llm.ChatContext, _toolCtx: llm.ToolContext, _settings: voice.ModelSettings): Promise<ReadableStream<string> | null> {
-    // Only the last user message and the previous assistant message are read from the framework's
-    // chatCtx; the control plane owns the conversation history.
+    // Only the last user message is read from the framework's chatCtx; the control plane owns the
+    // conversation history.
     const items = chatCtx.items;
     let lastUser: llm.ChatMessage | undefined;
-    let lastAssistant: llm.ChatMessage | undefined;
-    for (let i = items.length - 1; i >= 0; i--) {
+    for (let i = items.length - 1; i >= 0 && !lastUser; i--) {
       const it = items[i];
-      if (it?.type !== "message") continue;
-      if (!lastUser && it.role === "user") lastUser = it;
-      else if (!lastAssistant && it.role === "assistant") lastAssistant = it;
-      if (lastUser && lastAssistant) break;
+      if (it?.type === "message" && it.role === "user") lastUser = it;
     }
     const userText = (lastUser?.textContent ?? "").trim();
     const turnId = randomUUID();
-    const previousTurnId = this.currentTurnId;
+    const replySpeechId = this.pendingReplySpeechId;
+    this.pendingReplySpeechId = null;
+    this.segments.beginTurn(turnId, this.pendingEou);
+    this.pendingEou = null;
 
-    /**
-     * This must run before `currentTurnId` moves: `onTtsMetrics` has no item to be stamped with and
-     * keys on `currentTurnId`, so switching first sends the previous turn's trailing TTS metrics to
-     * this turn and reports the previous one silent.
-     */
-    if (previousTurnId) await this.reportTurnPlayout(previousTurnId);
-    this.currentTurnId = turnId;
-
-    const playout =
-      previousTurnId && lastAssistant && lastAssistant.interrupted && previousTurnId !== this.lastReportedTurnId
-        ? {
-            turn_id: previousTurnId,
-            heard_text: this.ttsProducedAudio.has(previousTurnId) ? (lastAssistant.textContent ?? "") : "",
-            interrupted: true,
-          }
-        : undefined;
-    if (playout && previousTurnId) {
-      this.lastReportedTurnId = previousTurnId;
-      this.ttsProducedAudio.delete(previousTurnId);
-    }
-
-    this.deps.log("turn", { turnId, userText, interruptedPrevious: Boolean(playout) });
-    const frames = this.deps.client.turn(this.deps.conversationId, { turn_id: turnId, user_text: userText, ...(playout ? { playout } : {}), supersede: true });
+    this.deps.log("turn", { turnId, userText });
+    const frames = this.deps.client.turn(this.deps.conversationId, { turn_id: turnId, user_text: userText, supersede: true });
 
     return streamFrames(
       frames,
-      (text, allowInterruptions) => {
+      // The reply built from `delta` frames is the turn's implicit segment, opened on the first one:
+      // a turn that streams no text produces no item, and an unopened segment cannot go unreported.
+      () => this.segments.open({ segmentId: turnId, turnId, speechId: replySpeechId }),
+      (segmentId, text, allowInterruptions) => {
         const handle = this.session.say(text, { allowInterruptions });
-        // Stamped when the speech is created, not when its item is delivered: `currentTurnId` has
-        // moved on by then if the next turn has begun.
-        this.stampItemsOf(handle, turnId);
-        this.trackSay(handle.waitForPlayout());
+        this.segments.open({ segmentId, turnId, speechId: handle.id });
+        this.trackSpeech(handle.waitForPlayout());
       },
       (end) => {
         this.deps.log("turn_end", { turnId, state: end.new_state, tool: end.tool_called?.name ?? null, outcome: end.outcome, endCall: end.end_call, ttftMs: end.ttft_ms, extendAwayMs: end.extend_away_ms ?? null });
@@ -369,15 +280,18 @@ export class FeatherAgent extends voice.Agent {
           this.deps.biasRecogniser?.(end.bias_terms);
         }
         if (end.extend_away_ms !== undefined) this.setSilenceWindow(end.extend_away_ms);
+        void this.publish(this.segments.endTurn(turnId));
         if (end.end_call) void this.endCall(end.outcome ?? "completed");
       },
       (err) => {
         this.deps.log("turn error", { turnId, code: err.code, message: err.message });
         if (err.code !== "SUPERSEDED") {
           const handle = this.session.say(safeFallback(), { allowInterruptions: true });
-          this.stampItemsOf(handle, turnId);
-          this.trackSay(handle.waitForPlayout());
+          // Named here rather than by the control plane, which is the party that just failed to answer.
+          this.segments.open({ segmentId: `${turnId}:fallback`, turnId, speechId: handle.id });
+          this.trackSpeech(handle.waitForPlayout());
         }
+        void this.publish(this.segments.endTurn(turnId));
       },
     );
   }

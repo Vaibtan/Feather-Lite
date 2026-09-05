@@ -76,6 +76,70 @@ describe("evaluateCall — compliance", () => {
     expect(e.complianceOk).toBe(false);
   });
 
+  it("does not accept another segment's playout as evidence that the read-back was heard", () => {
+    /**
+     * The turn spoke twice and only the reply reported. Reading the turn's last playout would call
+     * this promise checked and passing on evidence about a different sentence; the read-back's own
+     * segment has no report, so the check has nothing to look at and says so.
+     */
+    const events = happyPath.map((ev) => {
+      if (ev.sequence_no === 14) {
+        return rec(
+          14,
+          "AGENT_TURN",
+          {
+            text: "Let me check. To confirm: you will pay 550 dollars by Friday, August 21, 2026. Is that correct?",
+            state: "CONFIRMING_OUTCOME",
+            turn_id: "t2",
+            speak_mode: "non_interruptible",
+            segments: [
+              { segment_id: "t2", text: "Let me check.", speak_mode: "interruptible" },
+              { segment_id: "seg-read-back", text: "To confirm: you will pay 550 dollars by Friday, August 21, 2026. Is that correct?", speak_mode: "non_interruptible" },
+            ],
+          },
+          13,
+        );
+      }
+      if (ev.sequence_no === 15) {
+        return rec(15, "AGENT_TURN_PLAYOUT", { turn_id: "t2", segment_id: "t2", heard_text: "Let me check.", interrupted: false }, 17);
+      }
+      return ev;
+    });
+    const e = evaluateCall(events);
+    expect(e.promisesChecked).toBe(0);
+    expect(e.promisesWithoutPlayout).toBe(1);
+    expect(e.noPromiseWithoutReadback).toBeNull();
+  });
+
+  it("accepts the read-back's own segment when that is the segment that reported", () => {
+    const events = happyPath.map((ev) => {
+      if (ev.sequence_no === 14) {
+        return rec(
+          14,
+          "AGENT_TURN",
+          {
+            text: "Let me check. To confirm: you will pay 550 dollars by Friday, August 21, 2026. Is that correct?",
+            state: "CONFIRMING_OUTCOME",
+            turn_id: "t2",
+            speak_mode: "non_interruptible",
+            segments: [
+              { segment_id: "t2", text: "Let me check.", speak_mode: "interruptible" },
+              { segment_id: "seg-read-back", text: "To confirm: you will pay 550 dollars by Friday, August 21, 2026. Is that correct?", speak_mode: "non_interruptible" },
+            ],
+          },
+          13,
+        );
+      }
+      if (ev.sequence_no === 15) {
+        return rec(15, "AGENT_TURN_PLAYOUT", { turn_id: "t2", segment_id: "seg-read-back", heard_text: "To confirm: you will pay 550 dollars by Friday, August 21, 2026. Is that correct?", interrupted: false }, 18);
+      }
+      return ev;
+    });
+    const e = evaluateCall(events);
+    expect(e.promisesChecked).toBe(1);
+    expect(e.noPromiseWithoutReadback).toBe(true);
+  });
+
   it("checks the read-back, not whatever the agent said last, when a side-question intervenes", () => {
     /** The sequence numbers put the side-question strictly between the read-back and the record, so a check that took "the last agent line" would fail this call. */
     const events: ReadonlyArray<EventRecord> = [

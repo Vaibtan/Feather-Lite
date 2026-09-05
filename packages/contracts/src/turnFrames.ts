@@ -26,6 +26,11 @@ export const DeltaFrame = Schema.Struct({
 
 export const SayFrame = Schema.Struct({
   type: Schema.Literal("say"),
+  /**
+   * The control plane's name for this segment, minted when it was appended to the turn. The worker
+   * reports playout against it, so a late-delivered item cannot land on the following turn.
+   */
+  segment_id: Schema.String,
   text: Schema.String,
   allow_interruptions: Schema.Boolean,
 });

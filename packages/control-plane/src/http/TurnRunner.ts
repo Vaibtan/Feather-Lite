@@ -110,7 +110,7 @@ export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/Turn
           yield* Effect.sleep(Duration.millis(HOLD_POLL_MS));
           waited = (yield* Clock.currentTimeMillis) - startedMs;
           const still = yield* orch.unreportedNonInterruptible(conversationId);
-          if (still === null || still.turnId !== segment.turnId) break;
+          if (still === null || still.segmentId !== segment.segmentId) break;
         }
         return waited;
       });
@@ -153,7 +153,10 @@ export class TurnRunner extends Effect.Service<TurnRunner>()("@feather-lite/Turn
         // which for an HTTP request ties the turn's life to its connection.
         const fiber = yield* Effect.forkDaemon(
           holdForPlayout(params.conversationId).pipe(
-            Effect.flatMap((heldMs) => orch.processTurn(heldMs === 0 ? params : { ...params, heldMs }, emit)),
+            // `held` is the decision and `heldMs` the measurement, rather than the decision being
+            // read off the measurement's presence. Zero means this turn did not wait at all: no
+            // unreported segment, a non-voice channel, or a segment whose budget had already run out.
+            Effect.flatMap((heldMs) => orch.processTurn(heldMs === 0 ? { ...params, held: false } : { ...params, held: true, heldMs }, emit)),
           ).pipe(
             Effect.matchCauseEffect({
               onSuccess: () => finish(null),

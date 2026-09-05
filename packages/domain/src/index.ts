@@ -30,3 +30,4 @@ export * from "./holdRequest.js";
 export * from "./waitPolicy.js";
 export * from "./speechWindows.js";
 export * from "./redact.js";
+export * from "./segments.js";

@@ -9,7 +9,7 @@ export interface ControlPlaneConfig {
 export interface TurnRequestBody {
   readonly turn_id: string;
   readonly user_text: string;
-  readonly playout?: { readonly turn_id: string; readonly heard_text: string; readonly interrupted: boolean };
+  readonly playout?: { readonly turn_id: string; readonly segment_id?: string; readonly heard_text: string; readonly interrupted: boolean };
   readonly supersede?: boolean;
 }
 
@@ -18,10 +18,10 @@ export type SignalBody =
   | { kind: "no_answer"; action_id?: string }
   | { kind: "hangup"; reason?: string; action_id?: string }
   | { kind: "barge_in"; partial_agent_text?: string; action_id?: string }
-  | { kind: "playout"; turn_id: string; heard_text: string; interrupted: boolean }
+  | { kind: "playout"; turn_id: string; segment_id?: string; heard_text: string; interrupted: boolean }
   | { kind: "opening_played"; text: string }
   | { kind: "voicemail_drop"; confidence?: number; action_id?: string }
-  | { kind: "turn_metrics"; turn_id: string; eou_delay_ms?: number; transcription_delay_ms?: number; tts_ttfb_ms?: number; tts_audio_ms?: number; tts_chars?: number };
+  | { kind: "turn_metrics"; turn_id: string; eou_delay_ms?: number; transcription_delay_ms?: number; tts_ttfb_ms?: number; tts_audio_ms?: number; tts_chars?: number; resumed_ms?: ReadonlyArray<number> };
 
 export interface ProviderEventBody {
   readonly provider: string;

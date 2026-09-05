@@ -155,7 +155,7 @@ export const SimulateTurnResponse = Schema.Struct({
 export const TurnRequest = Schema.Struct({
   turn_id: Schema.String.pipe(Schema.minLength(1)),
   user_text: Schema.String,
-  playout: Schema.optional(Schema.Struct({ turn_id: Schema.String, heard_text: Schema.String, interrupted: Schema.Boolean })),
+  playout: Schema.optional(Schema.Struct({ turn_id: Schema.String, segment_id: Schema.optional(Schema.String), heard_text: Schema.String, interrupted: Schema.Boolean })),
   supersede: Schema.optional(Schema.Boolean),
 });
 
@@ -164,7 +164,7 @@ export const SignalRequest = Schema.Union(
   Schema.Struct({ kind: Schema.Literal("no_answer"), action_id: Schema.optional(Schema.String) }),
   Schema.Struct({ kind: Schema.Literal("hangup"), reason: Schema.optional(Schema.String), action_id: Schema.optional(Schema.String) }),
   Schema.Struct({ kind: Schema.Literal("barge_in"), partial_agent_text: Schema.optional(Schema.String), action_id: Schema.optional(Schema.String) }),
-  Schema.Struct({ kind: Schema.Literal("playout"), turn_id: Schema.String, heard_text: Schema.String, interrupted: Schema.Boolean }),
+  Schema.Struct({ kind: Schema.Literal("playout"), turn_id: Schema.String, segment_id: Schema.optional(Schema.String), heard_text: Schema.String, interrupted: Schema.Boolean }),
   Schema.Struct({ kind: Schema.Literal("opening_played"), text: Schema.String }),
   Schema.Struct({ kind: Schema.Literal("voicemail_drop"), confidence: Schema.optional(Schema.Number), action_id: Schema.optional(Schema.String) }),
   /**

@@ -35,44 +35,79 @@ const append = (conversationId: string, event: { type: string; payload: Record<s
     yield* conv.appendEvent({ id: yield* ids.next(), conversationId, event: event as never, createdAt: new Date() });
   });
 
-const say = (conversationId: string, turnId: string, mode: "interruptible" | "non_interruptible") =>
+type Mode = "interruptible" | "non_interruptible";
+
+/** A turn as the orchestrator writes it now: the segments it spoke, each with its own name. */
+const spoke = (conversationId: string, turnId: string, segments: ReadonlyArray<{ id: string; mode: Mode }>) =>
+  append(conversationId, {
+    type: "AGENT_TURN",
+    payload: {
+      text: "To confirm...",
+      state: "CONFIRMING_OUTCOME",
+      turn_id: turnId,
+      speak_mode: segments.some((s) => s.mode === "non_interruptible") ? "non_interruptible" : "interruptible",
+      segments: segments.map((s) => ({ segment_id: s.id, text: "To confirm...", speak_mode: s.mode })),
+    },
+  });
+
+/** A turn as it was written before segments were named: the turn is its own single segment. */
+const spokeUnnamed = (conversationId: string, turnId: string, mode: Mode) =>
   append(conversationId, { type: "AGENT_TURN", payload: { text: "To confirm...", state: "CONFIRMING_OUTCOME", turn_id: turnId, speak_mode: mode } });
 
-const playout = (conversationId: string, turnId: string) =>
-  append(conversationId, { type: "AGENT_TURN_PLAYOUT", payload: { turn_id: turnId, heard_text: "To confirm...", interrupted: false } });
+const playout = (conversationId: string, turnId: string, segmentId?: string) =>
+  append(conversationId, {
+    type: "AGENT_TURN_PLAYOUT",
+    payload: { turn_id: turnId, ...(segmentId === undefined ? {} : { segment_id: segmentId }), heard_text: "To confirm...", interrupted: false },
+  });
 
 describe("unreportedNonInterruptible", () => {
   it("finds a non-interruptible segment with no playout behind it", async () => {
     const out = await rt.runPromise(
       Effect.gen(function* () {
         const started = yield* startVoiceCall;
-        yield* say(started.conversationId, "rb-1", "non_interruptible");
+        yield* spoke(started.conversationId, "t-1", [{ id: "rb-1", mode: "non_interruptible" }]);
         return yield* (yield* ConversationRepo).unreportedNonInterruptible(started.conversationId);
       }),
     );
-    expect(out?.turnId).toBe("rb-1");
+    expect(out?.segmentId).toBe("rb-1");
+    expect(out?.turnId).toBe("t-1");
     expect(out?.channel).toBe("voice");
     // Not known while it is still playing: it arrives on the later `turn_metrics` signal.
     expect(out?.ttsAudioMs).toBeNull();
   });
 
-  it("finds nothing once the playout report lands", async () => {
+  it("finds nothing once that segment's playout report lands", async () => {
     const out = await rt.runPromise(
       Effect.gen(function* () {
         const started = yield* startVoiceCall;
-        yield* say(started.conversationId, "rb-1", "non_interruptible");
-        yield* playout(started.conversationId, "rb-1");
+        yield* spoke(started.conversationId, "t-1", [{ id: "rb-1", mode: "non_interruptible" }]);
+        yield* playout(started.conversationId, "t-1", "rb-1");
         return yield* (yield* ConversationRepo).unreportedNonInterruptible(started.conversationId);
       }),
     );
     expect(out).toBeNull();
   });
 
+  it("keeps waiting when a different segment of the same turn is the one that reported", async () => {
+    const out = await rt.runPromise(
+      Effect.gen(function* () {
+        const started = yield* startVoiceCall;
+        yield* spoke(started.conversationId, "t-1", [
+          { id: "reply", mode: "interruptible" },
+          { id: "rb-1", mode: "non_interruptible" },
+        ]);
+        yield* playout(started.conversationId, "t-1", "reply");
+        return yield* (yield* ConversationRepo).unreportedNonInterruptible(started.conversationId);
+      }),
+    );
+    expect(out?.segmentId).toBe("rb-1");
+  });
+
   it("ignores an interruptible segment, which the borrower is free to talk over", async () => {
     const out = await rt.runPromise(
       Effect.gen(function* () {
         const started = yield* startVoiceCall;
-        yield* say(started.conversationId, "chat-1", "interruptible");
+        yield* spoke(started.conversationId, "t-1", [{ id: "chat-1", mode: "interruptible" }]);
         return yield* (yield* ConversationRepo).unreportedNonInterruptible(started.conversationId);
       }),
     );
@@ -83,12 +118,12 @@ describe("unreportedNonInterruptible", () => {
     const out = await rt.runPromise(
       Effect.gen(function* () {
         const started = yield* startVoiceCall;
-        yield* say(started.conversationId, "rb-1", "non_interruptible");
-        yield* say(started.conversationId, "rb-2", "non_interruptible");
+        yield* spoke(started.conversationId, "t-1", [{ id: "rb-1", mode: "non_interruptible" }]);
+        yield* spoke(started.conversationId, "t-2", [{ id: "rb-2", mode: "non_interruptible" }]);
         return yield* (yield* ConversationRepo).unreportedNonInterruptible(started.conversationId);
       }),
     );
-    expect(out?.turnId).toBe("rb-2");
+    expect(out?.segmentId).toBe("rb-2");
   });
 
   it("reports the segment's audio length once the metrics signal has recorded it", async () => {
@@ -96,37 +131,58 @@ describe("unreportedNonInterruptible", () => {
       Effect.gen(function* () {
         const sql = yield* PgClient.PgClient;
         const started = yield* startVoiceCall;
-        yield* say(started.conversationId, "rb-1", "non_interruptible");
-        yield* sql`INSERT INTO conversation_turns ${sql.insert({ conversationId: started.conversationId, turnId: "rb-1", status: "DONE", userText: "", startedAt: new Date(), result: sql.json({ tts_audio_ms: 8100 }) })}`;
+        yield* spoke(started.conversationId, "t-1", [{ id: "rb-1", mode: "non_interruptible" }]);
+        yield* sql`INSERT INTO conversation_turns ${sql.insert({ conversationId: started.conversationId, turnId: "t-1", status: "DONE", userText: "", startedAt: new Date(), result: sql.json({ tts_audio_ms: 8100 }) })}`;
         return yield* (yield* ConversationRepo).unreportedNonInterruptible(started.conversationId);
       }),
     );
     expect(out?.ttsAudioMs).toBe(8100);
   });
 
-  it("finds the promise read-back, which is the segment this whole mechanism exists for", async () => {
-    const out = await rt.runPromise(
-      Effect.gen(function* () {
-        const started = yield* startVoiceCall;
-        yield* append(started.conversationId, {
-          type: "AGENT_TURN",
-          payload: { text: "To confirm: you will pay 550 dollars by Friday. Say yes to confirm.", state: "CONFIRMING_OUTCOME", turn_id: "rb", speak_mode: "non_interruptible" },
-        });
-        return yield* (yield* ConversationRepo).unreportedNonInterruptible(started.conversationId);
-      }),
-    );
-    expect(out?.turnId).toBe("rb");
-  });
-
   it("never holds on the opening, which is reported by a different signal and so never looks finished", async () => {
     const out = await rt.runPromise(
       Effect.gen(function* () {
         const started = yield* startVoiceCall;
-        yield* say(started.conversationId, "opening", "non_interruptible");
+        yield* spokeUnnamed(started.conversationId, "opening", "non_interruptible");
+        return yield* (yield* ConversationRepo).unreportedNonInterruptible(started.conversationId);
+      }),
+    );
+    expect(out).toBeNull();
+  });
+
+  it("reads a turn recorded before segments were named as its own single segment", async () => {
+    const out = await rt.runPromise(
+      Effect.gen(function* () {
+        const started = yield* startVoiceCall;
+        yield* spokeUnnamed(started.conversationId, "old-1", "non_interruptible");
+        return yield* (yield* ConversationRepo).unreportedNonInterruptible(started.conversationId);
+      }),
+    );
+    expect(out?.segmentId).toBe("old-1");
+    expect(out?.turnId).toBe("old-1");
+  });
+
+  it("clears an unnamed turn with an unnamed playout, so an old conversation replays unchanged", async () => {
+    const out = await rt.runPromise(
+      Effect.gen(function* () {
+        const started = yield* startVoiceCall;
+        yield* spokeUnnamed(started.conversationId, "old-1", "non_interruptible");
+        yield* playout(started.conversationId, "old-1");
+        return yield* (yield* ConversationRepo).unreportedNonInterruptible(started.conversationId);
+      }),
+    );
+    expect(out).toBeNull();
+  });
+
+  it("clears a named segment reported by a playout that names no segment, which is what a `/turn` body sends", async () => {
+    const out = await rt.runPromise(
+      Effect.gen(function* () {
+        const started = yield* startVoiceCall;
+        yield* spoke(started.conversationId, "t-1", [{ id: "rb-1", mode: "non_interruptible" }]);
+        yield* playout(started.conversationId, "t-1");
         return yield* (yield* ConversationRepo).unreportedNonInterruptible(started.conversationId);
       }),
     );
     expect(out).toBeNull();
   });
 });
-

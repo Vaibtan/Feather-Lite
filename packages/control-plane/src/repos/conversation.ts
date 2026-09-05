@@ -226,7 +226,9 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
           count(*) FILTER (WHERE type = 'TURN_SUPERSEDED')::text AS turns_superseded,
           count(*) FILTER (WHERE type = 'CALL_CONTROL' AND payload->>'action' = 'NO_INPUT_CLOSE')::text AS no_input_closes,
           count(*) FILTER (WHERE type = 'TURN_DECISION_REJECTED' AND payload->>'reason' = 'DECIDER_UNAVAILABLE')::text AS decider_unavailable,
-          count(*) FILTER (
+          -- By turn, not by row: a turn whose synthesis died reports every one of its segments
+          -- unheard, and the domain twin silentPlayoutTurnIds counts the turn once.
+          count(DISTINCT conversation_events.payload->>'turn_id') FILTER (
             WHERE ${unheardPlayout("conversation_events")}
               AND ${notSuperseded("conversation_events.conversation_id", "conversation_events.payload->>'turn_id'")}
           )::text AS tts_silent_playouts,
@@ -355,35 +357,56 @@ export class ConversationRepo extends Effect.Service<ConversationRepo>()("@feath
     // No `FOR UPDATE` and no transaction: the playout is reported by a different process, and holding
     // the conversation row lock for the length of a spoken sentence is not something a claim
     // transaction may do.
+    /**
+     * By segment, not by turn: a turn that spoke twice has one non-interruptible read-back among its
+     * segments, and only that segment's playout says the borrower heard it. The COALESCEs are the
+     * compatibility rule `playoutMatchesSegment` states in the domain, which this SQL cannot share:
+     * an `AGENT_TURN` with no `segments` is one segment named by the turn, and a playout with no
+     * `segment_id` reports that turn's single segment.
+     */
     const unreportedNonInterruptible = (conversationId: string) =>
       Effect.gen(function* () {
-        const rows = yield* sql<{ turnId: string | null; channel: string; createdAt: Date; ttsAudioMs: number | null }>`
-          SELECT e.payload->>'turn_id'              AS turn_id,
-                 c.channel                          AS channel,
-                 e.created_at                       AS created_at,
+        const rows = yield* sql<{ segmentId: string | null; turnId: string | null; channel: string; createdAt: Date; ttsAudioMs: number | null }>`
+          WITH segments AS (
+            SELECT e.conversation_id                                              AS conversation_id,
+                   e.sequence_no                                                  AS sequence_no,
+                   e.created_at                                                   AS created_at,
+                   e.payload->>'turn_id'                                          AS turn_id,
+                   COALESCE(s.value->>'segment_id', e.payload->>'turn_id')        AS segment_id,
+                   COALESCE(s.value->>'speak_mode', e.payload->>'speak_mode')     AS speak_mode
+            FROM conversation_events e
+            LEFT JOIN LATERAL jsonb_array_elements(e.payload->'segments') s
+              ON jsonb_typeof(e.payload->'segments') = 'array'
+            WHERE e.conversation_id = ${conversationId} AND e.type = 'AGENT_TURN'
+          )
+          SELECT g.segment_id                        AS segment_id,
+                 g.turn_id                           AS turn_id,
+                 c.channel                           AS channel,
+                 g.created_at                        AS created_at,
                  (t.result->>'tts_audio_ms')::float8 AS tts_audio_ms
-          FROM conversation_events e
-          JOIN conversations c ON c.id = e.conversation_id
+          FROM segments g
+          JOIN conversations c ON c.id = g.conversation_id
           LEFT JOIN conversation_turns t
-            ON t.conversation_id = e.conversation_id AND t.turn_id = e.payload->>'turn_id'
-          WHERE e.conversation_id = ${conversationId}
-            AND e.type = 'AGENT_TURN'
-            AND e.payload->>'speak_mode' = 'non_interruptible'
+            ON t.conversation_id = g.conversation_id AND t.turn_id = g.turn_id
+          WHERE g.speak_mode = 'non_interruptible'
             -- The opening is reported by the opening_played signal, never by an AGENT_TURN_PLAYOUT,
             -- so it is permanently unreported and would otherwise hold the first real turn of every
             -- voice call waiting for evidence that never arrives.
-            AND e.payload->>'turn_id' IS DISTINCT FROM 'opening'
+            AND g.turn_id IS DISTINCT FROM 'opening'
+            AND g.segment_id IS NOT NULL
             AND NOT EXISTS (
               SELECT 1 FROM conversation_events p
-              WHERE p.conversation_id = e.conversation_id
+              WHERE p.conversation_id = g.conversation_id
                 AND p.type = 'AGENT_TURN_PLAYOUT'
-                AND p.payload->>'turn_id' = e.payload->>'turn_id'
+                AND CASE WHEN p.payload ? 'segment_id'
+                         THEN p.payload->>'segment_id' = g.segment_id
+                         ELSE p.payload->>'turn_id' = g.turn_id END
             )
-          ORDER BY e.sequence_no DESC
+          ORDER BY g.sequence_no DESC
           LIMIT 1`.pipe(Effect.orDie);
         const row = rows[0];
-        if (row === undefined || row.turnId === null) return null;
-        return { turnId: row.turnId, channel: row.channel, startedAtMs: row.createdAt.getTime(), ttsAudioMs: row.ttsAudioMs };
+        if (row === undefined || row.segmentId === null || row.turnId === null) return null;
+        return { segmentId: row.segmentId, turnId: row.turnId, channel: row.channel, startedAtMs: row.createdAt.getTime(), ttsAudioMs: row.ttsAudioMs };
       });
 
     const lastDisposition = (conversationId: string, excludingTurnId: string) =>

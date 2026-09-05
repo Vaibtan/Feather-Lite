@@ -134,6 +134,18 @@ describe("transcript and timeline", () => {
     expect(t[0]?.interrupted).toBe(true);
   });
 
+  it("puts a turn's segments back together in the order they were spoken", () => {
+    const events = [
+      rec(1, "AGENT_TURN", { text: "Let me check. To confirm: you will pay 550 dollars.", state: "CONFIRMING_OUTCOME", turn_id: "t9" }),
+      rec(2, "AGENT_TURN_PLAYOUT", { turn_id: "t9", segment_id: "t9", heard_text: "Let me check.", interrupted: false }),
+      rec(3, "AGENT_TURN_PLAYOUT", { turn_id: "t9", segment_id: "seg-2", heard_text: "To confirm: you will pay", interrupted: true }),
+    ];
+    const t = buildTranscript(events);
+    expect(t).toHaveLength(1);
+    expect(t[0]?.text).toBe("Let me check. To confirm: you will pay");
+    expect(t[0]?.interrupted).toBe(true);
+  });
+
   it("keeps superseded borrower lines by default, and drops them when the decider asks", () => {
     const events = [
       rec(1, "AGENT_TURN", { text: "May I speak with Jordan?", state: "GREETING", turn_id: "opening" }),

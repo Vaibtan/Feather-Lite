@@ -45,11 +45,20 @@ const ordered = (events: ReadonlyArray<EventRecord>): ReadonlyArray<EventRecord>
   [...events].sort((a, b) => a.sequence_no - b.sequence_no);
 
 export const buildTranscript = (events: ReadonlyArray<EventRecord>, options?: TranscriptOptions): ReadonlyArray<TranscriptEntry> => {
-  const playouts = new Map<string, { heard_text: string; interrupted: boolean }>();
+  /**
+   * A turn speaks in segments and each reports its own playout, so what the borrower heard of a turn
+   * is its segments' heard text in the order it was spoken, and the turn was cut short if any of
+   * them was.
+   */
+  const playouts = new Map<string, { parts: string[]; interrupted: boolean }>();
   const superseded = new Set<string>();
-  for (const e of events) {
-    if (e.type === "AGENT_TURN_PLAYOUT") playouts.set(e.payload.turn_id, e.payload);
-    else if (e.type === "TURN_SUPERSEDED") superseded.add(e.payload.turn_id);
+  for (const e of ordered(events)) {
+    if (e.type === "AGENT_TURN_PLAYOUT") {
+      const heard = playouts.get(e.payload.turn_id) ?? { parts: [], interrupted: false };
+      if (e.payload.heard_text.length > 0) heard.parts.push(e.payload.heard_text);
+      heard.interrupted = heard.interrupted || e.payload.interrupted;
+      playouts.set(e.payload.turn_id, heard);
+    } else if (e.type === "TURN_SUPERSEDED") superseded.add(e.payload.turn_id);
   }
   const out: TranscriptEntry[] = [];
   for (const e of ordered(events)) {
@@ -61,7 +70,7 @@ export const buildTranscript = (events: ReadonlyArray<EventRecord>, options?: Tr
       const interrupted = playout?.interrupted ?? e.payload.interrupted ?? false;
       out.push({
         speaker: "AGENT",
-        text: playout?.interrupted ? playout.heard_text : e.payload.text,
+        text: playout?.interrupted ? playout.parts.join(" ") : e.payload.text,
         timestamp: e.created_at,
         sequence_no: e.sequence_no,
         ...(interrupted ? { interrupted: true } : {}),

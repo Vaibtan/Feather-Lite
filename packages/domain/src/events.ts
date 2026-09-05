@@ -64,12 +64,25 @@ export const UserTurnPayload = Schema.Struct({
 export const SpeakMode = Schema.Literal("interruptible", "non_interruptible");
 export type SpeakMode = typeof SpeakMode.Type;
 
+/** One spoken segment of a turn, named when it is appended so playout can be reported against it. */
+export const AgentTurnSegment = Schema.Struct({
+  segment_id: Schema.String,
+  text: Schema.String,
+  speak_mode: SpeakMode,
+});
+export type AgentTurnSegment = typeof AgentTurnSegment.Type;
+
 export const AgentTurnPayload = Schema.Struct({
   text: Schema.String,
   state: ConversationState,
   /** Correlates AGENT_TURN with AGENT_TURN_PLAYOUT and the client's turn_id. */
   turn_id: Schema.optional(Schema.String),
   speak_mode: Schema.optional(SpeakMode),
+  /**
+   * Absent on turns appended before segment ids existed; `segmentsOf` reads those as one segment
+   * named by the turn.
+   */
+  segments: Schema.optional(Schema.Array(AgentTurnSegment)),
   /** Set by the voice runtime when playback was cut short by barge-in. */
   interrupted: Schema.optional(Schema.Boolean),
   /** True when this text is a scripted fallback because the decider failed. */
@@ -111,6 +124,8 @@ export const TurnSupersededPayload = Schema.Struct({
 /** What the borrower actually heard, reported by the voice runtime after playout. */
 export const AgentTurnPlayoutPayload = Schema.Struct({
   turn_id: Schema.String,
+  /** Absent on rows written before segment ids; `playoutMatchesSegment` reads those as the turn. */
+  segment_id: Schema.optional(Schema.String),
   heard_text: Schema.String,
   interrupted: Schema.Boolean,
 });

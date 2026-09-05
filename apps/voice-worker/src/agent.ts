@@ -225,9 +225,22 @@ export default defineAgent({
       aecWarmupDuration: 3000,
     });
 
+    /**
+     * `_activity` is the SDK's own seam for tightly-coupled internals; `currentSpeech` is a public
+     * getter on it. The framework plays one speech at a time and inserts that speech's chat item
+     * inside its own task, before the task completes, so the speech that is current when the item
+     * arrives is the one that spoke it. Without the seam the ledger falls back to play order.
+     */
+    const speakingNow = (): string | null => {
+      const activity = (session as unknown as { _activity?: { currentSpeech?: { id?: string } } })._activity;
+      return activity?.currentSpeech?.id ?? null;
+    };
+    session.on(voice.AgentSessionEventTypes.SpeechCreated, (ev) => {
+      agent.noteSpeechCreated(ev.source, ev.speechHandle);
+    });
     session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (ev) => {
       const item = ev.item;
-      if (item.type === "message" && item.role === "assistant") agent.reportPlayout(item);
+      if (item.type === "message" && item.role === "assistant") agent.reportPlayout(speakingNow(), item);
     });
     /**
      * The backchannel classifier reads finals as well as interims: an utterance that short is often
@@ -243,17 +256,15 @@ export default defineAgent({
       agent.noteAgentListening(ev.newState === "listening");
     });
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (ev) => {
-      // `_activity` is the SDK's own seam for tightly-coupled internals; if it or its timer is gone,
-      // `resumeIfBackchannel` returns false and the call keeps the SDK's ordinary resume path.
-      // `_activity` is the SDK's own seam for tightly-coupled internals; if it or its timer is gone,
-      // `resumeIfBackchannel` returns false and the call keeps the SDK's ordinary resume path.
+      // If `_activity` or its timer is gone, `resumeIfBackchannel` returns false and the call keeps
+      // the SDK's ordinary resume path.
       const activity = (session as unknown as { _activity?: { pausedSpeech?: unknown; startFalseInterruptionTimer?: (ms: number) => void } })._activity;
       if (!resumeIfBackchannel(ev.transcript, activity)) {
         if (ev.isFinal) pausedAtMs = null;
         return;
       }
       // Null means the agent was not observed to stop, so there is no honest duration to report.
-      const pausedFor = pausedAtMs === null ? -1 : Date.now() - pausedAtMs;
+      const pausedFor = pausedAtMs === null ? null : Date.now() - pausedAtMs;
       pausedAtMs = null;
       log("resumed on backchannel", { transcript: ev.transcript, pausedForMs: pausedFor });
       agent.onResumed(pausedFor);
@@ -270,7 +281,9 @@ export default defineAgent({
       if (m["type"] === "eou_metrics") {
         agent.onEouMetrics({ eouDelayMs: num(m["endOfUtteranceDelayMs"]), transcriptionDelayMs: num(m["transcriptionDelayMs"]) });
       } else if (m["type"] === "tts_metrics") {
-        agent.onTtsMetrics({ ttfbMs: num(m["ttfbMs"]), audioDurationMs: num(m["audioDurationMs"]), charactersCount: num(m["charactersCount"]) });
+        // `speechId` is stamped by the framework from the speech the synthesis ran under, so a
+        // nudge's or the opening's audio is never counted against a control-plane turn.
+        agent.onTtsMetrics(typeof m["speechId"] === "string" ? m["speechId"] : null, { ttfbMs: num(m["ttfbMs"]), audioDurationMs: num(m["audioDurationMs"]), charactersCount: num(m["charactersCount"]) });
       }
     });
     session.on(voice.AgentSessionEventTypes.Error, (ev) => {

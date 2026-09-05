@@ -122,6 +122,8 @@ export const PendingProposalJson = Schema.Struct({
   date: Schema.String,
   proposed_at_seq: Schema.Number,
   read_back_turn_id: Schema.NullOr(Schema.String),
+  /** The read-back's own segment. Absent on proposals stored before segments were named. */
+  read_back_segment_id: Schema.optional(Schema.String),
 });
 export type PendingProposalJson = typeof PendingProposalJson.Type;
 

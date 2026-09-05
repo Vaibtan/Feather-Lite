@@ -68,8 +68,10 @@ export interface TurnParams {
   readonly conversationId: string;
   readonly turnId: string;
   readonly userText: string;
-  readonly playout?: { readonly turnId: string; readonly heardText: string; readonly interrupted: boolean } | undefined;
+  readonly playout?: { readonly turnId: string; readonly segmentId?: string | undefined; readonly heardText: string; readonly interrupted: boolean } | undefined;
   readonly supersede?: boolean | undefined;
+  /** Whether this turn waited for a non-interruptible segment; `heldMs` is how long it waited. */
+  readonly held?: boolean | undefined;
   readonly heldMs?: number | undefined;
 }
 
@@ -78,7 +80,7 @@ export type Signal =
   | { readonly kind: "no_answer"; readonly actionId?: string | undefined }
   | { readonly kind: "hangup"; readonly reason?: string | undefined; readonly actionId?: string | undefined }
   | { readonly kind: "barge_in"; readonly partialAgentText?: string | undefined; readonly actionId?: string | undefined }
-  | { readonly kind: "playout"; readonly turnId: string; readonly heardText: string; readonly interrupted: boolean }
+  | { readonly kind: "playout"; readonly turnId: string; readonly segmentId?: string | undefined; readonly heardText: string; readonly interrupted: boolean }
   | { readonly kind: "opening_played"; readonly text: string }
   | { readonly kind: "voicemail_drop"; readonly confidence?: number | undefined; readonly actionId?: string | undefined }
   | {
@@ -171,7 +173,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
               yield* conv.insertTurn({ conversationId: row.id, turnId: params.turnId, userText: params.userText, startedAt: nowDate });
             }
             if (params.playout) {
-              yield* append(row.id, { type: "AGENT_TURN_PLAYOUT", payload: { turn_id: params.playout.turnId, heard_text: params.playout.heardText, interrupted: params.playout.interrupted } }, nowDate);
+              yield* append(row.id, { type: "AGENT_TURN_PLAYOUT", payload: { turn_id: params.playout.turnId, ...(params.playout.segmentId === undefined ? {} : { segment_id: params.playout.segmentId }), heard_text: params.playout.heardText, interrupted: params.playout.interrupted } }, nowDate);
             }
             yield* append(
               row.id,
@@ -378,14 +380,14 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
                   yield* conv.updateConversation(row.id, { transferTarget: queue });
                   outcome = o.reason === "DISPUTE" ? "DISPUTED" : "ESCALATED";
                   metadata = { reason, transcript_excerpt: params.userText.slice(0, 300), matched: o.matched };
-                  says.push({ text: o.reason === "DISPUTE" ? disputeClose() : hardshipClose(), allowInterruptions: false });
+                  says.push({ segmentId: yield* ids.next(), text: o.reason === "DISPUTE" ? disputeClose() : hardshipClose(), allowInterruptions: false });
                   break;
                 }
               }
             } else if (decisionResult.decision === null) {
               degraded = true;
               yield* append(row.id, { type: "TURN_DECISION_REJECTED", payload: { state: locked.currentState, reason: decisionResult.degraded?.startsWith("TurnDeciderUnavailable") ? "DECIDER_UNAVAILABLE" : "INVALID_OUTPUT", detail: decisionResult.degraded ?? "unknown" } }, at);
-              if (agentText.trim().length === 0) says.push({ text: safeFallback(), allowInterruptions: true });
+              if (agentText.trim().length === 0) says.push({ segmentId: yield* ids.next(), text: safeFallback(), allowInterruptions: true });
             } else {
               const d = decisionResult.decision;
               const moved = d.toolCall !== null ? Either.right(locked.currentState) : transition(locked.currentState, d.suggestedNextState);
@@ -416,7 +418,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
                   nextState = "WARM_TRANSFER_PENDING";
                   outcome = "ESCALATED";
                   metadata = { reason: "borrower_requested_human" };
-                  says.push({ text: holdForTransfer(), allowInterruptions: false });
+                  says.push({ segmentId: yield* ids.next(), text: holdForTransfer(), allowInterruptions: false });
                 } else {
                   yield* append(row.id, { type: "STATE_TRANSITION", payload: { from: locked.currentState, to: moved.right, triggered_by: triggerFor(locked.currentState, moved.right, "llm") } }, at);
                   nextState = moved.right;
@@ -440,6 +442,15 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
             if (outcome === null && nextState === "ENDING") outcome = "NO_DISPOSITION";
 
             const fullText = [agentText.trim(), ...says.map((s) => s.text)].filter((s) => s.length > 0).join(" ");
+            /**
+             * The reply built from `delta` frames is one implicit segment named by the turn; every
+             * `say` is named by the control plane. `held` and the fully-heard guard read this list,
+             * so a turn that spoke three times is three facts rather than one concatenation.
+             */
+            const segments = [
+              ...(agentText.trim().length > 0 ? [{ segment_id: params.turnId, text: agentText.trim(), speak_mode: "interruptible" as const }] : []),
+              ...says.map((s) => ({ segment_id: s.segmentId, text: s.text, speak_mode: s.allowInterruptions ? ("interruptible" as const) : ("non_interruptible" as const) })),
+            ];
             yield* append(
               row.id,
               {
@@ -449,6 +460,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
                   state: nextState,
                   turn_id: params.turnId,
                   speak_mode: says.some((s) => !s.allowInterruptions) ? "non_interruptible" : "interruptible",
+                  ...(segments.length > 0 ? { segments } : {}),
                   ...(degraded ? { degraded: true } : {}),
                 },
               },
@@ -484,7 +496,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
               decider: decisionResult.decider,
               ...(params.heldMs === undefined ? {} : { heldMs: params.heldMs }),
               resolution: toolRejected ? "rejected" : degraded ? "degraded" : toolCalled !== null ? "tool" : "spoke",
-              disposition: params.heldMs === undefined ? "respond" : "held",
+              disposition: params.held === true ? "held" : "respond",
               agentText: fullText,
               newState: nextState,
               toolCalled,
@@ -520,7 +532,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           return {
             turnId: params.turnId,
             decider: decisionResult.decider,
-            disposition: params.heldMs === undefined ? "respond" : "held",
+            disposition: params.held === true ? "held" : "respond",
             resolution: "superseded",
             agentText: decisionResult.streamedText,
             newState: state,
@@ -532,7 +544,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
             ttftMs: decisionResult.ttftMs,
           } satisfies TurnResult;
         }
-        for (const s of t2.says) yield* emit({ type: "say", text: s.text, allow_interruptions: s.allowInterruptions });
+        for (const s of t2.says) yield* emit({ type: "say", segment_id: s.segmentId, text: s.text, allow_interruptions: s.allowInterruptions });
         const r = t2.result;
         yield* tracing.turn({
           conversationId: row.id,
@@ -679,7 +691,7 @@ export class Orchestrator extends Effect.Service<Orchestrator>()("@feather-lite/
           });
 
           if (signal.kind === "playout") {
-            yield* append(row.id, { type: "AGENT_TURN_PLAYOUT", payload: { turn_id: signal.turnId, heard_text: signal.heardText, interrupted: signal.interrupted } }, at);
+            yield* append(row.id, { type: "AGENT_TURN_PLAYOUT", payload: { turn_id: signal.turnId, ...(signal.segmentId === undefined ? {} : { segment_id: signal.segmentId }), heard_text: signal.heardText, interrupted: signal.interrupted } }, at);
             return done({ agentText: "", newState: row.currentState });
           }
           if (signal.kind === "opening_played") {

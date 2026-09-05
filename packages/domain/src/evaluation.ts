@@ -20,6 +20,7 @@
 import type { EventRecord } from "./events.js";
 import { disclosesProtectedDetail } from "./context.js";
 import { booleanScore, numericScore, type ScoreRecord } from "./scores.js";
+import { playoutMatchesSegment, segmentsOf } from "./segments.js";
 
 /** What the evaluator can conclude about one call. `null` means "no evidence", never "failed". */
 export interface CallEvaluation {
@@ -97,17 +98,23 @@ export const evaluateCall = (events: ReadonlyArray<EventRecord>): CallEvaluation
    * read-back is repeated. Those two events are the anchors here, and the read-back is the turn of
    * the first agent line after the most recent anchor — which is the same turn the guard armed.
    */
-  const playouts = new Map<string, boolean>();
-  for (const e of ordered) if (e.type === "AGENT_TURN_PLAYOUT") playouts.set(e.payload.turn_id, e.payload.interrupted);
+  const playoutEvents = ordered.filter((e) => e.type === "AGENT_TURN_PLAYOUT");
 
   const readBackAnchors = ordered.filter(
     (e) => (e.type === "TOOL_RESULT" && e.payload.name === "propose_promise_to_pay") || (e.type === "TOOL_REJECTED" && e.payload.name === "record_promise_to_pay"),
   );
-  const readBackTurnIdBefore = (seq: number): string | undefined => {
+  /**
+   * The read-back is one segment of that turn, and it is the non-interruptible one: the same turn's
+   * other segments are a confirmation or a reply, and whether *they* were heard proves nothing.
+   */
+  const readBackSegmentBefore = (seq: number): { segmentId: string; turnId: string } | undefined => {
     const anchor = [...readBackAnchors].reverse().find((a) => a.sequence_no < seq);
     if (anchor === undefined) return undefined;
     const turn = agentTurnEvents.find((e) => e.sequence_no > anchor.sequence_no && e.sequence_no < seq);
-    return turn !== undefined && turn.type === "AGENT_TURN" ? turn.payload.turn_id : undefined;
+    if (turn === undefined || turn.type !== "AGENT_TURN" || turn.payload.turn_id === undefined) return undefined;
+    const segments = segmentsOf(turn.payload);
+    const readBack = segments.find((s) => s.speakMode === "non_interruptible") ?? segments[0];
+    return readBack === undefined ? undefined : { segmentId: readBack.segmentId, turnId: turn.payload.turn_id };
   };
 
   const recordedPromises = ordered.filter((e) => e.type === "TOOL_RESULT" && e.payload.name === "record_promise_to_pay");
@@ -115,9 +122,10 @@ export const evaluateCall = (events: ReadonlyArray<EventRecord>): CallEvaluation
   let promisesChecked = 0;
   let promisesWithoutPlayout = 0;
   for (const promise of recordedPromises) {
-    const turnId = readBackTurnIdBefore(promise.sequence_no);
-    const interrupted = turnId === undefined ? undefined : playouts.get(turnId);
-    // No playout for that turn at all: a simulated call, which has no audio to have missed.
+    const segment = readBackSegmentBefore(promise.sequence_no);
+    const reported = segment === undefined ? [] : playoutEvents.filter((e) => e.type === "AGENT_TURN_PLAYOUT" && playoutMatchesSegment(e.payload, segment));
+    // No playout for that segment at all: a simulated call, which has no audio to have missed.
+    const interrupted = reported.length === 0 ? undefined : reported.some((e) => e.type === "AGENT_TURN_PLAYOUT" && e.payload.interrupted);
     if (interrupted === undefined) {
       promisesWithoutPlayout += 1;
       continue;

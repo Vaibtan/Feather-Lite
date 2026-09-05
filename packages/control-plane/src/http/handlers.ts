@@ -59,7 +59,7 @@ const toSignal = (s: SignalRequest): Signal => {
     case "barge_in":
       return { kind: "barge_in", partialAgentText: s.partial_agent_text, actionId: s.action_id };
     case "playout":
-      return { kind: "playout", turnId: s.turn_id, heardText: s.heard_text, interrupted: s.interrupted };
+      return { kind: "playout", turnId: s.turn_id, segmentId: s.segment_id, heardText: s.heard_text, interrupted: s.interrupted };
     case "opening_played":
       return { kind: "opening_played", text: s.text };
     case "voicemail_drop":
@@ -278,7 +278,7 @@ export const ConversationsLive = HttpApiBuilder.group(FeatherApi, "conversations
               conversationId: path.id,
               turnId: payload.turn_id,
               userText: payload.user_text,
-              playout: payload.playout ? { turnId: payload.playout.turn_id, heardText: payload.playout.heard_text, interrupted: payload.playout.interrupted } : undefined,
+              playout: payload.playout ? { turnId: payload.playout.turn_id, segmentId: payload.playout.segment_id, heardText: payload.playout.heard_text, interrupted: payload.playout.interrupted } : undefined,
               supersede: payload.supersede,
             })
             .pipe(
