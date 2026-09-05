@@ -1777,3 +1777,67 @@ The ladder itself was verified separately, because the fleet's failures do not e
   That is not the window: the clock arms only when the agent returns to `listening`, and that turn
   had superseded one still in flight. The second strike followed 20.0 s later and closed the call,
   which is the ladder behaving as specified.
+
+## 2026-09-05 — attribution by segment id, the N=5 gate twice
+
+Run on `ce81718` (`7bc4bc3..HEAD`: the control plane names every spoken segment, the worker reports
+playout per segment, and the decider is told which segment was cut). `stack:quiet` green, Langfuse
+down, TTS timeouts 0. Both runs are on the same tree.
+
+| run | equivalent | hung up | silent playouts | turn p50/p95 | WER p50/p95 | entity errors | tts ttfb p50/p95 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `phase0-gate-a` | 5/5 | 5/5 | 0/7 | 2183 / 6249 ms | 0.000 / 0.000 | 0 | 398 / 417 ms |
+| `phase0-gate-b` | 5/5 | 5/5 | 0/9 | 2106 / 4484 ms | 0.000 / 0.111 | 0 | 362 / 388 ms |
+
+The previous three gates were 4/5, 4/5 and 3/5, and every failure was one of two shapes: a read-back
+playout booked to the following turn, or a split final whose second half superseded the offer. The
+first is gone by construction — the worker no longer decides which turn a spoken item belongs to,
+because the control plane names the segment and the worker reports against that name.
+
+A third run, `phase0-segment-attribution-1`, was 5/5 with 0/9 silent playouts on the tree one commit
+earlier (`b7a5091`). It is kept because it brackets the `heardFromLedger` fix, which touches a prompt
+hint and cannot reach equivalence.
+
+### What moved in the numbers, and why
+
+- **Silent playouts 0/7 and 0/9.** A segment's synthesis is now judged from the `tts_metrics` of the
+  speech that segment actually ran under — the framework stamps `speechId` on them — rather than from
+  whatever turn was current. A no-input nudge's audio is no longer charged to the turn before it, and
+  a turn that inherited another turn's item no longer reports itself unheard.
+- **Agent stretches without playout evidence: 6 and 7 over five calls, against 8 on the N=5 baseline.**
+  One per call is the opening, which is reported by `opening_played` and never by a playout. The rest
+  now have a report of their own, because segments and audio stretches are one-to-one where they used
+  to be many-to-one.
+- Gate B's worst WER line is the split-final shape arriving unsplit with a word dropped:
+  ref `"Actually, wait. I can pay 550 dollars on Friday."`, stt `"Actually, I can pay $550 on Friday."`.
+  The call still passed: the offer was in the same final as the filler.
+
+### `held` did not fire, and that is the change working
+
+The spec's Phase 0 gate asked for `heldMs > 0` on `yes-during-read-back`. It reads 0 — **the gate item
+is not met as written** — and the ledger says why
+(`2026-09-05-tier3-yes-during-read-back-phase0-segment-attribution.json`, conversation `0134e8c6`):
+
+```
+15  AGENT_TURN          read-back, non_interruptible          17:29:40.947
+16  AGENT_TURN_PLAYOUT  segment fa6d1720, interrupted false   17:29:51.371
+17  USER_TURN_FINAL     "Yes. That's correct."                17:29:54.979
+```
+
+The read-back's playout lands 3.6 s before the next turn claims. `held` exists to wait for evidence
+that used to arrive only when the next turn started; it now arrives when that segment's own item is
+delivered, so there is nothing left to wait for. The hold is not dead — its query, budget and poll are
+unchanged and covered by `held.test.ts` and `heldSegment.test.ts` — it is simply not reached on a
+scenario whose evidence is already in.
+
+### tier 3, on the same tree
+
+`sim-borrower --scenario yes-during-read-back --seed 7`: ledger shape as expected, `PROMISE_TO_PAY`,
+**one** read-back, `agent_interrupt_rate` 0, and three playouts each carrying its own `segment_id`.
+
+### A correction to the previous section's process note
+
+"`loadtest:tier2:docker` rebuilds only `harness`" is not true on this tree. `harness` declares
+`depends_on: worker`, and `docker compose run --build` builds the dependencies too: with no build
+command of our own running, the `server` and `worker` images were created at the moment the fleet
+command started. Rebuilding them first is belt-and-braces, not a requirement.
