@@ -1,5 +1,7 @@
 # Spec: attribution by contract, the instruments the retrospective asked for, and the best self-hosted turn-taking
 
+> Scope update, 2026-10-04: [working local product and pilot readiness](2026-10-04-local-product-and-pilot-readiness-spec.md) is now the umbrella specification. Its roadmap disposition identifies completed mechanisms to preserve, remaining local-delivery requirements and deferred experiments. Current `AGENTS.md` and that specification govern execution; historical automatic-commit and repeated-approval instructions below are not the workflow for the new assignment. Retain this document as design history and detailed supporting evidence.
+
 2026-09-05. For the implementing session. Synthesised from the architecture retrospective
 `docs/reviews/2026-09-05-architecture-retrospective-and-duplexcascade.md` (read it first; it holds
 the analysis, the paper reading, the code survey and the eleven decisions the user took on
