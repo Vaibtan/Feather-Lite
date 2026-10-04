@@ -1,301 +1,70 @@
 # Feather-Lite
 
-A small **collections voice-agent platform** — the primitives a lender needs to run compliant
-outbound calls at scale, not a chatbot with a phone number:
+A voice-agent platform for debt-collection conversations, built with TypeScript, Effect, PostgreSQL and LiveKit.
 
-- a **deterministic state machine** that is the authority on what may happen on a call
-  (right-party verification before any account data, tools legal only in specific states,
-  compliance overrides that beat the model, promises recorded *before* they are confirmed aloud);
-- an **LLM conversationalist** (GPT-4.1 / 4.1-mini per state) that only ever *suggests*
-  transitions and tool calls — every suggestion is validated and, when illegal, rejected and logged;
-- a **durable event ledger** in Postgres (monotonic `sequence_no` per conversation) that the
-  transcript, the outcome, the replay view, scheduled follow-ups and post-call jobs are all
-  derived from — so a JSON simulation, the scenario suite and a real LiveKit voice call
-  produce identical events for identical inputs.
+The language model proposes responses and actions. The control plane validates business actions and records them in a durable event ledger; the voice worker handles speech and audio playback.
 
-Built as an interview artifact for a Backend + AI Engineer role at a lending voice-agent company;
-the PRD (`PRD.md`) and implementation spec (`SPEC.md`) are the requirements, this repository is v2:
-**TypeScript + Effect** end to end (control plane, LiveKit Agents worker, browser console). A Python
-v1 came first and was rewritten after the review in `docs/reviews/`; it is gone from the tree (ADR
-0005 records why TypeScript won) and lives on only in git history.
+## What it does
 
-## What is here (v2, verified 2026-09-02)
+- Runs browser voice calls and scripted conversation scenarios.
+- Tracks conversations, callback requests and promises to pay.
+- Requires completed playback of the exact payment read-back before a voice promise can be recorded.
+- Provides an operator console with transcripts, events and quality results.
+- Exposes operational metrics and optional Langfuse tracing.
 
-| Area | Status | Evidence |
-|---|---|---|
-| Pure domain (`packages/domain`): states, adjacency, overrides, tool matrix, event union, replay reducer, pre-call policy, scripts, percentiles, redaction, turn-taking metrics | done | 274 unit tests. The turn-taking metrics carry a segment: they are **VAD-interruption** numbers from the tier-3 simulator, `harness: "sim"`, excluded from the real-call SLO window (user story 35) |
-| Control plane (`packages/control-plane`): Effect services, Postgres via `@effect/sql-pg`, three-phase turn, tools with idempotency, scheduled-action + outbox workers, scripted + OpenAI deciders, Langfuse tracing | done | 89 unit + 99 DB tests (99 pass, 0 skipped — issue #3 closed by C14), incl. **20/20 scenarios** on real Postgres |
-| HTTP API (`packages/contracts` + `apps/server`): Effect HttpApi, 26 routes, OpenAPI at `/docs`, SSE turn stream, bearer/rate-limit middleware with counted rejections | done | live smoke: start / turn(SSE) / replay / 409 / 422 / scenarios |
-| Voice worker (`apps/voice-worker`): LiveKit Agents 1.6 `llmNode` → `/turn`, barge-in heard-text, interruptible read-back guard, AMD-gated SIP path, heartbeats | done (browser path) | automated real voice call on LiveKit Cloud with GPT-4.1; scripted voice call == simulation scenario (state path, tools, outcome) |
-| Operator console (`apps/console`): conversations, transcript + timeline + replay, simulate (streaming), **call me in the browser**, scenario matrix, status/seed | done | headless run: 20/20 matrix, PTP simulation, browser call joined LiveKit Cloud with live transcript |
-| Deployment on free tiers (Neon + Cloudflare Tunnel + Pages + LiveKit Build) | documented, needs your accounts | `docs/deploy/free-tier-live-demo.md` |
-| **Self-hosted media plane**: LiveKit SFU in Docker (`pnpm lk:up`), Deepgram direct plugins (nova-3 STT + Aura TTS) behind `STT_TTS_PROVIDER` | done | headless voice call + browser call on the local SFU, both equivalence-green vs the simulation; ADR 0006 |
-| **Load tested**: control plane to 200 concurrent conversations, voice fleet to **10 concurrent real calls** | done | 200/200 correct outcomes at C=200. **N=10, 2026-09-01: 10/10 served, 10/10 equivalence-green, WER 0.000, zero silent playouts, containerised.** The 2026-08-21 finding that ten was this laptop's CPU ceiling (10/10 then 9/10) does not reproduce on the container stack with the native VAD. Latency is the open gate, not throughput — see the row below and `docs/loadtest/README.md` |
-| **Audio-native end-of-turn**: the deprecated text EOU model and its 500 ms endpointing replaced by the auto-provisioned `inference.TurnDetector` (local, no LiveKit Cloud) at 300/2500 | done | tier-2 N=5: per-turn latency p50 2397 → 2145 ms; worker EOU delay ~780 → ~578 ms |
-| **Prompt cache alignment**: static persona/RULES first, transcript next, volatile state/time/account last; static prefix sized past OpenAI's 1,024-token floor, `prompt_cache_key` per state | done | measured `cached_tokens` 1024 on the *next call's* first turn (cross-conversation prefix reuse) and 1792/1920 deep into a long call; latency-neutral at these prompt sizes — the win is cost (0.75× cached input) and early engagement (ADR 0008) |
-| **Cross-call memory**: SUMMARY outbox job persists a ledger-derived `wrap_up`; one deterministic line per prior call (promises, dispute/hardship verbatim, borrower's last words) in the decider's HISTORY block | done | verified live: call N+1's prompt carries "promised 550.00 by …; their last words: …"; equivalence stays green; no migration, no second store, gated behind right-party verification |
-| **Playout truth under TTS failure**: a TTS stream that stalls to zero audio is reported as unheard (`interrupted: true`), so the fully-heard guard repeats the read-back instead of accepting a confirmation of silence; Deepgram TTS websocket connect patched with a 4 s retryable timeout | done | reproduced live (53 s silent read-back recorded as "heard"), fixed, and re-verified across 8 instrumented runs + fleet N=5 (ADR 0008) |
-| **Per-turn latency waterfall**: EOU delay → transcription → decide TTFT → TTS TTFB, persisted per turn, on the Langfuse span, and drawn in the console (per call and as fleet p50/p95) | done | measured on a local voice call: 578 / 470 / 23 / 420 ms, total p50 1495 ms |
-| **Quality scores**: one ledger-side score model (`conversation_scores`) fed by the deterministic evaluator, an LLM judge, the voice harness and human labels, mirrored to Langfuse; `GET/POST /api/conversations/:id/scores` | done | 6 producers on one table; scores visible in Langfuse and on the console's Quality view; ADR 0009 |
-| **LLM-as-judge**: GPT-5.6 Luna reads each finished call post-call in the outbox and returns a **binary pass/fail per dimension with a quoted piece of transcript evidence** (task completion, compliance, factual accuracy, empathy, escalation) | done, off by default (`JUDGE_ENABLED`) | live: a real call judged in one attempt, 6 scores with evidence quotes; unparseable output → `judge.invalid_output`, never silence; judge request body asserted to carry no account data (leak test) |
-| **Judge-vs-human agreement**: pass/fail label control on the conversation page; agreement measured only over calls carrying both | done | live: labelling one call moved agreement from null to 100% over 1 labelled call |
-| **Outcome funnel + SLO**: attempts → connected → right-party → promise-to-pay with each rate against the previous stage, promise ageing (PENDING/DUE_TODAY/OVERDUE in the borrower's own timezone), p95 vs target per latency component — one request, `GET /api/system/quality` | done | live: 6 attempts → 2 promises, SLO naming `ttft_ms` as its one breach; SPEC §17.2's right-party-verification and voicemail rates now present |
-| **STT word error rate**, measured by the voice harness against the exact text it spoke, normalised explicitly (contractions, number words, currency, spoken digit runs) and **gated in the fleet run** (`--max-wer`, default 0.20 from measurement) | done — **harness only** | 23 normaliser table tests; measured 0.000 on all three scripted lines, worst single reading 0.111 under barge-in. A production call has no ground truth, so there is no production WER and the console says so |
-| **TTS signal**: zero-audio playouts counted (excluding turns the borrower superseded before the agent replied — those look identical and are not failures), and characters-per-second flagged as an outlier beyond ±40% of the window's own median | done — **heuristic, not a quality score** | there is no MOS model here: UTMOS/NISQA are Python-only and were left unbuilt rather than faked. These answer "did any audio come out" and "was this turn spoken at a rate unlike the rest", and nothing about how the speech sounded (ADR 0009) |
-| **Reliability**: provider error/retry/timeout counters per vendor with a last-error ring, the six failure counts ADR 0008 found, and an **orphaned-call sweeper** (worker liveness + LiveKit confirmation, ~35–40 s) | done | chaos script under `apps/voice-worker/src/tracer/`; a killed worker's call is finalized FAILED/ORPHANED and the borrower is callable again |
-| **Shippable images**: multi-stage `node:22-bookworm-slim` Dockerfiles for both services, `pnpm deploy --prod` runtime trees, non-root, health checks, and an `app` compose profile | done (amd64 run, arm64 checked not built) | server **505 MB**, worker **724 MB**; both started and verified. arm64 promised only because the native packages publish `linux-arm64-gnu` |
-| **Calls through the containerised stack** — Postgres, SFU, server and worker all in Docker, only the borrower harness on the host | done (measured on the simulated fleet) | N=5 **twice**, 5/5 equivalence both times, WER 0.000, zero silent playouts, **6.74-6.85 CPU-seconds per call-minute**. It needed the SFU to stop advertising `127.0.0.1` (`LIVEKIT_NODE_IP`) and the resource sampler to learn about the application containers — before that a `--profile app` run reported no worker resources at all |
-| **Native VAD** (`inference.VAD`, the Silero model in the addon the EOU detector already uses) | done on Linux; **unusable on Windows** | `onnxruntime-node` and `@livekit/agents-plugin-silero` are out of the tree, the Dockerfile's 513 MB hand-prune is deleted, the worker image is 781 → **724 MB** and the idle worker tree 1 651 → **1 093 MB**. `eou_delay_ms` p95 unchanged (580 vs 582). On win32 the addon costs ~450 MB of non-reclaimable native memory **per process that predicts**, which killed every call of an N=5; on linux/x64 the same probe reads 37 MB. `pnpm --filter @feather-lite/voice-worker vad-cost` re-takes it |
-| **Process metrics**: event-loop delay, RSS/heap, GC, pg-pool depth, per-loop liveness and CPU-seconds on `/api/system/status` and on `GET /metrics` in Prometheus format; `/readyz` fails when a background loop stops ticking | done | one snapshot serves both surfaces, so they cannot disagree; the server also profiles itself on demand (`PROFILE_SECONDS`) because `node --cpu-prof` cannot be used on Windows |
-| **Trace redaction**: `TRACE_REDACT_ACCOUNT_DATA` (on by default) masks amounts, dates, delinquency counts and long digit runs in every exported span body — the turn span, the generation's prompt, the judge's transcript | done | installed on the span processor, not per call site; 19 domain + 6 boundary tests, including that latency metadata is never touched |
-| **Per-core budget, measured**: control plane **~0.015 CPU-seconds per turn** (≈ 65-100 turns/s per core); voice worker **4.51 CPU-seconds per call-minute** and **240 MB per call** at N=10 in containers | done | `docs/loadtest/README.md`, 2026-09-01. Twelve vCPU laptop (Ryzen 5 5600H). The per-call memory term is confirmed rather than extrapolated: 3 144 MB peak on a 739 MB idle tree over ten calls. At N=10 the worker is **not** the busiest container — the server and Postgres each averaged ~90 % of a core against the worker's 67 % |
-| **Efficiency pass**: 43.6 → **31.7 Postgres statements per completed turn**; worker idle tree 2 406 → **1 620 MB**; job-process cold start 2 659 → **1 834 ms**; outbox backlog drain **7× faster**; soak memory growth 46 → **26 MB/min** | done | every change measured either side with the same harness on the same box; `pg_stat_statements` in every load report |
-| PSTN via SIP trunk, Oracle always-on VM, Effect 4 | **not done** | listed honestly in "Not built" below |
+The project is under active development. Authentication, staffed follow-up, telephone reliability and a unified Docker observability stack are covered in the [implementation plans](docs/plans/). It is not ready for real-borrower collection.
 
-Progress by phase: `docs/plans/PROGRESS.md`. Decisions: `docs/adr/`. Review that led to v2:
-`docs/reviews/2026-08-16-plan-vs-implementation-review.md`.
+## Run locally
 
-## Architecture
+Install Docker and the Node.js/pnpm versions specified in [package.json](package.json). Copy [.env.example](.env.example) to `.env`, then run:
 
-```mermaid
-flowchart LR
-  subgraph browser["Console (Cloudflare Pages, static)"]
-    UI[conversations · simulate · live call · scenarios · status]
-  end
-  subgraph cp["apps/server — control plane (Node + Effect)"]
-    API[HttpApi · OpenAPI · SSE /turn]
-    ORCH[Orchestrator<br/>overrides → TurnDecider → validate → tools → ledger]
-    SCHED[schedulers: scheduled actions · outbox]
-    API --> ORCH --> PG[(Postgres<br/>ledger · workflows · actions · outbox)]
-    SCHED --> PG
-  end
-  subgraph vw["apps/voice-worker (Node, LiveKit Agents)"]
-    AG[FeatherAgent.llmNode → POST /turn]
-  end
-  UI -- REST/SSE --> API
-  UI -- WebRTC --> LK[LiveKit SFU<br/>Cloud or self-hosted<br/>STT deepgram/nova-3 · TTS sonic-3 Cloud / aura-2 local]
-  LK <--> AG
-  AG -- SSE frames --> API
-  ORCH -- tools --> LLM[OpenAI gpt-4.1 / 4.1-mini]
-  ORCH -. traces .-> LF[Langfuse]
-```
-
-- **The control plane owns the loop** (ADR 0001). The worker is a media adapter: it sends the
-  borrower's final text (and, after a barge-in, the *heard* part of the agent's last line) and
-  speaks the frames it gets back (ADR 0002).
-- **A turn is three phases** — claim (tx) → decide (no tx) → commit (tx) → speak (ADR 0003).
-  Read-backs and "recorded" confirmations are only spoken after the commit.
-- **Everything is a Layer.** `TurnDecider` is scripted in tests/CI and OpenAI in production;
-  `Tracing` is Langfuse or noop; the `Clock` is frozen for scenario replays and shifted for
-  seeded history — same orchestrator, no mocks.
-
-### The turn frame protocol (`packages/contracts/src/turnFrames.ts`)
-
-`turn_start{turn_id,state}` → `delta{text}`* → `say{text,allow_interruptions}`* →
-`turn_end{new_state, agent_text, tool_called, call_control_action, outcome, end_call, degraded, ttft_ms}` | `error{code,message}`
-
-Same stream for the console (`Simulate`) and the voice worker; `turn_id` idempotency and
-`supersede` (barge-in) are handled server-side.
-
-### Repository map
-
-```
-packages/domain/         pure: enums, ids, values, stateMachine, overrides, tools, events, replay, transcript, preCall, context, scripts, turn
-packages/contracts/      HttpApi definition (26 routes) + SSE turn frames
-packages/control-plane/  config, db (migrations, repos), services (Orchestrator, Workflow, Scheduling, Outbox, Scenarios, Seed, VoiceSessions, Tracing, VirtualClock), llm (LlmClient, prompts, OpenAITurnDecider), http (handlers, TurnRunner, app)
-apps/server/             Node entry: API + in-process schedulers
-apps/voice-worker/       LiveKit Agents worker (+ tracer/ harnesses: fleet, sim-borrower, chaos, shed-probe, lk-smoke)
-apps/console/            Vite + TS operator console (no framework), deploys to Pages
-apps/load-test/          tier-1 control-plane load harness (plain tsx)
-deploy/livekit/          livekit-server config for the self-hosted compose profile
-docs/adr/                0001–0010 · docs/agents/ issue tracker, triage labels, domain docs
-docs/deploy/ runbook · docs/loadtest/ results · docs/plans/ specs, revisions, findings, progress · docs/reviews/ code reviews
-```
-
-## Run it locally
-
-Prerequisites: Node 22, pnpm 11, Docker (for Postgres). Copy `.env.example` to `.env`.
-
-```bash
+```sh
 pnpm install
-pnpm db:up                       # Postgres 16 on localhost:5434
-pnpm dev:server                  # API on http://127.0.0.1:8080  (migrations run on boot; /docs = OpenAPI)
-curl -X POST http://127.0.0.1:8080/api/demo/seed
-pnpm dev:console                 # console on http://127.0.0.1:5173 (proxies /api to 8080)
+pnpm db:up
+pnpm dev:server
 ```
 
-That is enough for **Conversations**, **Simulate** (streaming JSON path) and **Scenarios** with the
-deterministic decider. For the real model set `TURN_DECIDER=openai` + `OPENAI_API_KEY` in `.env`
-(and Langfuse keys if you want traces). For **Live call** add the LiveKit Cloud keys and start the
-worker:
+The server applies database migrations on startup. In another terminal, load synthetic accounts and start the console:
 
-```bash
-pnpm dev:worker                  # LiveKit Agents worker "feather-lite-agent" (heartbeats show on Status)
+```powershell
+Invoke-RestMethod -Method Post http://127.0.0.1:8080/api/demo/seed
+pnpm dev:console
 ```
 
-`pnpm dev` runs server + worker + console together.
+Open [the console](http://127.0.0.1:5173). API documentation is available at [localhost:8080/docs](http://127.0.0.1:8080/docs).
 
-### Running it the way it is measured
+The default scripted decider supports simulations without AI credentials. For model responses, set `TURN_DECIDER=openai` and `OPENAI_API_KEY` in `.env`.
 
-**Containers, since 2026-09-01.** Everything runs in Docker except the borrower harness, because the
-harness is the caller. This is where every number in `docs/loadtest/README.md` from that date on
-comes from, including the N=10 acceptance run:
+### Voice and tracing
 
-```bash
-# PowerShell; bash is `export LIVEKIT_NODE_IP=...`
-$env:LIVEKIT_NODE_IP='192.168.1.4'          # a host address BOTH sides can reach — see below
+Voice calls also need LiveKit and speech-provider credentials from `.env.example`. On Windows, run the voice worker in Docker. Stop the host API first to free its port, then start the container services:
+
+```sh
 docker compose --profile livekit --profile app up -d --build
-pnpm stack:quiet                            # must exit 0 before any fleet number
-pnpm --filter @feather-lite/voice-worker fake-borrower-fleet -- --calls 5
 ```
 
-`LIVEKIT_NODE_IP` is the one setting a containerised call cannot do without, and it is load-bearing
-rather than cosmetic: it is the ICE candidate the SFU advertises. The default `127.0.0.1` is right
-for the browser demo and means *this container* to a worker in another one, so the call connects and
-then hears nothing. Use the machine's LAN address — it works from the host directly and from inside
-Docker Desktop's VM, because the media ports are published on the host.
+Configure `LIVEKIT_NODE_IP` to an address reachable by both the browser and containers. The console still runs separately. Telephone calls additionally require a configured SIP service and trunk; the current local stack does not include the SIP service.
 
-Two more things a fleet run needs, both from measurement rather than taste:
+For optional local Langfuse, run `pnpm lf:up` and configure its endpoint and keys as described in `.env.example`. This starts a separate tracing stack; it does not enable application tracing automatically.
 
-- **`RATE_LIMIT_BYPASS_TOKEN` set identically** on the server (it is read from your shell at
-  `docker compose up` time) and on the harness, or the harness is rate-limited by its own server.
-  Exempted requests are counted as `rate_limit_bypassed`, so the exemption is visible rather than
-  silent.
-- **`JUDGE_ENABLED=false` and `pnpm lf:down`.** The judge is a reasoning model called post-call and
-  the Langfuse stack is several containers; neither belongs in a latency measurement.
+## Development
 
-To serve *N* concurrent calls the worker's ceiling has to be **higher than N**: `WORKER_MAX_JOBS` is
-the denominator of the load the worker reports, and the SFU stops assigning at
-`WORKER_LOAD_THRESHOLD` (0.75), so a ceiling of ten serves eight or nine. The N=10 run uses
-`WORKER_MAX_JOBS=14`. `docker-compose.yml` carries the arithmetic and
-`apps/load-test/test/composeLimits.test.ts` asserts it against `mem_limit`.
-
-**Natively, through 2026-08-28.** The `start` pair is still here for comparison runs against the
-container numbers, and it is what every measurement before that date used. It is not what ships:
-
-```bash
-pnpm build                       # esbuild: one file per app
-pnpm start:server                # node apps/server/dist/main.js
-pnpm start:worker                # node apps/voice-worker/dist/agent.js start  (production mode)
+```sh
+pnpm check           # Agent setup validation, typechecks and ordinary tests
+pnpm build           # Server and voice worker
+pnpm console:build   # Operator console
 ```
 
-`start`, not `dev`: `dev` is `tsx` with the framework's development defaults and debug logging, and
-the fleet harness refuses to measure a `dev`-mode worker without `--allow-dev` for exactly that
-reason.
+Database tests use `pnpm test:db` and truncate their target tables. Run them only against a dedicated test database.
 
-`stack:quiet` exits non-zero under 3 GB available — the line a fleet run needs — **and on a stray
-host voice worker**, the failure where the run looks fine and the numbers belong to a process nobody
-is watching. `--allow-worker` is the escape when that worker is yours and deliberate. With the
-containers up it reads the memory available *inside the container VM*, which is where the worker
-tree lives; with none up it reads the host. It will not close your browser or run `wsl --shutdown` —
-both are yours — but it names them when they are the problem.
+## Find your way around
 
-**On Windows, WSL keeps the memory it has taken.** `vmmemWSL` has been seen holding 5.8 GB with every
-container stopped. `wsl --shutdown` returns it, and `autoMemoryReclaim=gradual` under
-`[experimental]` in `%USERPROFILE%\.wslconfig` stops it accumulating. With the stack *running* that
-number is supposed to be large — it is the worker tree — which is why `stack:quiet` only warns about
-it when nothing is up.
+| Directory | Purpose |
+| --- | --- |
+| `packages/domain` | Business rules and state transitions |
+| `packages/contracts` | API and streaming contracts |
+| `packages/control-plane` | Orchestration, persistence and background jobs |
+| `apps/server`, `apps/voice-worker` | API and voice runtimes |
+| `apps/console`, `apps/load-test` | Operator interface and load harness |
 
-### The images
-
-Both are `node:22-bookworm-slim`, non-root, health-checked, and built from the repo root so the pnpm
-workspace is intact — **505 MB server and 724 MB worker** as built here (`docker image ls`, Docker
-Desktop on Windows). CI builds the same two from the same commit on a Linux runner and reports
-**341 MB and 481 MB**. That gap is not explained and neither number is gated on; the CI job prints
-its sizes so a change is visible in the log of the commit that made it, and the figures quoted in
-`docs/loadtest/README.md` and ADR 0010 are the Docker Desktop ones, measured on the box the rest of
-those numbers come from. `docker buildx build --platform linux/amd64,linux/arm64` works for both —
-every native package the worker needs publishes a `linux-arm64-gnu` build — though only amd64 has
-been run here.
-
-CI builds both images, boots `--profile livekit --profile app` with a runner-local
-`LIVEKIT_NODE_IP`, and gates on the worker container's own healthcheck and the server's `/readyz`,
-so the artefact is tested and not only the source.
-
-### Voice with no cloud account (self-hosted LiveKit)
-
-The media server is a config value, not an architecture decision (ADR 0006). To run the whole stack
-locally, start the SFU and point `.env` at it:
-
-```bash
-pnpm lk:up                       # livekit-server in Docker: ws://127.0.0.1:7880 (+ UDP 7882 mux, TCP 7881)
-```
-
-```
-LIVEKIT_URL=ws://127.0.0.1:7880
-LIVEKIT_API_KEY=devkey
-LIVEKIT_API_SECRET=<deploy/livekit/livekit.yaml keys.devkey>
-STT_TTS_PROVIDER=plugins         # LiveKit Inference is Cloud-only; use Deepgram directly (nova-3 STT + Aura TTS)
-DEEPGRAM_API_KEY=...
-```
-
-Nothing else changes — the server, console and tracers work against either target. Going back to
-Cloud is the same four lines in reverse. SIP/PSTN stays Cloud-only (no `livekit-sip` locally); the
-worker fails such a call fast with a clear log line. Smoke the server with
-`pnpm --filter @feather-lite/voice-worker lk-smoke`.
-
-### Traces with no cloud account (self-hosted Langfuse)
-
-```bash
-pnpm lf:up                       # Langfuse 4 + its Postgres/ClickHouse/Redis/MinIO on http://127.0.0.1:3000
-```
-
-```
-LANGFUSE_PUBLIC_KEY=pk-lf-feather-lite-local
-LANGFUSE_SECRET_KEY=sk-lf-feather-lite-local
-LANGFUSE_BASE_URL=http://127.0.0.1:3000
-```
-
-Those keys are created on first boot by the compose file's headless initialisation, so there is no
-account to make and no UI to click through (sign in as `dev@feather-lite.local` / `feather-lite-local`
-if you want to browse). `LANGFUSE_ENABLED=false` silences the exporter without removing the keys —
-set it before a tier-1 load run, which would otherwise export a span per scripted turn.
-
-### Tests
-
-```bash
-pnpm check                       # typecheck + unit tests (domain 387, control-plane 101, voice-worker 114, load-test 48)
-pnpm test:db                     # 120 DB tests on Postgres: 20 scenarios, repos, concurrency, superseded transcript, workers, LLM leak, SLO segments
-pnpm --filter @feather-lite/voice-worker fake-borrower-fleet -- --calls 1 --in-proc --label one   # one real voice call + SPEC §10.5 equivalence assertion
-pnpm loadtest:tier1 -- --concurrency 100 --ramp 2      # control-plane load: 100 concurrent conversations
-pnpm loadtest:tier2 -- --calls 5 --label n5            # voice load: 5 concurrent real calls, each equivalence-checked (--label is required)
-```
-
-CI (`.github/workflows/ci.yml`) runs typecheck, unit tests and the DB suite against a Postgres
-service container. Both load harnesses gate on **correctness** — every conversation's final ledger
-must replay to the expected scripted outcome — and merely report latency. Measured numbers and the
-saturation analysis are in **`docs/loadtest/README.md`**.
-
-## Live, free, clickable demo
-
-`docs/deploy/free-tier-live-demo.md` is the runbook: Neon (Postgres), Cloudflare Tunnel (API URL),
-Cloudflare Pages (console), LiveKit Cloud Build (media), Deepgram + Cartesia (STT/TTS), optional
-Langfuse — total $0 plus cents of OpenAI. `pnpm tunnel` and `pnpm deploy:console` are wired; the
-console takes the API URL and bearer token from `?api=…#token=…`.
-
-## Not built (deliberately listed)
-
-- **PSTN dial-out** is wired (`createSipParticipant` + AMD → `amd_result` signal) but no SIP trunk
-  was configured, so it is not verified end to end.
-- **Always-on hosting** (Oracle Always Free VM) is documented, not exercised; the API is up while
-  the Node processes run.
-- **Horizontal scale** is untested. Load testing found the knee at ~70–95 turns/s on one Node
-  process and showed Postgres was nowhere near saturated (raising the pool made it slower, and after
-  the 2026-08-28 round-trip work the database accounts for under a second of a four-second run); a
-  second server process behind one port with leader-elected schedulers is the obvious next lever,
-  and it has not been run.
-- **The latency SLO at p95.** The N=10 acceptance run (2026-09-01) is the first with enough turns
-  for the verdict to be real — 30 against a minimum sample of 20 — and it reads **breach**:
-  `total_ms` p95 2 933 ms against a 2 500 ms target, and `transcription_delay_ms` 645 against 600.
-  It is not a regression; `total_ms` p95 has been over target on every run recorded here, and until
-  there were twenty turns to judge the verdict could only say `insufficient`. No single stage owns
-  it — at p50, 578 + 522 + 975 + 385 = 2 460 against 2 500 — so meeting it means taking time out of
-  two stages, which is what the fast path and the knob A/Bs in the turn-taking spec are for.
-- **MOS-class TTS quality** (UTMOS/NISQA). Python-only; deliberately not approximated. What is
-  measured instead is labelled a heuristic everywhere it appears — see ADR 0009.
-- **Production word error rate.** There is no ground truth for a live call; WER is a harness metric
-  and a fleet gate, and the console says so rather than showing an empty chart.
-- **Promise-kept rate.** Needs payment ingestion. `record_payment` is named as the missing input
-  rather than approximated from the promise date.
-- Semantic (embedding) override safety net, Durable Objects/Queues, Effect 4 — stretch items from
-  the plan.
+See the [architecture decisions](docs/adr/), [load-test evidence](docs/loadtest/README.md), and [plans and implementation handoffs](docs/plans/) for details.
