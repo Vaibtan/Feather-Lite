@@ -1,0 +1,5 @@
+interface:
+  display_name: "Pr"
+  short_description: "Describe PR behavior and actual validation"
+policy:
+  allow_implicit_invocation: true

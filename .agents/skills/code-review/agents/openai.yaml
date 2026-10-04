@@ -1,0 +1,5 @@
+interface:
+  display_name: "Code Review"
+  short_description: "Review scoped changes and concrete defects"
+policy:
+  allow_implicit_invocation: true

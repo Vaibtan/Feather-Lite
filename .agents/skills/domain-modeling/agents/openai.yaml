@@ -1,0 +1,5 @@
+interface:
+  display_name: "Domain Modeling"
+  short_description: "Clarify domain vocabulary and decisions"
+policy:
+  allow_implicit_invocation: true

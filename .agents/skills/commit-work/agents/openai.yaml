@@ -1,0 +1,5 @@
+interface:
+  display_name: "Commit Work"
+  short_description: "Stage intended changes and make scoped commits"
+policy:
+  allow_implicit_invocation: false

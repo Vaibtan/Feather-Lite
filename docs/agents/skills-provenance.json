@@ -1,0 +1,247 @@
+{
+  "version": 1,
+  "hashAlgorithm": "sha256",
+  "upstreamHashes": "skills-lock.json preserves installer source hashes; localFiles below identify our adaptations.",
+  "skills": {
+    "anti-slop": {
+      "allowImplicitInvocation": false,
+      "origin": {
+        "repository": null,
+        "revision": null,
+        "revisionNote": "New project-local manual review wrapper. Vendored dmmulroy/anti-slop runtime provenance is in tools/oxlint/anti-slop/UPSTREAM.md."
+      },
+      "originalSkillSha256": null,
+      "adaptation": "Explicit-only source review/cleanup using pinned vendored plugins; no implicit invocation or automatic lint runs in check/CI; contextual assessment rather than blanket rewrites.",
+      "localFiles": {
+        "agents/openai.yaml": "79309a36e776c09e6a5208b3d0254add8d54913cb431a2ccf9747de26340cb37",
+        "SKILL.md": "c8411c047308e2ae2d8e450f8f7682c7a5dbdf94419fb31d931bb390a9444aec"
+      }
+    },
+    "code-review": {
+      "allowImplicitInvocation": true,
+      "origin": {
+        "repository": "https://github.com/mattpocock/skills",
+        "path": "skills/engineering/code-review/SKILL.md",
+        "revision": null,
+        "revisionNote": "Original installed revision unavailable; pristine setup-before.zip and installer hash are preserved."
+      },
+      "originalSkillSha256": "3abbdfe52540f9242e16589fae2cc423b3d98994c37683944462b29bab89495c",
+      "adaptation": "Cover staged, unstaged, and relevant untracked changes; pin review target; report evidence-based findings.",
+      "localFiles": {
+        "agents/openai.yaml": "3e81b4d1d2555197b23fb212cd9de044342884e858b2343bf8c1086d9538355c",
+        "SKILL.md": "62a8fd76f4b5e49d1be2ac044538005db2b1d07bcc79d1fbd4f0a99001acc809"
+      }
+    },
+    "codebase-design": {
+      "allowImplicitInvocation": true,
+      "origin": {
+        "repository": "https://github.com/mattpocock/skills",
+        "path": "skills/engineering/codebase-design/SKILL.md",
+        "revision": null,
+        "revisionNote": "Original installed revision unavailable; pristine setup-before.zip and installer hash are preserved."
+      },
+      "originalSkillSha256": "362b0bec828219d9f4b08ca7c466164e67253bdd817359258e60d2e9c5692a8f",
+      "adaptation": "Use depth/locality as heuristics; preserve Effect terminology, exports, and meaningful internal tests.",
+      "localFiles": {
+        "agents/openai.yaml": "7625e5b22b40a85f65bc1a9187144ea0db12105a9611a1a0bfb0f2fec2979391",
+        "SKILL.md": "ca4f4b6d04af8a4f8a79b9725e83757a29894232eace5a57b606b4b581f5e7ce"
+      }
+    },
+    "commit-work": {
+      "allowImplicitInvocation": false,
+      "origin": {
+        "repository": null,
+        "revision": null,
+        "revisionNote": "Preexisting local Claude skill; upstream origin unknown; pristine snapshot preserved."
+      },
+      "originalSkillSha256": "7835b17f36ac2eafe2634e1332c286fe0c6edcaf42306ae81c2097734e6ebef8",
+      "adaptation": "Explicit commits/staging; preserve unrelated work; project convention rather than compulsory Conventional Commits.",
+      "localFiles": {
+        "agents/openai.yaml": "8c6d2886b1dba48995938df6d0d0dcec6d4a8f4be3749985994e07f036ee7973",
+        "SKILL.md": "0583781e1cc0cc6b8fd09dd98dab0c8be093c8dcc928e038cf320ab59c0e0121"
+      }
+    },
+    "diagnosing-bugs": {
+      "allowImplicitInvocation": true,
+      "origin": {
+        "repository": "https://github.com/mattpocock/skills",
+        "path": "skills/engineering/diagnosing-bugs/SKILL.md",
+        "revision": null,
+        "revisionNote": "Original installed revision unavailable; pristine setup-before.zip and installer hash are preserved."
+      },
+      "originalSkillSha256": "d96335b1fdb635ba948d46d082c9fbb3ebc135aafe11fe6460d422ca97181bcf",
+      "adaptation": "Permit evidence-led hypotheses and scale reproduction/measurement to the issue.",
+      "localFiles": {
+        "agents/openai.yaml": "65b0090428392c9292941f85aea25869808c59592bd5bd6ae21ef62e09d7312a",
+        "SKILL.md": "c065eb5f7e64763657db11d51cc87bdf911175c83015c6edef0831f2f5390526"
+      }
+    },
+    "domain-modeling": {
+      "allowImplicitInvocation": true,
+      "origin": {
+        "repository": "https://github.com/mattpocock/skills",
+        "path": "skills/engineering/domain-modeling/SKILL.md",
+        "revision": null,
+        "revisionNote": "Original installed revision unavailable; pristine setup-before.zip and installer hash are preserved."
+      },
+      "originalSkillSha256": "b62d997256cc073e123d4303da8e9db00db0e28de9739660ca3e55ab76e09cdb",
+      "adaptation": "Align lazy glossary and ADR convention; no empty scaffolding.",
+      "localFiles": {
+        "agents/openai.yaml": "147425bc1ad36bf8073d3fb8b1c867ac50f129449860e98d90909a1529a5f9f3",
+        "SKILL.md": "11fe3f9badb6f6422bc2c50183a6ceec8cde95aef5beec1d3b00d23dd4912631"
+      }
+    },
+    "effect-service-design": {
+      "allowImplicitInvocation": true,
+      "origin": {
+        "repository": "https://github.com/dmmulroy/skills",
+        "revision": "8603380821fee6a77c82639f364ce8fe4f5a92be",
+        "path": "effect-service-design/SKILL.md"
+      },
+      "originalSkillSha256": "9c2f4627486a8337fc40f8ead8d15bc584c3d1dded4c75dec10cea2e66ff425a",
+      "adaptation": "Selective authority/lifetime workflow; Effect 3 Context.Tag/Effect.Service rather than upstream Context.Service; no broad coding-standards import.",
+      "localFiles": {
+        "agents/openai.yaml": "13990fd8f61e344f1ca96d26c4ff9fb8eb7860c6442d892bedff45230c2d64b9",
+        "LICENSE": "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5",
+        "references/effect3.md": "8ce7fa36b7b94fd84c19b48ffd0d69fcbb78cdc88bfaa33813cdc41c45304799",
+        "SKILL.md": "820eb662f931abceff5aec6ffb6308dde408034467a788f7d7a4dcaf4a682ad3"
+      }
+    },
+    "grilling": {
+      "allowImplicitInvocation": false,
+      "origin": {
+        "repository": "https://github.com/mattpocock/skills",
+        "path": "skills/productivity/grilling/SKILL.md",
+        "revision": null,
+        "revisionNote": "Original installed revision unavailable; pristine setup-before.zip and installer hash are preserved."
+      },
+      "originalSkillSha256": "d806733216b16e51adad834e724bfec5540a436d06395bfc75b843cda9f7404b",
+      "adaptation": "Merge grill aliases; bounded explicit interview; reuse prior answers.",
+      "localFiles": {
+        "agents/openai.yaml": "b799defdeab7393113d18f928fb37f941e3dcfeb8de0c2fbcb40be9cb47755cd",
+        "SKILL.md": "209227ba5073e7aac645a213a388974fc9f20989507cca177cf0dcdb3a296b06"
+      }
+    },
+    "handoff": {
+      "allowImplicitInvocation": false,
+      "origin": {
+        "repository": "https://github.com/mattpocock/skills",
+        "path": "skills/productivity/handoff/SKILL.md",
+        "revision": null,
+        "revisionNote": "Original installed revision unavailable; pristine setup-before.zip and installer hash are preserved."
+      },
+      "originalSkillSha256": "96f8045f01f569daa3737150d918b7201ccd090905fb10cefedd326e4001f551",
+      "adaptation": "Portable local continuation artifact; no Claude process launch or implied messaging.",
+      "localFiles": {
+        "agents/openai.yaml": "932887263a138bda01c52055891183574fcd7101a7141e60e45e34f797f6ef0c",
+        "SKILL.md": "6665399c82be0d960d3057a382485a414407e8105b54b70981d5848d7ddb4fce"
+      }
+    },
+    "improve-codebase-architecture": {
+      "allowImplicitInvocation": false,
+      "origin": {
+        "repository": "https://github.com/mattpocock/skills",
+        "path": "skills/engineering/improve-codebase-architecture/SKILL.md",
+        "revision": null,
+        "revisionNote": "Restored from pristine setup-before.zip; original installed revision unavailable; installer hash preserved."
+      },
+      "originalSkillSha256": "f053ff6d7a70f10bd0104e368f7e664b23ea6378898e305bf027e8864757822f",
+      "adaptation": "Preserve broad hotspot/delegated survey, ranked HTML before/after report, candidate selection, and design interview/domain records. Replace Claude tool calls with shared skill file reads and Codex collaboration/panels; adapt Windows temp/report serving; preserve explicit-only metadata and current Effect terminology.",
+      "localFiles": {
+        "agents/openai.yaml": "c8cb20f68ebf0edb4e497bc11ae5fcaa196004e661cd189015b04f4109ced7f1",
+        "HTML-REPORT.md": "485fcb66bba3729229fbabeb8d4680be35d4a595074ff7395efb1d5d413acdfa",
+        "SKILL.md": "0c93ee160c83116a13b2a3758b92fe0a224ffd77e11931899a90f49668d13429"
+      }
+    },
+    "pr": {
+      "allowImplicitInvocation": true,
+      "origin": {
+        "repository": "https://github.com/mattpocock/skills",
+        "path": "skills/engineering/pr/SKILL.md",
+        "revision": null,
+        "revisionNote": "Original installed revision unavailable; pristine setup-before.zip and installer hash are preserved."
+      },
+      "originalSkillSha256": "57658baca2e50e9cf98fdb6b74a51f2afd34b71019d516f7c5d45a51a28354b0",
+      "adaptation": "Concise behavior and actual validation; conditional visuals and authorized publication.",
+      "localFiles": {
+        "agents/openai.yaml": "0c128f174a7d6f8c826df442812f26a895944f5223e50b49d1f205135bdd68ce",
+        "SKILL.md": "a5cf065f99e38ca867f9686fcc4360e88b5390ae733a6e4bbd36d1872d55fd81"
+      }
+    },
+    "prototype": {
+      "allowImplicitInvocation": true,
+      "origin": {
+        "repository": "https://github.com/mattpocock/skills",
+        "path": "skills/engineering/prototype/SKILL.md",
+        "revision": null,
+        "revisionNote": "Original installed revision unavailable; pristine setup-before.zip and installer hash are preserved."
+      },
+      "originalSkillSha256": "f74ae01f4fc454d3a4ef21271920f1706e626271e715dda0559e489f45c792c3",
+      "adaptation": "Bound the question and scratch artifacts; no automatic commit.",
+      "localFiles": {
+        "agents/openai.yaml": "31e17ac8ea6213b4f49cb403c7394f9fc3c3e46a40eddd53014df8b909cf03f1",
+        "SKILL.md": "db0c3003df8bf49ab640d0a311d7e787f2d34f47008c9ea59acf14b922e43a72"
+      }
+    },
+    "research": {
+      "allowImplicitInvocation": true,
+      "origin": {
+        "repository": "https://github.com/mattpocock/skills",
+        "path": "skills/engineering/research/SKILL.md",
+        "revision": null,
+        "revisionNote": "Original installed revision unavailable; pristine setup-before.zip and installer hash are preserved."
+      },
+      "originalSkillSha256": "524b404b1ca373a8b00f63a64667ec4b0a61c3c9cf4e8f246e639be859bb6979",
+      "adaptation": "Current primary sources; bounded optional delegation; reuse docs helpers.",
+      "localFiles": {
+        "agents/openai.yaml": "14093e23aed7a3df355d13e3f9eb4610cfd9d6a4f7a6f993ba50318451762b68",
+        "SKILL.md": "5de37ab523432833702323b8264ca662ee6d117fbf48ff14060649616608702a"
+      }
+    },
+    "tdd": {
+      "allowImplicitInvocation": true,
+      "origin": {
+        "repository": "https://github.com/mattpocock/skills",
+        "path": "skills/engineering/tdd/SKILL.md",
+        "revision": null,
+        "revisionNote": "Original installed revision unavailable; pristine setup-before.zip and installer hash are preserved."
+      },
+      "originalSkillSha256": "4628e71926527715c2e1336b518126b7df037c2b177d15eec51c856eae5c048b",
+      "adaptation": "Behavioral cycles; reuse seams and Effect test patterns; no repeated approval.",
+      "localFiles": {
+        "agents/openai.yaml": "f026185b33e8b7b001e8b534e0746b9171063c6e3f6f538448ea382f590f98a0",
+        "SKILL.md": "3d4e8ff3b4d8b5a7f52b6140b7a7264d4311881b8eabe6634035ce513c74e154"
+      }
+    },
+    "to-spec": {
+      "allowImplicitInvocation": false,
+      "origin": {
+        "repository": "https://github.com/mattpocock/skills",
+        "path": "skills/engineering/to-spec/SKILL.md",
+        "revision": null,
+        "revisionNote": "Original installed revision unavailable; pristine setup-before.zip and installer hash are preserved."
+      },
+      "originalSkillSha256": "c73a2250beac0479e384f5466e834bb54ce6e30b7f8705e9999ba840d9d59b36",
+      "adaptation": "Reuse agreed design; actionable acceptance criteria; publication only when requested.",
+      "localFiles": {
+        "agents/openai.yaml": "cd829486be74c54fa40f7a39b0e6dcf05ef92324a16355ab5da03b7e683a752b",
+        "SKILL.md": "7a8bcba9512a4b98fdcccd8a9b41ff0baa0175a913122233f7044009541a92e8"
+      }
+    },
+    "to-tickets": {
+      "allowImplicitInvocation": false,
+      "origin": {
+        "repository": "https://github.com/mattpocock/skills",
+        "path": "skills/engineering/to-tickets/SKILL.md",
+        "revision": null,
+        "revisionNote": "Original installed revision unavailable; pristine setup-before.zip and installer hash are preserved."
+      },
+      "originalSkillSha256": "8082bc6ef165027c5df3215763055f4a9668878bf27f25f582db78a14c3ed3c1",
+      "adaptation": "Verifiable slices and actual dependencies; no automatic implementation/publication.",
+      "localFiles": {
+        "agents/openai.yaml": "ff45618f3651c5580b47b2c6fc66699fe0d9819c89641afeef956e732c0fa6cf",
+        "SKILL.md": "6f70bbc233585f9949b4ced69cdb70bb2af79f526cb3fb5014754747a1232d04"
+      }
+    }
+  }
+}

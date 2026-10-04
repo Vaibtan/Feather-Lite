@@ -32,6 +32,7 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm validate:agents
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm --filter @feather-lite/control-plane test:db

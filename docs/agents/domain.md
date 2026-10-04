@@ -1,28 +1,7 @@
-# Domain Docs
+# Domain documentation
 
-How the engineering skills should consume this repo's domain documentation when exploring the codebase.
+This is a single-context repository. Read root `GLOSSARY.md` if it exists and the ADRs governing the affected area in `docs/adr/`. A missing glossary is normal; create it only when recording resolved project-specific terminology.
 
-## Before exploring, read these
+Use the glossary's agreed terms and avoided synonyms. For each new term, give a concise definition and an example when adjacent concepts are easy to confuse. Do not duplicate generic TypeScript or Effect terminology.
 
-- **`CONTEXT.md`** at the repo root, or
-- **`CONTEXT-MAP.md`** at the repo root if it exists.
-- **`docs/adr/`** — read ADRs that touch the area you're about to work in.
-
-If these files don't exist, proceed silently. The domain-modeling skill creates them lazily when terms or decisions are resolved.
-
-## File structure
-
-This is a single-context repository:
-
-/
-├── CONTEXT.md
-├── docs/adr/
-└── src/
-
-## Use the glossary's vocabulary
-
-When output names a domain concept, use the term defined in `CONTEXT.md`. Do not drift to synonyms the glossary explicitly avoids.
-
-## Flag ADR conflicts
-
-If output contradicts an existing ADR, surface it explicitly rather than silently overriding it.
+ADRs use sequential filenames such as `0011-short-decision.md`. Record context, decision, and reason; add alternatives or consequences when useful. Record a decision when it is consequential, reflects a real tradeoff, and would be surprising without its rationale. Surface conflicts and identify superseded ADRs explicitly. No empty glossary or context-map scaffolding is required.

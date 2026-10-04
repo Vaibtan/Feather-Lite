@@ -6,14 +6,14 @@
   "type": "module",
   "packageManager": "pnpm@11.22.0",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.18.0"
   },
   "scripts": {
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
     "test:db": "pnpm -r --if-present test:db",
-    "lint": "pnpm -r --if-present lint",
-    "check": "pnpm typecheck && pnpm test",
+    "lint": "oxlint --config .oxlintrc.json apps packages scripts",
+    "check": "pnpm validate:agents && pnpm typecheck && pnpm test",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
     "lk:up": "docker compose --profile livekit up -d livekit",
@@ -36,11 +36,15 @@
     "start:worker": "pnpm --filter @feather-lite/voice-worker build && node apps/voice-worker/dist/agent.js start",
     "console:build": "pnpm --filter @feather-lite/console build",
     "deploy:console": "pnpm console:build && npx wrangler pages deploy apps/console/dist --project-name feather-lite-console",
-    "tunnel": "cloudflared tunnel --url http://127.0.0.1:8080"
+    "tunnel": "cloudflared tunnel --url http://127.0.0.1:8080",
+    "lint:baseline": "oxlint --config .oxlintrc.baseline.json apps packages scripts",
+    "validate:agents": "node scripts/validate-agent-setup.mjs"
   },
   "devDependencies": {
     "@effect/vitest": "^0.30.0",
+    "@oxlint/plugins": "1.78.0",
     "esbuild": "^0.28.2",
+    "oxlint": "1.78.0",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"

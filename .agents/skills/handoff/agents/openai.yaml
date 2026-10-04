@@ -1,0 +1,5 @@
+interface:
+  display_name: "Handoff"
+  short_description: "Capture actionable context for continuation"
+policy:
+  allow_implicit_invocation: false

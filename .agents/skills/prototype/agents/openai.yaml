@@ -1,0 +1,5 @@
+interface:
+  display_name: "Prototype"
+  short_description: "Prototype a concrete design uncertainty"
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,15 @@
+# Project skills
+
+The curated project skills live in `.agents/skills` and are versioned. Their descriptions provide the trigger; read instructions and references only when relevant. `pnpm validate:agents` checks the inventory, metadata, local reference targets, and recorded local content hashes.
+
+Anti-slop reviews, architecture surveys, interview, handoff, specification, ticket slicing, and commit workflows require explicit invocation. Other skills have narrow implicit triggers. Ordinary implementation does not need a workflow router. Use maintained global OpenAI Docs, find-docs, and skill-creator guidance instead of duplicating them here.
+
+Use `$improve-codebase-architecture` for the restored broad workflow: scope from the requested area or Git hotspots, delegate read-only exploration, present ranked candidates in an HTML report with before/after diagrams, choose a candidate, then develop its design through grilling and domain records. It reads the shared design and Effect skills rather than duplicating their principles. The survey stops for candidate selection and does not automatically implement refactors. The project currently has 16 skills: seven explicit-only and nine with narrow implicit triggers.
+
+Use `$anti-slop` for a manual source review, or `$anti-slop clean up <scope>` for requested fixes. This is a project-local wrapper around the vendored upstream Oxlint plugins. It evaluates findings in context, including the project's intentional Effect 3 and boundary patterns. Anti-slop is excluded from normal verification and CI; its scans and fixes require an explicit user request. Manual lint commands remain available, and ordinary setup validation only checks configuration integrity without executing Oxlint.
+
+`skills-lock.json` preserves installer provenance/hash records for retained mattpocock origins. Those hashes describe the installed upstream source, not our rewritten content; do not use an automatic installer update to overwrite local adaptations. `docs/agents/skills-provenance.json` records each local artifact's SHA-256, origin, and adaptations. The new Effect skill is adapted from a pinned dmmulroy revision; the preexisting commit skill had no verifiable upstream revision.
+
+To change a skill, use maintained skill-creator guidance, keep the trigger precise, repair relative references, update its local hashes in the provenance manifest, and run `pnpm validate:agents`. Hashes are of UTF-8 file bytes with LF newlines; use `git hash-object` only for Git object IDs, not these SHA-256 values. Do not add broad overlapping standards/TDD/spec routers. Update the manifest deliberately when adding/removing a workflow.
+
+The retired originals and Claude links were archived outside discovery. The dated implementation receipt in docs/reviews records the backup location and validation. Restore an optional workflow only for an actual need and adapt its runtime assumptions first. A fresh Codex chat is needed to verify refreshed catalog discovery; structural checks in an existing chat cannot prove catalog refresh or model performance.

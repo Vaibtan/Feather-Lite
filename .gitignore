@@ -1,4 +1,6 @@
-.agents/
+.agents/*
+!.agents/skills/
+.commandcode/
 .claude/
 .mcp.json
 excalidraw.log

@@ -1,0 +1,5 @@
+interface:
+  display_name: "Anti Slop"
+  short_description: "Review anti-slop findings only on request"
+policy:
+  allow_implicit_invocation: false

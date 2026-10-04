@@ -1,0 +1,5 @@
+interface:
+  display_name: "Effect Service Design"
+  short_description: "Design Effect services, Layers, and lifetimes"
+policy:
+  allow_implicit_invocation: true
