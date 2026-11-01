@@ -121,7 +121,7 @@ importers:
         version: 2.17.0
       openai:
         specifier: ^6.49.0
-        version: 6.49.0(ws@8.21.3)(zod@3.25.76)
+        version: 6.49.0(ws@8.21.3)(zod@4.6.7)
       pg:
         specifier: ^8.23.0
         version: 8.23.0
@@ -152,10 +152,10 @@ importers:
         version: 0.97.1(effect@3.22.1)
       '@livekit/agents':
         specifier: 1.6.4
-        version: 1.6.4(patch_hash=e990fc292154aa9eccfd424e0a8f6ce8d8a6dccb044b60827180b669bd1b754f)(@livekit/rtc-node@0.13.33)(@types/node@22.20.1)(typescript@5.9.3)(zod@3.25.76)
+        version: 1.6.4(patch_hash=e990fc292154aa9eccfd424e0a8f6ce8d8a6dccb044b60827180b669bd1b754f)(@livekit/rtc-node@0.13.33)(@types/node@22.20.1)(typescript@5.9.3)(zod@4.6.7)
       '@livekit/agents-plugin-deepgram':
         specifier: 1.6.4
-        version: 1.6.4(patch_hash=71c20712d2e7cb2ea15ccc749a6da5e0f6faf98f6af211943c374c41e0648860)(@livekit/agents@1.6.4(patch_hash=e990fc292154aa9eccfd424e0a8f6ce8d8a6dccb044b60827180b669bd1b754f)(@livekit/rtc-node@0.13.33)(@types/node@22.20.1)(typescript@5.9.3)(zod@3.25.76))(@livekit/rtc-node@0.13.33)
+        version: 1.6.4(patch_hash=71c20712d2e7cb2ea15ccc749a6da5e0f6faf98f6af211943c374c41e0648860)(@livekit/agents@1.6.4(patch_hash=e990fc292154aa9eccfd424e0a8f6ce8d8a6dccb044b60827180b669bd1b754f)(@livekit/rtc-node@0.13.33)(@types/node@22.20.1)(typescript@5.9.3)(zod@4.6.7))(@livekit/rtc-node@0.13.33)
       '@livekit/rtc-node':
         specifier: ^0.13.33
         version: 0.13.33
@@ -169,8 +169,8 @@ importers:
         specifier: ^2.17.0
         version: 2.17.0
       zod:
-        specifier: ^3.25.0
-        version: 3.25.76
+        specifier: ^4.6.6
+        version: 4.6.7
     devDependencies:
       '@feather-lite/contracts':
         specifier: workspace:*
@@ -256,7 +256,7 @@ importers:
         version: 2.17.0
       openai:
         specifier: ^6.8.1
-        version: 6.49.0(ws@8.21.3)(zod@3.25.76)
+        version: 6.49.0(ws@8.21.3)(zod@4.6.7)
       pg:
         specifier: ^8.16.0
         version: 8.23.0
@@ -1018,12 +1018,14 @@ packages:
   '@opentelemetry/sdk-trace-base@2.10.0':
     resolution: {integrity: sha512-GuYQQT7QD2EeO8lcZLRQzcbOyhqAzL+6WWTKTU9mSUBYBazkEDl+VrQcXQhbB08OWM9anD1aHleVadzulpOaUQ==}
     engines: {node: ^18.19.0 || >=20.6.0}
+    deprecated: Use @opentelemetry/sdk-trace package
     peerDependencies:
       '@opentelemetry/api': '>=1.3.0 <1.10.0'
 
   '@opentelemetry/sdk-trace-node@2.10.0':
     resolution: {integrity: sha512-GZK/G6oZyBLGlH1pUgeDch7D91KoHd2uotUGIkWCPi9GI5T9X0p4L7nNAMDR1BQjkRYoDqo+ddfVx9t5Uhys+Q==}
     engines: {node: ^18.19.0 || >=20.6.0}
+    deprecated: Use @opentelemetry/sdk-trace package
     peerDependencies:
       '@opentelemetry/api': '>=1.0.0 <1.10.0'
 
@@ -2500,8 +2502,8 @@ packages:
     peerDependencies:
       zod: ^3.25.28 || ^4
 
-  zod@3.25.76:
-    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
+  zod@4.6.7:
+    resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
 snapshots:
 
@@ -2814,16 +2816,16 @@ snapshots:
       '@langfuse/core': 5.10.1(@opentelemetry/api@1.9.1)
       '@opentelemetry/api': 1.9.1
 
-  '@livekit/agents-plugin-deepgram@1.6.4(patch_hash=71c20712d2e7cb2ea15ccc749a6da5e0f6faf98f6af211943c374c41e0648860)(@livekit/agents@1.6.4(patch_hash=e990fc292154aa9eccfd424e0a8f6ce8d8a6dccb044b60827180b669bd1b754f)(@livekit/rtc-node@0.13.33)(@types/node@22.20.1)(typescript@5.9.3)(zod@3.25.76))(@livekit/rtc-node@0.13.33)':
+  '@livekit/agents-plugin-deepgram@1.6.4(patch_hash=71c20712d2e7cb2ea15ccc749a6da5e0f6faf98f6af211943c374c41e0648860)(@livekit/agents@1.6.4(patch_hash=e990fc292154aa9eccfd424e0a8f6ce8d8a6dccb044b60827180b669bd1b754f)(@livekit/rtc-node@0.13.33)(@types/node@22.20.1)(typescript@5.9.3)(zod@4.6.7))(@livekit/rtc-node@0.13.33)':
     dependencies:
-      '@livekit/agents': 1.6.4(patch_hash=e990fc292154aa9eccfd424e0a8f6ce8d8a6dccb044b60827180b669bd1b754f)(@livekit/rtc-node@0.13.33)(@types/node@22.20.1)(typescript@5.9.3)(zod@3.25.76)
+      '@livekit/agents': 1.6.4(patch_hash=e990fc292154aa9eccfd424e0a8f6ce8d8a6dccb044b60827180b669bd1b754f)(@livekit/rtc-node@0.13.33)(@types/node@22.20.1)(typescript@5.9.3)(zod@4.6.7)
       '@livekit/rtc-node': 0.13.33
       ws: 8.21.3
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
 
-  '@livekit/agents@1.6.4(patch_hash=e990fc292154aa9eccfd424e0a8f6ce8d8a6dccb044b60827180b669bd1b754f)(@livekit/rtc-node@0.13.33)(@types/node@22.20.1)(typescript@5.9.3)(zod@3.25.76)':
+  '@livekit/agents@1.6.4(patch_hash=e990fc292154aa9eccfd424e0a8f6ce8d8a6dccb044b60827180b669bd1b754f)(@livekit/rtc-node@0.13.33)(@types/node@22.20.1)(typescript@5.9.3)(zod@4.6.7)':
     dependencies:
       '@bufbuild/protobuf': 1.10.1
       '@livekit/av': 10.0.0
@@ -2854,14 +2856,14 @@ snapshots:
       jsonrepair: 3.15.0
       livekit-server-sdk: 2.17.0
       ofetch: 1.5.1
-      openai: 6.49.0(ws@8.21.3)(zod@3.25.76)
+      openai: 6.49.0(ws@8.21.3)(zod@4.6.7)
       pidusage: 4.0.1
       pino: 8.21.0
       pino-pretty: 11.3.0
       sharp: 0.35.3(@types/node@22.20.1)
       ws: 8.21.3
-      zod: 3.25.76
-      zod-to-json-schema: 3.25.2(zod@3.25.76)
+      zod: 4.6.7
+      zod-to-json-schema: 3.25.2(zod@4.6.7)
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-node'
       - '@smithy/hash-node'
@@ -3863,10 +3865,10 @@ snapshots:
     dependencies:
       wrappy: 1.0.2
 
-  openai@6.49.0(ws@8.21.3)(zod@3.25.76):
+  openai@6.49.0(ws@8.21.3)(zod@4.6.7):
     optionalDependencies:
       ws: 8.21.3
-      zod: 3.25.76
+      zod: 4.6.7
 
   oxlint@1.78.0:
     optionalDependencies:
@@ -4391,8 +4393,8 @@ snapshots:
 
   xtend@4.0.2: {}
 
-  zod-to-json-schema@3.25.2(zod@3.25.76):
+  zod-to-json-schema@3.25.2(zod@4.6.7):
     dependencies:
-      zod: 3.25.76
+      zod: 4.6.7
 
-  zod@3.25.76: {}
+  zod@4.6.7: {}
